@@ -65,6 +65,9 @@ Util/new_intensity_thred                : 2.0
 Util/terrain_free_Z                     : 0.2
 # 检测到动态障碍时的阈值。越大，越不容易因为少量点就认为有动态障碍
 Util/dyosb_update_thred                 : 4
+# 在半径 kMatchDist 范围内，统计新增点云中落在该点附近的点数 near_c，然后：
+# 若是创建新节点场景：阈值取 KNewPointC / 2（即 5/2 ≈ 2），更宽松，容易认定"附近有新增点"
+# 若是更新已有节点场景：阈值取 KNewPointC（即 5），更严格
 Util/new_point_counter                  : 5
 # 动态障碍点在地图里保留多久。越大，系统越不容易“忘记”刚刚看到的动态障碍
 # 先把它从“长期/当前静态障碍地图”中移除
@@ -74,15 +77,36 @@ Util/dynamic_obs_dacay_time             : 10.0 # Unit: second
 Util/new_points_decay_time              : 1.0  # Unit: second
 
 # Dynamic Graph Params
+# 创建入口在 dynamic_graph.h:537，可以看到同一套 NavNode 会被标记成不同“角色”：
+# 里程计节点（is_odom）
+# 中间导航点（is_navpoint）
+# 目标点（is_goal）
+# 边界点（is_boundary）
+# 普通由轮廓提取出来的导航候选点
+
+# 连边投票窗口大小。两节点是否真正连通，不是一次判断决定，而是看最近 N 次投票结果。值越大越稳（不容易误连、误断），但响应更慢；值越小更灵敏，但更容易抖动。
 Graph/connect_votes_size                : 10
+# 节点清除计数阈值。某节点连续“复检失败”超过阈值才会被真正清掉。值越大越稳（不容易误删），但响应更慢；值越小更灵敏，但更容易误删。
 Graph/clear_dumper_thred                : 4
+# 节点“定型”阈值。用于多个地方的最终确认：地形连通投票、frontier 判定、位置/方向 RANSAC 内点数、轨迹边失效计数。值大更稳定但慢，值小更快但易受噪声影响。
 Graph/node_finalize_thred               : 6
+# 节点位置和表面方向滤波缓存池大小（滑动窗口长度），RANSAC 从这批样本里做稳健估计。值大更平滑更抗噪，但对突变反应慢；值小更跟手，但易抖动。
 Graph/filter_pool_size                  : 12
 
-# Corner Detector Params
+# Corner Detector Params  控制“把障碍点云投影成图像后怎么提轮廓”。
+# 图像放大倍数（轮廓提取前先 resize）。
+# 大一些：轮廓点更密、角点更细，但计算量更高；
+# 小一些：更快，但细节容易丢，角点可能更粗糙。
 CDetector/resize_ratio                  : 3.0
+# 二值化阈值。每个像素周围累计到多少“点云命中计数”才算障碍。
+# 大一些：更保守，弱噪声会被滤掉，但细小障碍可能消失；
+# 小一些：更敏感，小障碍更容易保留，但噪声也更容易进来
 CDetector/filter_count_value            : 3
+# 是否把中间生成的障碍图保存到磁盘
+# true：便于调试（能回看每帧图像），但会有 I/O 开销；
+# false：不落盘，运行更轻。
 CDetector/is_save_img                   : false
+# 保存图像的目录路径（仅在 is_save_img=true 时有效）。
 CDetector/img_folder_path               : /path
 
 # Graph Planner Params

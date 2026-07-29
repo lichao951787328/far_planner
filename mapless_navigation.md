@@ -16,3 +16,9 @@ graph可以保留，全地图（自由、障碍、可通行）给我的高程图
 
 
 先不考虑里程计的误差+自己维护代价地图+传统的局部规划器。
+
+
+把 Util/dyosb_update_thred 从 4 降到 2（先试）
+把 Util/dynamic_obs_dacay_time 从 10 降到 3-5
+把 CDetector/filter_count_value 从 3 提到 4 或 5（减少稀疏伪轮廓）
+若仍有“厚边”，再评估 Util/obs_inflate_size 是否过于保守
