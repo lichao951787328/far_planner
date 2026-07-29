@@ -1,0 +1,106 @@
+# Dynamic Planner Default Params
+main_run_freq                           : 2.5
+# 表示体素大小，也就是点云降采样/体素滤波时的网格尺寸。
+voxel_dim                               : 0.15  # Unit: meter
+# 表示机器人的几何尺寸/半径（这里更接近机器人占用半径或安全半径）。
+robot_dim                               : 0.8   # Unit: meter
+# 计算哪些点被认为是可通行/可碰撞的高度范围
+# 影响地形高度和障碍过滤时的上下限判断
+# 如果你的系统是用激光雷达做障碍感知，那么它不一定等于雷达安装高度，而是更接近“机器人本体/车身允许通过的高度阈值”
+vehicle_height                          : 0.75  # Unit: meter
+sensor_range                            : 30.0  # Unit: meter
+# 主要用于局部地形/周围环境分析的范围
+terrain_range                           : 15.0  # Unit: meter
+# 局部规划器关注的范围。这个值越大，局部规划会更“看远一点”。
+local_planner_range                     : 5.0   # Unit: meter
+visualize_ratio                         : 0.75
+# 是否启用“视点前推/前视延伸”。也就是在规划路径时，沿着当前可通行方向把 waypoint 再往前推一点，形成更平滑的目标点。设为 true 时，路径更像“前瞻点”，会更顺滑。
+is_viewpoint_extend                     : true
+# 是否启用多层/多高度层的规划。
+# 这里是 false，说明当前用的是单层/普通的平面式规划。
+is_multi_layer                          : false
+is_opencv_visual                        : false # Obstalce Image Display
+is_static_env                           : false
+# 是否发布局部边界线给下游局部规划器。false 时不会把边界消息发布出去
+is_pub_boundary                         : false
+# 是否输出调试信息。true 时会打印更多日志、调试状态
+is_debug_output                         : false
+# 是否开启“自动切换到可尝试导航模式”的机制。
+is_attempt_autoswitch                   : true  # Auto switch to attemptable navigation
+world_frame                             : map
+
+# Graph Messager
+GraphMsger/robot_id                     : 1  # graph from robot id "0" is extracted from files
+
+# Map Handler Params
+# 表示地面/楼层的高度基准。这个值会影响点云被怎么划分到地面层和障碍层。地面应该空出多高来处理环境.
+MapHandler/floor_height                 : 2.0     # Unit: meter
+# 把整个环境切成很多小格子,每个格子的边长就是 cell_length
+MapHandler/cell_length                  : 5.0     # Unit: meter
+MapHandler/map_grid_max_length          : 1000.0  # Unit: meter
+MapHandler/map_grad_max_height          : 100.0   # Unit: meter
+
+# Dynamic Planner Utility Params
+# 作用：控制角度匹配时允许的噪声范围。
+# 代码里会把它转成弧度后用于图节点/轮廓匹配的角度判断。
+# 数值越大，越宽松；越容易把两个方向看成“对得上”。
+Util/angle_noise                        : 15.0 # Unit: degree
+# 作用：更严格的“接受对齐”的角度阈值。
+# 也就是“只有当夹角小于这个值时，才认为这两个几何方向是匹配的”。
+# 这里设成 4°，说明对齐要求比较严格。
+Util/accept_max_align_angle             : 4.0  # Unit: degree
+# 作用：对障碍区域做膨胀/扩张。
+# 例如设成 1，表示把检测到的障碍边缘稍微外扩一圈，避免机器人把障碍边缘附近当成可通行。
+# 数值越大，越保守。
+Util/obs_inflate_size                   : 1
+# 作用：决定“哪些点算新出现的点/新增障碍”。
+# 代码里是用强度值做比较，低于这个阈值时会被认为是新增点。
+# 阈值越大，越不容易把点判定为“新增”。
+Util/new_intensity_thred                : 2.0
+# 作用：把点云分成“自由点”和“障碍点”的高度差阈值。
+# 代码里是按点的 intensity 是否小于这个值来区分：
+# 小于它：归为自由点
+# 大于它：归为障碍点
+# 所以它直接影响当前帧里哪些点被认为可穿越、哪些被认为是障碍。
+Util/terrain_free_Z                     : 0.2
+# 检测到动态障碍时的阈值。越大，越不容易因为少量点就认为有动态障碍
+Util/dyosb_update_thred                 : 4
+Util/new_point_counter                  : 5
+# 动态障碍点在地图里保留多久。越大，系统越不容易“忘记”刚刚看到的动态障碍
+# 先把它从“长期/当前静态障碍地图”中移除
+# 但保留在“动态障碍临时缓冲”中，直到超时才真正丢弃
+Util/dynamic_obs_dacay_time             : 10.0 # Unit: second
+# 新增点的保留时间。越小，系统越快忘掉旧的新增点，适合更快更新。
+Util/new_points_decay_time              : 1.0  # Unit: second
+
+# Dynamic Graph Params
+Graph/connect_votes_size                : 10
+Graph/clear_dumper_thred                : 4
+Graph/node_finalize_thred               : 6
+Graph/filter_pool_size                  : 12
+
+# Corner Detector Params
+CDetector/resize_ratio                  : 3.0
+CDetector/filter_count_value            : 3
+CDetector/is_save_img                   : false
+CDetector/img_folder_path               : /path
+
+# Graph Planner Params
+# 目标收敛距离。越小，说明越希望机器人精确逼近目标。
+GPlanner/converge_distance              : 0.5  # Unit: meter
+# 目标附近的调整范围。越大，说明目标附近的规划更宽松。
+## 目标附近的调整范围。表示在目标附近，规划器允许把目标位置“往周围轻微调整”的范围。
+## 越大，说明在目标附近更宽松，规划器更容易找一个更容易到达的替代点；越小则更严格，偏向直接逼近精确目标。
+GPlanner/goal_adjust_radius             : 2.0  # Unit: meter
+# 影响“认为某块区域是空闲/可通行”的阈值。越大，越保守。
+# 这是一个“可通行性阈值”。表示某个区域要被认为“空闲/可通行”，需要满足多少次/多少份支持。
+# 越大，越保守：只有更明确的空闲证据才会认为这里可走。这会让规划更安全，但也可能让机器人更容易避让，路径更绕。
+GPlanner/free_counter_thred             : 7
+# 目标到达投票数/支持票数。
+# 表示要确认“已经到达目标”，需要多少次投票或判断满足。
+# 越大，越不容易因为一次偶然判断就误判为到达。
+GPlanner/reach_goal_vote_size           : 3
+# 路径惯性/持续性阈值。
+# 用来控制“是否继续沿着之前的路径方向走”，避免因为短暂抖动而频繁改变方向。
+# 越大，越倾向保持原来的路径方向，路径更平滑；越小，越容易快速切换。
+GPlanner/path_momentum_thred            : 3
