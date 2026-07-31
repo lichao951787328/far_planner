@@ -14,8 +14,11 @@ void MapHandler::Init(const MapHandlerParams& params) {
     map_params_ = params;
     const int row_num = std::ceil(map_params_.grid_max_length / map_params_.cell_length);
     const int col_num = row_num;
+    // 高层切片
     int level_num = std::ceil(map_params_.grid_max_height / map_params_.cell_height);
+    // 能检测到的邻域格子数，必须是奇数，保证机器人在中心格子
     neighbor_Lnum_ = std::ceil(map_params_.sensor_range * 2.0f / map_params_.cell_length) + 1; 
+    // 在做邻近高层切片时，邻近的高层切片数，必须是奇数，保证机器人在中心格子
     neighbor_Hnum_ = 5; 
     if (level_num % 2 == 0) level_num ++;         // force to odd number, robot will be at center
     if (neighbor_Lnum_ % 2 == 0) neighbor_Lnum_ ++; // force to odd number
@@ -23,6 +26,7 @@ void MapHandler::Init(const MapHandlerParams& params) {
     // inlitialize grid 
     Eigen::Vector3i pointcloud_grid_size(row_num, col_num, level_num);
     Eigen::Vector3d pointcloud_grid_origin(0,0,0);
+    // 默认地图栅格长宽为5m，高为2m
     Eigen::Vector3d pointcloud_grid_resolution(map_params_.cell_length, map_params_.cell_length, map_params_.cell_height);
     PointCloudPtr cloud_ptr_tmp;
     world_obs_cloud_grid_ = std::make_unique<grid_ns::Grid<PointCloudPtr>>(
@@ -36,6 +40,15 @@ void MapHandler::Init(const MapHandlerParams& params) {
         world_obs_cloud_grid_->GetCell(i) = PointCloudPtr(new PointCloud);
         world_free_cloud_grid_->GetCell(i) = PointCloudPtr(new PointCloud);
     }
+    // 按栅格单元记录状态的标记数组。
+    // global_visited_induces_：记录这个格子是否“曾被观测/写入过”（障碍或自由）。
+    // ：写入障碍或自由点云时，标记为1；清空障碍或自由点云时，标记为0。
+    // util_obs_modified_list_：记录这个格子是否“在本次更新中被写入过障碍点云”。
+    // 每轮先清零，然后写入障碍点云时，标记为1；最后滤波时，标记为0。
+    // util_free_modified_list_：记录这个格子是否“在本次更新中被写入过自由点云”。
+    // 每轮先清零，然后写入自由点云时，标记为1；最后滤波时，标记为0。
+    // util_remove_check_list_：本轮“可能需要从障碍图里删除重叠点”的候选格子。
+    // 每轮先清零，动态障碍点落入哪个格子，就把该格置 1，最后滤波时，标记为0。删除时只检查候选格，且要求该格曾被访问过。
     global_visited_induces_.resize(n_cell), util_remove_check_list_.resize(n_cell);
     util_obs_modified_list_.resize(n_cell), util_free_modified_list_.resize(n_cell);
     std::fill(global_visited_induces_.begin(), global_visited_induces_.end(), 0);
@@ -44,16 +57,21 @@ void MapHandler::Init(const MapHandlerParams& params) {
     std::fill(util_remove_check_list_.begin(), util_remove_check_list_.end(), 0);
 
     // init terrain height map
+    // 地形高城图的尺寸，应该是机器人感知范围的两倍，保证机器人在中心格子。
     int height_dim = std::ceil((map_params_.sensor_range + map_params_.cell_length) * 2.0f / FARUtil::robot_dim);
     if (height_dim % 2 == 0) height_dim ++;
     Eigen::Vector3i height_grid_size(height_dim, height_dim, 1);
     Eigen::Vector3d height_grid_origin(0,0,0);
     Eigen::Vector3d height_grid_resolution(FARUtil::robot_dim, FARUtil::robot_dim, FARUtil::kLeafSize);
     std::vector<float> temp_vec;
+    // 存储的高度值
     terrain_height_grid_ = std::make_unique<grid_ns::Grid<std::vector<float>>>(
         height_grid_size, temp_vec, height_grid_origin, height_grid_resolution, 3);
     
     const int n_terrain_cell = terrain_height_grid_->GetCellNumber();
+    // terrain_grid_occupy_list_ 表示这个地形格子在当前轮是否被自由点云“写入过高度样本”（占据标记）。在更新地形时会先清零，再写入时置 1，
+    // terrain_grid_traverse_list_：表示这个地形格子是否被判定为“可通行地形”（遍历/可达标记）。
+    // 在可通行分析前会清零，分析过程中满足条件就置 1
     terrain_grid_occupy_list_.resize(n_terrain_cell), terrain_grid_traverse_list_.resize(n_terrain_cell);
     std::fill(terrain_grid_occupy_list_.begin(), terrain_grid_occupy_list_.end(), 0);
     std::fill(terrain_grid_traverse_list_.begin(), terrain_grid_traverse_list_.end(), 0);
@@ -133,7 +151,7 @@ void MapHandler::GetCloudOfPoint(const Point3D& center,
     }
 }
 
-// SetOrigin 设置的是栅格包围盒的左下后角（最小角点），不是地图中心点。
+// SetOrigin 设置的是栅格包围盒地图中心点。
 void MapHandler::SetMapOrigin(const Point3D& ori_robot_pos) {
     Point3D map_origin;
     const Eigen::Vector3i dim = world_obs_cloud_grid_->GetSize();

@@ -14,12 +14,17 @@ void FARMaster::Init() {
   /* initialize subscriber and publisher */
   reset_graph_sub_    = nh.subscribe("/reset_visibility_graph", 5, &FARMaster::ResetGraphCallBack, this);
   odom_sub_           = nh.subscribe("/odom_world", 5, &FARMaster::OdomCallBack, this);
+  // terrain_map_ext 订阅
   terrain_sub_        = nh.subscribe("/terrain_cloud", 1, &FARMaster::TerrainCallBack, this);
+  // registered_scan
   scan_sub_           = nh.subscribe("/scan_cloud", 5, &FARMaster::ScanCallBack, this);
+  // 这个是什么级别的终点。用户全局指定的终点，不是规划器自己的目标点。
   waypoint_sub_       = nh.subscribe("/goal_point", 1, &FARMaster::WaypointCallBack, this);
+  // terrain_map 订阅
   terrain_local_sub_  = nh.subscribe("/terrain_local_cloud", 1, &FARMaster::TerrainLocalCallBack, this);
   joy_command_sub_    = nh.subscribe("/joy", 5, &FARMaster::JoyCommandCallBack, this);
   update_command_sub_ = nh.subscribe("/update_visibility_graph", 5, &FARMaster::UpdateCommandCallBack, this);
+  // 发给下游规划器的目标点，也就是局部终点
   goal_pub_           = nh.advertise<geometry_msgs::PointStamped>("/way_point",5);
   boundary_pub_       = nh.advertise<geometry_msgs::PolygonStamped>("/navigation_boundary",5);
   // Timers
@@ -678,6 +683,7 @@ void FARMaster::ScanCallBack(const sensor_msgs::PointCloud2ConstPtr& scan_pc) {
   scan_handler_.UpdateRobotPosition(robot_pos_);
 }
 
+// 上游给的点云无论是TerrainLocal还是TerrainExt都是100HZ
 void FARMaster::TerrainLocalCallBack(const sensor_msgs::PointCloud2ConstPtr& pc) {
   if (master_params_.is_static_env) return;
   this->PrcocessCloud(pc, local_terrain_ptr_);
