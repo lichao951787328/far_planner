@@ -316,6 +316,7 @@ float MapHandler::NearestTerrainHeightofNavPoint(const Point3D& point, bool& is_
         bool is_dw_associated = false;
         Eigen::Vector3i dw_near_sub = ori_sub;
         float dw_terrain_h = p_th;
+        // 从当前点的 z 层开始，向下搜索，直到找到第一个有自由点云的格子，就把这个格子里所有自由点云的 z 高度平均值作为地形高度。
         while (world_free_cloud_grid_->InRange(dw_near_sub)) {
             if (!world_free_cloud_grid_->GetCell(dw_near_sub)->empty()) {
                 int counter = 0;
@@ -333,6 +334,7 @@ float MapHandler::NearestTerrainHeightofNavPoint(const Point3D& point, bool& is_
         bool is_up_associated = false;
         Eigen::Vector3i up_near_sub = ori_sub;
         float up_terrain_h = p_th;
+        // 从当前点的 z 层开始，向上搜索，直到找到第一个有自由点云的格子，就把这个格子里所有自由点云的 z 高度平均值作为地形高度。
         while (world_free_cloud_grid_->InRange(up_near_sub)) {
             if (!world_free_cloud_grid_->GetCell(up_near_sub)->empty()) {
                 int counter = 0;
@@ -348,6 +350,7 @@ float MapHandler::NearestTerrainHeightofNavPoint(const Point3D& point, bool& is_
             
         }
         is_associated = (is_up_associated || is_dw_associated) ? true : false;
+        // 找到上下两个方向都有匹配的自由点云时，比较哪个更近，返回更近的那个高度。
         if (is_up_associated && is_dw_associated) { // compare nearest
             if (up_near_sub.z() - ori_sub.z() < ori_sub.z() - dw_near_sub.z()) return up_terrain_h;
             else return dw_terrain_h;
@@ -395,6 +398,9 @@ void MapHandler::AdjustNodesHeight(const NodePtrStack& nodes) {
 }
 
 // CTNode 做高度修正的，目标是让它们“贴地”且不要偏离机器人当前高度太多。
+// 贴地修正：把 CT 节点的高度改成附近地形的估计高度，避免节点在斜坡、台阶或地表起伏上看起来“漂浮”。
+// 保持可行性：修正后的高度会再限制在机器人当前高度附近的容差范围内，防止因为地形误差导致节点过高或过低。
+// 供后续规划使用：后面的路径/可通行性判断会基于这个新的高度来判断是否可走、是否碰撞。
 void MapHandler::AdjustCTNodeHeight(const CTNodeStack& ctnodes) {
     if (ctnodes.empty()) return;
     const float H_MAX = FARUtil::robot_pos.z + FARUtil::kTolerZ;
