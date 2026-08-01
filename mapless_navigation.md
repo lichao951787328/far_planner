@@ -1,8 +1,8 @@
 <!--
  * @Author: error: error: git config user.name & please set dead value or install git && error: git config user.email & please set dead value or install git & please set dead value or install git
  * @Date: 2026-07-23 11:15:48
- * @LastEditors: error: error: git config user.name & please set dead value or install git && error: git config user.email & please set dead value or install git & please set dead value or install git
- * @LastEditTime: 2026-07-23 13:24:16
+ * @LastEditors: lichao951787328 951787328@qq.com
+ * @LastEditTime: 2026-08-01 11:31:18
  * @FilePath: /far_planner/mapless_navigation.md
  * @Description: 这是默认设置,请设置`customMade`, 打开koroFileHeader查看配置 进行设置: https://github.com/OBKoro1/koro1FileHeader/wiki/%E9%85%8D%E7%BD%AE
 -->
@@ -22,3 +22,19 @@ graph可以保留，全地图（自由、障碍、可通行）给我的高程图
 把 Util/dynamic_obs_dacay_time 从 10 降到 3-5
 把 CDetector/filter_count_value 从 3 提到 4 或 5（减少稀疏伪轮廓）
 若仍有“厚边”，再评估 Util/obs_inflate_size 是否过于保守
+
+1、在不考虑语义区域渐变式自适应可通行区域的前提下
+重心1：维护一个具有切实指导意义的graph，也就是要维护一个全局的二维概率栅格地图。
+如果上层直接给语义分割障碍区域和动态障碍，确定是动态障碍的才当作动态障碍，例如人、狗等移动生命活体；把建筑等固定的当作确定性的静态障碍；把车当作初步静态障碍，在传输点云时，要筛选出非动态点云的物体，然后维护这个全局的二维概率栅格地图。
+
+重心2：
+二维栅格地图直接转img、进行过滤操作之后即可进行维护graph，graph可能需要不会整体性的维护，只维护局部，然后再拼成全局。
+
+2、局部规划层面，拉取全局二维栅格地图的局部部分，叠加当前的全部障碍和地形可通行性代价，进行规划
+
+实现思路：非动态点云加在到octreemap，维护一个全局暂静态的三维地图，当作全局地图使用。同时，截取机器人附近区域部分，添加上动态障碍，并添加上可通行性代价和障碍。
+
+第二步：octreemap在转二维图维护障碍地图时，如果地面是三维场景，是不是应该考虑梯度场，
+
+
+第三步：给每个栅格补上语义标签参考ssmi@github
