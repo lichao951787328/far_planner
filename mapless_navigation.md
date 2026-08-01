@@ -2,7 +2,7 @@
  * @Author: error: error: git config user.name & please set dead value or install git && error: git config user.email & please set dead value or install git & please set dead value or install git
  * @Date: 2026-07-23 11:15:48
  * @LastEditors: lichao951787328 951787328@qq.com
- * @LastEditTime: 2026-08-01 11:31:18
+ * @LastEditTime: 2026-08-01 14:04:48
  * @FilePath: /far_planner/mapless_navigation.md
  * @Description: 这是默认设置,请设置`customMade`, 打开koroFileHeader查看配置 进行设置: https://github.com/OBKoro1/koro1FileHeader/wiki/%E9%85%8D%E7%BD%AE
 -->
@@ -30,7 +30,7 @@ graph可以保留，全地图（自由、障碍、可通行）给我的高程图
 重心2：
 二维栅格地图直接转img、进行过滤操作之后即可进行维护graph，graph可能需要不会整体性的维护，只维护局部，然后再拼成全局。
 
-2、局部规划层面，拉取全局二维栅格地图的局部部分，叠加当前的全部障碍和地形可通行性代价，进行规划
+2、局部规划层面，依靠地形高程图，叠加当前的全部障碍和地形可通行性代价，进行规划。或者自行构建一个随着机器人坐标更新的https://voxblox.readthedocs.io/en/latest/index.html,https://github.com/ethz-asl/voxblox.git
 
 实现思路：非动态点云加在到octreemap，维护一个全局暂静态的三维地图，当作全局地图使用。同时，截取机器人附近区域部分，添加上动态障碍，并添加上可通行性代价和障碍。
 
