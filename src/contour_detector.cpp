@@ -28,6 +28,15 @@ void ContourDetector::Init(const ContourDetectParams& params) {
     VOXEL_DIM_INV = 1.0f / cd_params_.voxel_dim;
 }
 
+// 用 odom_node_ptr 更新当前参考中心
+// 在 contour_detector.h 里的 UpdateOdom，会把：
+// odom_pos_ = odom_node_ptr->position
+// free_odom_resized_ 也更新成以当前 odom 为参考的图像坐标
+// 把 surround_obs_cloud 投到一张以 odom 为中心的局部图像上
+// 在 contour_detector.cpp 的 UpdateImgMatWithCloud 里，每个障碍点都会通过 PointToImgSub 映射到图像坐标。
+// 而这个映射是相对 odom_pos_ 做的，不是全局绝对坐标。
+// 在这张局部障碍图像上提取轮廓
+// 然后做 threshold / blur / findContours / approxPolyDP，最后转回 realworld_contour。
 void ContourDetector::BuildTerrainImgAndExtractContour(const NavNodePtr& odom_node_ptr,
                                                        const PointCloudPtr& surround_cloud,
                                                        std::vector<PointStack>& realworl_contour) {

@@ -62,6 +62,14 @@ void ContourGraph::UpdateContourGraph(const NavNodePtr& odom_node_ptr,
 }
 
 /* Match current contour with global navigation nodes */
+// 已经拿到关键分支了：这套代码不是做“整轮轮廓刚性配准”，而是“局部匹配 + 未匹配保留 + 内外部可达性判断”。我现在把这三层逻辑串起来，直接对应到代码里的集合和条件。
+// 是的，这段代码不是在做“局部轮廓和全局轮廓强行重合”的刚性配准，而是做三层处理：
+// 第一层是“尽量匹配，匹配不上就别硬配”。在 MatchContourWithNavGraph 里，当前帧每个 CTNode 先去 near_nodes 里找最近的 NavNode，再过一次 IsCTMatchLineFreePolygon() 的可连通性检查。只有“距离合适 + 连线在自由多边形里”才算匹配成功；如果差别太大，或者中间有障碍，直接不匹配。最后没匹配上的轮廓点会进 new_convex_vertices，后面再作为新顶点候选进入图更新。
+// 第二层是“局部不一致不会被硬吞掉，而是显式分流”。在 IsPointsConnectFreePolygon 里，局部检查和全局检查是分开的：
+// 局部检查时，会检查当前局部 contour_polygons_，还会看 unmatched_contour_ 和 inactive_contour_，这些都能阻止一条边被认为可通行。
+// 全局检查时，才去看 global_contour_。
+// 所以如果当前局部轮廓和历史全局轮廓有明显差异，代码不会把它们“拉齐”，而是把不一致保留下来，变成匹配失败、未匹配轮廓、或 inactive 轮廓。
+// 第三层是“区分轮廓内部还是外部，而且这个判断是显式存在的”。在 UpdateContourGraph 里，每个多边形都会计算 poly_ptr->is_robot_inside = PointInsideAPoly(...)。后面 UpdateOdomFreePosition 还会根据机器人是否在多边形内部，去找一个“外移后的 free 位置”。另外在可连通性检查里，is_robot_inside 会参与判断一条边是否跨越了“机器人所在侧”和“非机器人所在侧”的轮廓。也就是说，这里确实区分了轮廓内外，但它不是把两个轮廓系统做整体配准，而是用“当前机器人处于多边形内/外”和“边是否穿过轮廓”来做可达性约束。
 void ContourGraph::MatchContourWithNavGraph(const NodePtrStack& global_nodes, const NodePtrStack& near_nodes, CTNodeStack& new_convex_vertices) {
     for (const auto& node_ptr : global_nodes) {
         node_ptr->is_contour_match = false;

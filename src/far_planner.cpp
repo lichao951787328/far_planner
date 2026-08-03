@@ -49,6 +49,7 @@ void FARMaster::Init() {
   this->LoadROSParams();
 
   /*init path generation thred callback*/
+  // 在这设置了全局地图规划器的循环频率，默认是5hz，但是调用默认参数后是2.5hz。
   const float duration_time = 0.99f / master_params_.main_run_freq;
   planning_event_ = nh.createTimer(ros::Duration(duration_time), &FARMaster::PlanningCallBack, this);
 
@@ -166,6 +167,8 @@ void FARMaster::Loop() {
     /* Extract Vertices and new nodes */
     FARUtil::Timer.start_time("Total V-Graph Update");
     // 在做“从周围障碍点云里提取轮廓”的核心步骤，作用是把稠密点云转换成后续可建图的几何边界。
+    // 不是“检测整个地图的轮廓”，而是检测机器人当前周围局部障碍云的轮廓。
+    // 以当前 odom 节点为中心，把机器人周围的局部障碍点云投影成图像，然后提取这片局部环境的障碍轮廓。
     contour_detector_.BuildTerrainImgAndExtractContour(odom_node_ptr_, FARUtil::surround_obs_cloud_, realworld_contour_);
     // 把刚提取出的“真实世界轮廓”写进轮廓图模块，完成轮廓图的本帧更新。
     contour_graph_.UpdateContourGraph(odom_node_ptr_, realworld_contour_);
@@ -186,16 +189,24 @@ void FARMaster::Loop() {
     // 是，内部确实有一个可通行性相关的高程网格（terrain height grid）。
     // 但它不是那种全局离线 DEM，而是由当前 free 点云在线更新的局部/滚动高程图。
     // 同时系统还保留 obs/free 点云栅格，因此它是“点云 + 高程网格”联合，而不只是单一高程图。
+
+    // 修正contour_graph_和nav_graph_的高度，使它们与地形高度一致，避免出现悬空或钻地的情况。
+    // CTNode：轮廓几何节点, 本质上是“障碍轮廓上的一个角点/轮廓点”，服务于轮廓图构建和多边形几何关系。
+    // nav_graph_：导航图节点,真正参与图搜索和路径规划的节点
     map_handler_.AdjustCTNodeHeight(ContourGraph::contour_graph_);
     map_handler_.AdjustNodesHeight(nav_graph_);
     // Truncate for local range nodes
     // “从全局图里筛出机器人附近节点集合”，给后续局部匹配和增量更新用。
     // 根据当前机器人位置，更新 DynamicGraph 内部的“近邻节点缓存”（哪些全局导航节点算近、算扩展近邻）。
+    // 先筛出机器人当前局部真正相关的图节点，再把这个局部子集交给后面的轮廓匹配和增量更新流程使用。换句话说，这一步是在做“全局图的局部裁剪与近邻维护”，让后续的 contour matching 和 graph update 只处理机器人周围有效节点。
     graph_manager_.UpdateGlobalNearNodes();
     // 把刚更新好的“扩展局部近邻节点集合”取出来，赋给 near_nav_graph_。
+    // 只是把前面在 DynamicGraph::UpdateGlobalNearNodes 里筛出来的“扩展局部近邻节点”拿出来给外部用。
     near_nav_graph_ = graph_manager_.GetExtendLocalNode();
     // Match near nav nodes with contour
     // 先缩小到局部相关节点，再做轮廓与导航图匹配，减少无关计算、提升稳定性和速度。
+    // MatchContourWithNavGraph() 是把当前帧提取出来的轮廓点，和全局导航图里的近邻节点做匹配的函数。它的输入是两组节点：global_nodes 是全局导航图，near_nodes 是前面筛出来的局部近邻节点；输出是 new_convex_vertices，也就是这帧里“没被现有导航节点匹配上、需要当成新顶点处理”的轮廓点。
+    // 它的作用就是“先拿局部轮廓去对齐已有图节点，剩下的才当作新顶点候选”。这一步是增量建图的关键：不是直接把所有轮廓都变成新节点，而是先复用已有导航节点，减少重复顶点和错误建图。
     contour_graph_.MatchContourWithNavGraph(nav_graph_, near_nav_graph_, new_ctnodes_);
     if (master_params_.is_visual_opencv) {
       FARUtil::ConvertCTNodeStackToPCL(new_ctnodes_, new_vertices_ptr_);
@@ -204,6 +215,8 @@ void FARMaster::Loop() {
     }
     /* update planner graph */
     new_nodes_.clear();
+    // 把本帧“候选轮廓顶点”转成“可加入全局图的新导航节点”。
+    // new_ctnodes_ 就是上一阶段输出的“新增候选轮廓点”，来源是 contour_graph.cpp:65 的第三个输出参数。这个函数会把未匹配且满足几何条件的 CTNode 放进 new_convex_vertices，实际在主流程里就是 new_ctnodes_。
     if (!is_stop_update_ && graph_manager_.ExtractGraphNodes(new_ctnodes_)) {
       new_nodes_ = graph_manager_.GetNewNodes();
     }
@@ -212,18 +225,23 @@ void FARMaster::Loop() {
       std::cout<<"    "<< "Number of new vertices adding to global V-Graph: "<< new_nodes_.size()<<std::endl;
     }
     /* Graph Updating */
+    // 真正把“本帧增量信息”合并进全局可视图的核心更新器
     graph_manager_.UpdateNavGraph(new_nodes_, is_stop_update_, clear_nodes_);
     runtimer_.data = FARUtil::Timer.end_time("Total V-Graph Update", is_graph_init_) / 1000.f; // Unit: second
     // runtimer_.data = FARUtil::Timer.end_time("Total V-Graph Update", is_graph_init_); // Unit: ms
     runtime_pub_.publish(runtimer_);
     /* Update v-graph in other modules */
+    // 在调用 UpdateNavGraph 之后，立刻拿当前最新图，后面会连续喂给规划器、消息发布和可视化（同一帧一致性）。
     nav_graph_ = graph_manager_.GetNavGraph();
     if (is_graph_init_) {
       if (!FARUtil::IsDebug) printf("\033[2K");
       std::cout<<"    "<<"Global V-Graph Updated. Number of global vertices: "<<nav_graph_.size()<<std::endl;
     }
+    // 从当前全局图连接关系里重新提取轮廓集合，更新全局/局部边界相关缓存
     contour_graph_.ExtractGlobalContours();      // Global Polygon Update
+    // 把最新 nav_graph_ 交给路径规划器，让后续 PathToGoal、可达性判断都基于刚更新后的图。
     graph_planner_.UpdaetVGraph(nav_graph_);     // Graph Planner Update
+    // 把同一份最新全局图同步到消息发布模块，用于对外发送图结构（多机通信/可视化消费者）。
     graph_msger_.UpdateGlobalGraph(nav_graph_);  // Graph Messager Update
 
     /* Publish local boundary to lower level local planner */
@@ -261,6 +279,7 @@ void FARMaster::Loop() {
   }
 }
 
+// 规划器的核心循环函数，定时器触发，频率由 main_run_freq 决定。
 void FARMaster::PlanningCallBack(const ros::TimerEvent& event) {
   if (!is_graph_init_) return;
   const NavNodePtr goal_ptr = graph_planner_.GetGoalNodePtr();
@@ -392,6 +411,7 @@ Point3D FARMaster::ProjectNavWaypoint(const NavNodePtr& nav_node_ptr, const NavN
   // 初始先取 nav_node_ptr->position。
   // 然后调用 ExtendViewpointOnObsCloud(...)，尝试把点沿着可视方向再往前“推一点”，让 waypoint 更像一个前瞻点，而不是死贴在图节点上。
   Point3D waypoint = nav_node_ptr->position;
+  // 默认参数输入值5m
   float free_dist = master_params_.local_planner_range;
   const Point3D extend_p = this->ExtendViewpointOnObsCloud(nav_node_ptr_, FARUtil::surround_obs_cloud_, free_dist);
   free_dist = std::max(free_dist, master_params_.robot_dim * 2.5f);
@@ -401,6 +421,8 @@ Point3D FARMaster::ProjectNavWaypoint(const NavNodePtr& nav_node_ptr, const NavN
   }
   // 融合 heading，避免急转
   // 如果启用了 momentum，它会把“当前应去方向”和“上一时刻 heading”做加权融合，让新方向更平滑。
+  // 这个的目的是当终点就在前一个附近时，不要反复的调换方向
+  // nav_heading_ 当前的方向
   const Point3D diff_p = waypoint - robot_pos_;
   Point3D new_heading;
   if (is_momentum && nav_heading_.norm() > FARUtil::kEpsilon) {
@@ -429,10 +451,13 @@ Point3D FARMaster::ProjectNavWaypoint(const NavNodePtr& nav_node_ptr, const NavN
 }
 
 // 它试图把当前导航节点沿着一个“更合理的可视/拓扑方向”往前延伸成一个更好的 waypoint，但如果前面有障碍，就提前停下甚至往回收一点。
+
+// 这个地方存在一个代码瑕疵,但是还不会影响整体规划器的功能.就是nav_node_ptr_和nav_node_ptr的使用不一致,导致在某些情况下会出现错误的结果.但是目前还没有发现明显的bug,所以暂时不修改.
 Point3D FARMaster::ExtendViewpointOnObsCloud(const NavNodePtr& nav_node_ptr, const PointCloudPtr& obsCloudIn, float& free_dist) {
   // 如果这个导航节点不是凸自由方向，或者周围没有障碍点云，就直接返回原节点位置。
   // 也就是说，不是所有节点都会被延伸。
-  if (nav_node_ptr_->free_direct != NodeFreeDirect::CONVEX || obsCloudIn->empty()) return nav_node_ptr_->position;
+  if (nav_node_ptr_->free_direct != NodeFreeDirect::CONVEX || obsCloudIn->empty())        
+    return nav_node_ptr_->position;
   // 从障碍云里裁一小块“节点周围的局部障碍”
   // 它会把 nav node 周围一定范围内的障碍点取出来，后面只在这小片局部障碍里判断。
   // 所以这是一个局部几何修正，不是全局搜索。
@@ -738,7 +763,7 @@ void FARMaster::TerrainCallBack(const sensor_msgs::PointCloud2ConstPtr& pc) {
       pcl::copyPointCloud(*FARUtil::surround_obs_cloud_, *dyremove_before_obs_ptr_);
 
       FARUtil::InflateCloud(FARUtil::cur_dyobs_cloud_, master_params_.voxel_dim, 1, true);
-      
+      // 从地图中删除这些动态障碍点云，避免它们影响后续的可视图更新和路径规划。
       map_handler_.RemoveObsCloudFromGrid(FARUtil::cur_dyobs_cloud_);
       // 在该格子的障碍点云里，删除与 obsCloud 重叠的点。
       FARUtil::RemoveOverlapCloud(FARUtil::surround_obs_cloud_, FARUtil::cur_dyobs_cloud_);
@@ -750,12 +775,13 @@ void FARMaster::TerrainCallBack(const sensor_msgs::PointCloud2ConstPtr& pc) {
       FARUtil::FilterCloud(FARUtil::cur_new_cloud_, master_params_.voxel_dim);
     }
     // update world dynamic obstacles
+     // 动态障碍做时间栈衰减，动态障碍会保留一段时间再衰减，避免一帧抖动导致反复“加了又删”。
     FARUtil::StackCloudByTime(FARUtil::cur_dyobs_cloud_, FARUtil::stack_dyobs_cloud_, FARUtil::kObsDecayTime);
   }
   
   // create and update kdtrees
   // 把本帧新点 cur_new_cloud_ 加到历史缓冲 stack_new_cloud_，并按时间淘汰超过 kNewDecayTime 的旧点。也就是一个“带过期时间的滑动窗口点云”
-  // 动态障碍做时间栈衰减，动态障碍会保留一段时间再衰减，避免一帧抖动导致反复“加了又删”。
+ 
   FARUtil::StackCloudByTime(FARUtil::cur_new_cloud_, FARUtil::stack_new_cloud_, FARUtil::kNewDecayTime);
   FARUtil::UpdateKdTrees(FARUtil::stack_new_cloud_);
   // 主要是为了保证后续可见图更新有障碍边界可提取，避免在全空数据时误进入主流程
@@ -781,6 +807,7 @@ void FARMaster::TerrainCallBack(const sensor_msgs::PointCloud2ConstPtr& pc) {
   }
 }
 
+// 得到动态点云
 void FARMaster::ExtractDynamicObsFromScan(const PointCloudPtr& scanCloudIn, 
                                           const PointCloudPtr& obsCloudIn,
                                           const PointCloudPtr& freeCloudIn,

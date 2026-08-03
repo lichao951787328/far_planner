@@ -235,6 +235,7 @@ inline void ResetPlannerInternalValues() {
 
 const NavNodePtr& GetGoalNodePtr() const { return goal_node_ptr_;};
 
+// 
 Point3D GetOriginNodePos(const bool& is_adjusted_z) const {
     if (goal_node_ptr_ == NULL) return Point3D(0,0,0);
     if (!is_adjusted_z) return origin_goal_pos_;

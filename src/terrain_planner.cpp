@@ -40,6 +40,14 @@ void TerrainPlanner::UpdateCenterNode(const NavNodePtr& node_ptr) {
 }
 
 // 根据障碍点云设置某一区域内的地形栅格占据标记，供地形规划使用。
+// 把“机器人附近的局部地形障碍点云”写进 TerrainPlanner 自己的局部二维栅格里，标记哪些格子被障碍占住，供后续局部地形通路检查使用。
+// 先判断地形规划栅格是否已经初始化，以及输入障碍点云是否为空。
+// 遍历每个障碍点。
+// 把障碍点坐标投影到 terrain_grids_ 的二维网格下标。
+// 以这个格子为中心，按 inflate_size 做一个小范围膨胀。
+// 把膨胀范围内的格子都标成 is_occupied = true。
+// 每次机器人位置更新时，都会把 FARUtil::local_terrain_obs_ 送给 terrain_planner_。这表示 TerrainPlanner 一直维护一张“当前机器人周围的局部障碍地图”。
+// 目的：让 TerrainPlanner 能判断两点之间是否被障碍挡住
 void TerrainPlanner::SetLocalTerrainObsCloud(const PointCloudPtr& obsCloudIn) {
     if (!is_grids_init_ || obsCloudIn->empty()) return;
     const int N_IF = tp_params_.inflate_size;

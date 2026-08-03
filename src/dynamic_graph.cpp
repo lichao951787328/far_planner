@@ -60,6 +60,11 @@ bool DynamicGraph::IsInterNavpointNecessary() {
     return false;
 }
 
+// 先清空内部 new_nodes_，如果输入为空直接返回 false。
+// 可选插入一个中间导航点（inter-navpoint），用于轨迹连续性，逻辑在 IsInterNavpointNecessary。
+// 遍历每个 ctnode_ptr（也就是 new_ctnodes_ 里的点），走 IsAValidNewNode 筛选。
+// 通过筛选后，CreateNewNavNodeFromContour 把 CTNode 转成 NavNode，并继承轮廓属性（位置、free_direct、surf_dirs）。
+// 若最终 new_nodes_ 非空，返回 true；随后主流程再用 GetNewNodes 取出并交给 UpdateNavGraph。
 bool DynamicGraph::ExtractGraphNodes(const CTNodeStack& new_ctnodes) {
     if (new_ctnodes.empty()) return false;
     NavNodePtr new_node_ptr = NULL;
@@ -85,6 +90,33 @@ bool DynamicGraph::ExtractGraphNodes(const CTNodeStack& new_ctnodes) {
     else return true;
 }
 
+// 清理候选坏点
+// 在非冻结模式下，它先遍历扩展近邻节点 extend_match_nodes_，用 ReEvaluateCorner 复检节点有效性；连续不通过的会通过 SetNodeToClear 放入 clear_node。
+// 位置： src/far_planner/src/dynamic_graph.cpp
+// 动态环境下复检轨迹连边
+// 如果是动态环境，还会对 internav 相关的 trajectory 连边做地形可达性复检，失败就累计失效票，成功就回收失效票。
+// 位置： src/far_planner/src/dynamic_graph.cpp
+// 清掉已合并/待删除节点，并补近邻集合
+// 调用 ClearMergedNodesInGraph 清理内部栈中的 merged 节点，再把 margin 中已匹配的节点补回 near/wide near。
+// 位置： src/far_planner/src/dynamic_graph.cpp
+// 先更新 odom 到周边节点的连接
+// 对 wide_near_nodes_ + new_nodes 做 odom 连通检查：能连就加 poly edge + edge，不能连就删除。
+// 位置： src/far_planner/src/dynamic_graph.cpp
+// 把本帧新节点正式加入全局图
+// 非冻结模式下，new_nodes 会被加入 globalGraphNodes_，并加入 near 集合；如果是 navpoint 还更新当前 internav；如果来自轮廓点还会回填 CT-Nav 匹配关系。
+// 位置： src/far_planner/src/dynamic_graph.cpp
+// 处理超范围轮廓节点的回连
+// 对 out_contour_nodes_ 尝试找可匹配近邻并记录/删除 contour vote，避免老轮廓孤立。
+// 位置： src/far_planner/src/dynamic_graph.cpp
+// 大规模重连 near 节点
+// 分三块：
+// near 节点与“外部历史连边”复检
+// near 节点两两之间复检
+// near 节点与 out contour 的 contour 关系复检，再做 TopTwoContourConnector 稳定连接
+// 位置： src/far_planner/src/dynamic_graph.cpp
+// 评估覆盖与 frontier 状态
+// 最后给 near 节点更新 is_covered 和 is_frontier，供后续规划决策使用。
+// 位置： src/far_planner/src/dynamic_graph.cpp
 void DynamicGraph::UpdateNavGraph(const NodePtrStack& new_nodes,
                                   const bool& is_freeze_vgraph,
                                   NodePtrStack& clear_node) 
