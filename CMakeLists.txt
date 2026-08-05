@@ -15,6 +15,8 @@ find_package(catkin REQUIRED COMPONENTS
   sensor_msgs
   visibility_graph_msg
   pcl_ros
+  octomap_msgs
+  semantic_octomap
 )
 
 find_package(PCL REQUIRED)
@@ -31,6 +33,8 @@ catkin_package(
   std_msgs
   sensor_msgs
   pcl_ros
+  octomap_msgs
+  semantic_octomap
 )
 
 ###########
@@ -45,6 +49,7 @@ include_directories(
   ${EIGEN3_INCLUDE_DIR}
   ${OpenCV_INCLUDE_DIRS}
   "${PROJECT_SOURCE_DIR}/include"
+  "${PROJECT_SOURCE_DIR}/SSMI/SSMI-Mapping/include"
   /usr/local/include # Location when using 'make system_install'
   /usr/include       # More usual location (e.g. when installing using a package)
 )
@@ -72,6 +77,7 @@ set(SOURCES ${SOURCES}
 ## Declare executables
 add_executable(${PROJECT_NAME} src/far_planner.cpp ${SOURCES})
 add_dependencies(${PROJECT_NAME} ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
+add_dependencies(${PROJECT_NAME} semantic_octomap_generate_messages_cpp)
 
 ## Specify libraries to link a library or executable target against
 target_link_libraries(${PROJECT_NAME} ${catkin_LIBRARIES} ${PCL_LIBRARIES} ${OpenCV_LIBS})

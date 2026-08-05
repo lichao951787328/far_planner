@@ -266,6 +266,7 @@ private:
     inline bool IsAValidNewNode(const CTNodePtr ctnode_ptr, bool& is_near_new) {
         is_near_new = FARUtil::IsPointNearNewPoints(ctnode_ptr->position, true);
         if (ctnode_ptr->is_contour_necessary || is_near_new) {
+            // Terrain-neighbor checks now come from MapHandler's semantic-octomap-derived queries.
             if (MapHandler::IsNavPointOnTerrainNeighbor(ctnode_ptr->position, false) && IsPointOnTerrain(ctnode_ptr->position)) {
                 return true;
             } else if (ctnode_ptr->is_contour_necessary) {
@@ -499,6 +500,7 @@ public:
 
     static inline bool IsPointOnTerrain(const Point3D& p) {
         bool UNUSE_match = false;
+        // Terrain height is provided by MapHandler's semantic terrain-support cache first, legacy grid second.
         const float terrain_h = MapHandler::TerrainHeightOfPoint(p, UNUSE_match, true);
         if (abs(p.z - terrain_h - FARUtil::vehicle_height) < FARUtil::kTolerZ) {
             return true;

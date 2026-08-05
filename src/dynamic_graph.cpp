@@ -26,7 +26,7 @@ void DynamicGraph::Init(const ros::NodeHandle& nh, const DynamicGraphParams& par
 
 void DynamicGraph::UpdateRobotPosition(const Point3D& robot_pos) {
     robot_pos_ = robot_pos;
-    terrain_planner_.SetLocalTerrainObsCloud(FARUtil::local_terrain_obs_);
+    terrain_planner_.SetLocalTerrainObsCloud(FARUtil::surround_obs_cloud_);
     if (odom_node_ptr_ == NULL) {
         this->CreateNavNodeFromPoint(robot_pos_, odom_node_ptr_, true);
         this->AddNodeToGraph(odom_node_ptr_);
@@ -787,6 +787,7 @@ void DynamicGraph::UpdateGlobalNearNodes() {
     for (const auto& node_ptr : globalGraphNodes_) {
         node_ptr->is_near_nodes = false;
         node_ptr->is_wide_near  = false;
+        // The terrain-neighbor gating here is semantic-first now; legacy grid indices are only a fallback inside MapHandler.
         if (FARUtil::IsNodeInExtendMatchRange(node_ptr) && (!node_ptr->is_active || MapHandler::IsNavPointOnTerrainNeighbor(node_ptr->position, true))) {
             if (FARUtil::IsOutsideGoal(node_ptr)) continue;
             if (this->IsActivateNavNode(node_ptr) || node_ptr->is_boundary) extend_match_nodes_.push_back(node_ptr);

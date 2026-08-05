@@ -10,6 +10,13 @@
 #include "planner_visualizer.h"
 #include "scan_handler.h"
 #include "graph_msger.h"
+#include <boost/shared_ptr.hpp>
+
+namespace octomap_msgs {
+struct Octomap;
+using OctomapConstPtr = boost::shared_ptr<const Octomap>;
+}  // namespace octomap_msgs
+
 
 
 struct FARMasterParams {
@@ -30,6 +37,7 @@ struct FARMasterParams {
     bool  is_debug_output;
     bool  is_attempt_autoswitch;
     std::string world_frame;
+    std::string semantic_map_topic;
 };
 
 class FARMaster {
@@ -42,8 +50,9 @@ public:
 
 private:
     ros::NodeHandle nh;
-    ros::Subscriber reset_graph_sub_, joy_command_sub_, update_command_sub_;
-    ros::Subscriber odom_sub_, terrain_sub_, terrain_local_sub_, scan_sub_, waypoint_sub_;
+    ros::Subscriber reset_graph_sub_, update_command_sub_;
+    ros::Subscriber odom_sub_, waypoint_sub_;
+    ros::Subscriber semantic_map_sub_;
     ros::Subscriber read_command_sub_, save_command_sub_; // only use for terminal formatting
     ros::Publisher  goal_pub_, boundary_pub_;
     ros::Publisher  dynamic_obs_pub_, surround_free_debug_, surround_obs_debug_;
@@ -68,7 +77,6 @@ private:
     PointCloudPtr temp_free_ptr_;
     PointCloudPtr temp_cloud_ptr_;
     PointCloudPtr scan_grid_ptr_;
-    PointCloudPtr local_terrain_ptr_;
     PointCloudPtr terrain_height_ptr_;
     PointCloudPtr dyremove_before_obs_ptr_;
 
@@ -123,8 +131,7 @@ private:
 
     /* Callback Functions */
     void OdomCallBack(const nav_msgs::OdometryConstPtr& msg);
-    void TerrainCallBack(const sensor_msgs::PointCloud2ConstPtr& pc);
-    void TerrainLocalCallBack(const sensor_msgs::PointCloud2ConstPtr& pc);
+    void SemanticMapCallBack(const octomap_msgs::OctomapConstPtr& msg);
 
     Point3D ExtendViewpointOnObsCloud(const NavNodePtr& nav_node_ptr, const PointCloudPtr& obsCloudIn, float& free_dist);
 
@@ -132,11 +139,11 @@ private:
         is_reset_env_ = true;
     }
 
-    inline void JoyCommandCallBack(const sensor_msgs::JoyConstPtr& msg) {
-        if (msg->buttons[4] > 0.5) {
-            is_reset_env_ = true;
-        }
-    } 
+    // inline void JoyCommandCallBack(const sensor_msgs::JoyConstPtr& msg) {
+    //     if (msg->buttons[4] > 0.5) {
+    //         is_reset_env_ = true;
+    //     }
+    // } 
 
     inline void UpdateCommandCallBack(const std_msgs::Bool& msg) {
         if (is_stop_update_ && msg.data) {
@@ -181,7 +188,7 @@ private:
         }
     }
 
-    void ScanCallBack(const sensor_msgs::PointCloud2ConstPtr& pc);
+    // void ScanCallBack(const sensor_msgs::PointCloud2ConstPtr& pc);
     void WaypointCallBack(const geometry_msgs::PointStamped& route_goal);
 
     void ExtractDynamicObsFromScan(const PointCloudPtr& scanCloudIn, 

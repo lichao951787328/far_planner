@@ -34,7 +34,7 @@ GraphMsger/robot_id                     : 1  # graph from robot id "0" is extrac
 
 # Map Handler Params
 # 表示地面/楼层的高度基准。这个值会影响点云被怎么划分到地面层和障碍层。地面应该空出多高来处理环境.
-MapHandler/floor_height                 : 2.0     # Unit: meter
+MapHandler/floor_height                 : 3.0     # Unit: meter
 # 把整个环境切成很多小格子,每个格子的边长就是 cell_length
 MapHandler/cell_length                  : 5.0     # Unit: meter
 MapHandler/map_grid_max_length          : 1000.0  # Unit: meter

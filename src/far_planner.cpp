@@ -7,6 +7,7 @@
 
 
 #include "far_planner/far_planner.h"
+#include <octomap_msgs/Octomap.h>
 
 /***************************************************************************************/
 
@@ -14,15 +15,11 @@ void FARMaster::Init() {
   /* initialize subscriber and publisher */
   reset_graph_sub_    = nh.subscribe("/reset_visibility_graph", 5, &FARMaster::ResetGraphCallBack, this);
   odom_sub_           = nh.subscribe("/odom_world", 5, &FARMaster::OdomCallBack, this);
-  // terrain_map_ext 订阅
-  terrain_sub_        = nh.subscribe("/terrain_cloud", 1, &FARMaster::TerrainCallBack, this);
   // registered_scan
-  scan_sub_           = nh.subscribe("/scan_cloud", 5, &FARMaster::ScanCallBack, this);
+  // scan_sub_           = nh.subscribe("/scan_cloud", 5, &FARMaster::ScanCallBack, this);
   // 这个是什么级别的终点。用户全局指定的终点，不是规划器自己的目标点。
   waypoint_sub_       = nh.subscribe("/goal_point", 1, &FARMaster::WaypointCallBack, this);
-  // terrain_map 订阅
-  terrain_local_sub_  = nh.subscribe("/terrain_local_cloud", 1, &FARMaster::TerrainLocalCallBack, this);
-  joy_command_sub_    = nh.subscribe("/joy", 5, &FARMaster::JoyCommandCallBack, this);
+  // joy_command_sub_    = nh.subscribe("/joy", 5, &FARMaster::JoyCommandCallBack, this);
   update_command_sub_ = nh.subscribe("/update_visibility_graph", 5, &FARMaster::UpdateCommandCallBack, this);
   // 发给下游规划器的目标点，也就是局部终点
   goal_pub_           = nh.advertise<geometry_msgs::PointStamped>("/way_point",5);
@@ -47,6 +44,8 @@ void FARMaster::Init() {
   terrain_height_pub_  = nh.advertise<sensor_msgs::PointCloud2>("/FAR_terrain_height_debug",1);
 
   this->LoadROSParams();
+
+  semantic_map_sub_   = nh.subscribe(master_params_.semantic_map_topic, 1, &FARMaster::SemanticMapCallBack, this);
 
   /*init path generation thred callback*/
   // 在这设置了全局地图规划器的循环频率，默认是5hz，但是调用默认参数后是2.5hz。
@@ -79,7 +78,6 @@ void FARMaster::Init() {
   temp_free_ptr_        = PointCloudPtr(new pcl::PointCloud<PCLPoint>());
   temp_cloud_ptr_       = PointCloudPtr(new pcl::PointCloud<PCLPoint>());
   scan_grid_ptr_        = PointCloudPtr(new pcl::PointCloud<PCLPoint>());
-  local_terrain_ptr_    = PointCloudPtr(new pcl::PointCloud<PCLPoint>());
   terrain_height_ptr_   = PointCloudPtr(new pcl::PointCloud<PCLPoint>());
   dyremove_before_obs_ptr_ = PointCloudPtr(new pcl::PointCloud<PCLPoint>());
   viewpoint_around_ptr_ = PointCloudPtr(new pcl::PointCloud<PCLPoint>());
@@ -179,16 +177,13 @@ void FARMaster::Loop() {
     /* Adjust heights with terrain */
     // 你看到的这两行就是在把“平面上的图结构”贴到“可通行地形高程”上，说明这个规划不是纯 2D，而是带高度约束的 2.5D/3D 处理。
     // 为什么这里会有高程：
-    // 上游会把 free 点云写入地图，并更新地形高度网格
-    // 在 TerrainCallBack 里先更新 free/obs，再调用 UpdateTerrainHeightGrid(...)。这一步会从自由空间点估计各网格高度。
-    // MapHandler 内部维护了 terrain_height_grid_
-    // 这就是局部高程图容器（按网格存高度统计），后续可查询某点附近地面高度。
+    // 上游 semantic octomap 回调会更新局部 terrain-support/free 语义点缓存。
+    // TerrainCallBack 中调用 UpdateTerrainHeightGrid(...)，内部基于语义点更新 terrain KDTree。
+    // 高度查询由 KDTree 驱动，不再依赖本地 terrain 栅格推断。
     // AdjustCTNodeHeight(...) 和 AdjustNodesHeight(...)
     // 分别给轮廓图节点、导航图节点校正 z 值，让节点高度与可通行地面一致，避免路径“悬空”或“钻地”。
     // 所以你问“当前可通行地形是高程图吗”：
-    // 是，内部确实有一个可通行性相关的高程网格（terrain height grid）。
-    // 但它不是那种全局离线 DEM，而是由当前 free 点云在线更新的局部/滚动高程图。
-    // 同时系统还保留 obs/free 点云栅格，因此它是“点云 + 高程网格”联合，而不只是单一高程图。
+    // 是，但实现形态是语义点云派生的局部地形高度查询（KDTree），不是旧的本地高程栅格推断。
 
     // 修正contour_graph_和nav_graph_的高度，使它们与地形高度一致，避免出现悬空或钻地的情况。
     // CTNode：轮廓几何节点, 本质上是“障碍轮廓上的一个角点/轮廓点”，服务于轮廓图构建和多边形几何关系。
@@ -540,15 +535,11 @@ void FARMaster::LoadROSParams() {
   nh.param<bool>(master_prefix  + "is_debug_output",       master_params_.is_debug_output, false);
   nh.param<bool>(master_prefix  + "is_attempt_autoswitch", master_params_.is_attempt_autoswitch, true);
   nh.param<std::string>(master_prefix + "world_frame",     master_params_.world_frame, "map");
+  nh.param<std::string>(master_prefix + "semantic_map_topic", master_params_.semantic_map_topic, "/octomap_full");
   master_params_.terrain_range = std::min(master_params_.terrain_range, master_params_.sensor_range);
 
   // map handler params
   nh.param<float>(map_prefix + "floor_height",        map_params_.floor_height, 2.0);
-  nh.param<float>(map_prefix + "cell_length",         map_params_.cell_length, 5.0);
-  nh.param<float>(map_prefix + "map_grid_max_length", map_params_.grid_max_length, 5000.0);
-  nh.param<float>(map_prefix + "map_grad_max_height", map_params_.grid_max_height, 100.0);
-  map_params_.height_voxel_dim = master_params_.voxel_dim * 2.0f;
-  map_params_.cell_height      = map_params_.floor_height / 2.5f;
   map_params_.sensor_range     = master_params_.sensor_range;
 
   // utility params
@@ -564,15 +555,15 @@ void FARMaster::LoadROSParams() {
   nh.param<int>(utility_prefix   + "obs_inflate_size",       FARUtil::kObsInflate, 2);
   FARUtil::kLeafSize       = master_params_.voxel_dim;
   FARUtil::kNearDist       = master_params_.robot_dim;
-  FARUtil::kHeightVoxel    = map_params_.height_voxel_dim;
+  FARUtil::kHeightVoxel    = master_params_.voxel_dim * 2.0f;
   FARUtil::kMatchDist      = master_params_.robot_dim * 2.0f + FARUtil::kLeafSize;
   FARUtil::kNavClearDist   = master_params_.robot_dim / 2.0f + FARUtil::kLeafSize;
   FARUtil::kProjectDist    = master_params_.voxel_dim;
   FARUtil::worldFrameId    = master_params_.world_frame;
   FARUtil::kVizRatio       = master_params_.viz_ratio;
   FARUtil::kTolerZ         = map_params_.floor_height - FARUtil::kHeightVoxel;
-  FARUtil::kCellLength     = map_params_.cell_length;
-  FARUtil::kCellHeight     = map_params_.cell_height;
+  FARUtil::kCellLength     = master_params_.voxel_dim;
+  FARUtil::kCellHeight     = map_params_.floor_height / 2.5f;
   FARUtil::kAcceptAlign    = FARUtil::kAcceptAlign / 180.0f * M_PI;
   FARUtil::kAngleNoise     = FARUtil::kAngleNoise  / 180.0f * M_PI; 
   FARUtil::robot_dim       = master_params_.robot_dim;
@@ -671,123 +662,52 @@ void FARMaster::OdomCallBack(const nav_msgs::OdometryConstPtr& msg) {
   is_odom_init_ = true;
 }
 
-// 体素滤波、nan滤波，如果odom frame和world frame不一致，则进行坐标变换
-void FARMaster::PrcocessCloud(const sensor_msgs::PointCloud2ConstPtr& pc,
-                             const PointCloudPtr& cloudOut) 
-{
-
-  pcl::PointCloud<PCLPoint> temp_cloud;
-  pcl::fromROSMsg(*pc, temp_cloud);
-  cloudOut->clear(), *cloudOut = temp_cloud;
-  if (cloudOut->empty()) return;
-  FARUtil::FilterCloud(cloudOut, master_params_.voxel_dim);
-  // transform cloud frame
-  std::string cloud_frame = pc->header.frame_id;
-  FARUtil::RemoveNanInfPoints(cloudOut);
-  if (!FARUtil::IsSameFrameID(cloud_frame, master_params_.world_frame)) {
-    if (FARUtil::IsDebug) ROS_WARN_ONCE("FARMaster: cloud frame does NOT match with world frame!");
-    try
-    {
-      FARUtil::TransformPCLFrame(cloud_frame, 
-                                master_params_.world_frame, 
-                                tf_listener_,
-                                cloudOut);
-    }
-    catch(tf::TransformException ex)
-    {
-      ROS_ERROR("Tracking cloud TF lookup: %s",ex.what());
-      return;
-    }
-  }
-}
-
-// ScanCallBack 的输出 cur_scan_cloud_ 会被 TerrainCallBack 在动态障碍提取中消费，
-void FARMaster::ScanCallBack(const sensor_msgs::PointCloud2ConstPtr& scan_pc) {
-  if (master_params_.is_static_env || !is_odom_init_) return;
-  this->PrcocessCloud(scan_pc, FARUtil::cur_scan_cloud_);
-  scan_handler_.UpdateRobotPosition(robot_pos_);
-}
-
-// 上游给的点云无论是TerrainLocal还是TerrainExt都是100HZ
-void FARMaster::TerrainLocalCallBack(const sensor_msgs::PointCloud2ConstPtr& pc) {
-  if (master_params_.is_static_env) return;
-  this->PrcocessCloud(pc, local_terrain_ptr_);
-  FARUtil::ExtractFreeAndObsCloud(local_terrain_ptr_, FARUtil::local_terrain_free_, FARUtil::local_terrain_obs_);
-}
-
-void FARMaster::TerrainCallBack(const sensor_msgs::PointCloud2ConstPtr& pc) {
+void FARMaster::SemanticMapCallBack(const octomap_msgs::OctomapConstPtr& msg) {
+  if (!msg) return;
   if (!is_odom_init_) return;
-  // update map grid robot center
-  map_handler_.UpdateRobotPosition(FARUtil::robot_pos);
-  if (!is_stop_update_) {
-    this->PrcocessCloud(pc, temp_cloud_ptr_);
-    // 仅保留FARUtil::kTolerZ方格内的点
-    FARUtil::CropBoxCloud(temp_cloud_ptr_, robot_pos_, Point3D(master_params_.terrain_range, master_params_.terrain_range, FARUtil::kTolerZ));
-    // 根据kFreeZ来划分自由点云和障碍点云，intensity>kFreeZ的点是障碍点云，intensity<=kFreeZ的点是自由点云，intensity表示点与地面的高度差
-    FARUtil::ExtractFreeAndObsCloud(temp_cloud_ptr_, temp_free_ptr_, temp_obs_ptr_);
-    // 这个的意思是一旦假设环境是动态的，就会把当前帧的障碍点云和历史动态障碍点云做一个“去重”，避免重复计算。
-    if (!master_params_.is_static_env) {
-      // 在temp_obs_ptr_删除FARUtil::stack_dyobs_cloud_重复的点
-      // 只是做了一个“空间上重叠”的去除：如果当前帧的障碍点和历史动态点云落在同一个体素/近邻区域，就会直接把当前点删掉。它没有考虑“这个历史点到底是刚刚出现的动态物体，还是已经停下来变成静态环境的一部分”。
-      FARUtil::RemoveOverlapCloud(temp_obs_ptr_, FARUtil::stack_dyobs_cloud_, true);
-    }
-    map_handler_.UpdateObsCloudGrid(temp_obs_ptr_);
-    map_handler_.UpdateFreeCloudGrid(temp_free_ptr_);
-    // extract new points
-    // 从“当前帧看到的障碍点云”里，提取出“相对当前周围已知障碍地图来说新出现的那些点”，然后把结果写进 cur_new_cloud_
-    FARUtil::ExtractNewObsPointCloud(temp_obs_ptr_, FARUtil::surround_obs_cloud_, FARUtil::cur_new_cloud_);
-  } else { // stop env update
-    temp_cloud_ptr_->clear();
-    FARUtil::cur_new_cloud_->clear();
-  }
-  // extract surround free cloud & update terrain height
-  map_handler_.GetSurroundFreeCloud(FARUtil::surround_free_cloud_);
 
-  map_handler_.UpdateTerrainHeightGrid(FARUtil::surround_free_cloud_, terrain_height_ptr_);
-  // update surround obs cloud
+  // FARMaster subscribes and forwards; semantic map parsing/cache ownership is inside MapHandler.
+  map_handler_.SetSemanticOctomap(msg);
+  if (!map_handler_.HasSemanticMap()) return;
+
+  // keep the semantic-derived local caches aligned with the current robot position
+  map_handler_.UpdateRobotPosition(FARUtil::robot_pos);
+
+  // semantic octomap path: read derived obstacle / terrain-support clouds only
+  map_handler_.GetSurroundFreeCloud(FARUtil::surround_free_cloud_);
   map_handler_.GetSurroundObsCloud(FARUtil::surround_obs_cloud_);
-  // extract dynamic obstacles
+  map_handler_.UpdateTerrainHeightGrid(FARUtil::surround_free_cloud_, terrain_height_ptr_);
+
+  FARUtil::cur_new_cloud_->clear();
+  if (!is_stop_update_) {
+    *FARUtil::cur_new_cloud_ = *FARUtil::surround_obs_cloud_;
+  }
+
   FARUtil::cur_dyobs_cloud_->clear();
   dyremove_before_obs_ptr_->clear();
   if (!master_params_.is_static_env && !is_stop_update_) {
-    // 把当前激光扫描、当前环境障碍、当前自由空间这三份信息送进提取器，输出本帧动态障碍点云。
-    this->ExtractDynamicObsFromScan(FARUtil::cur_scan_cloud_, 
-                                    FARUtil::surround_obs_cloud_, 
-                                    FARUtil::surround_free_cloud_, 
+    this->ExtractDynamicObsFromScan(FARUtil::cur_scan_cloud_,
+                                    FARUtil::surround_obs_cloud_,
+                                    FARUtil::surround_free_cloud_,
                                     FARUtil::cur_dyobs_cloud_);
-    // 把这些动态点从地图里删除
-    // 当 cur_dyobs_cloud_ 数量超过阈值后，会执行：
     if (FARUtil::cur_dyobs_cloud_->size() > FARUtil::kDyObsThred) {
       if (FARUtil::IsDebug) ROS_WARN("FARMaster: dynamic obstacle detected, size: %ld", FARUtil::cur_dyobs_cloud_->size());
 
       pcl::copyPointCloud(*FARUtil::surround_obs_cloud_, *dyremove_before_obs_ptr_);
 
       FARUtil::InflateCloud(FARUtil::cur_dyobs_cloud_, master_params_.voxel_dim, 1, true);
-      // 从地图中删除这些动态障碍点云，避免它们影响后续的可视图更新和路径规划。
-      map_handler_.RemoveObsCloudFromGrid(FARUtil::cur_dyobs_cloud_);
-      // 在该格子的障碍点云里，删除与 obsCloud 重叠的点。
       FARUtil::RemoveOverlapCloud(FARUtil::surround_obs_cloud_, FARUtil::cur_dyobs_cloud_);
-      map_handler_.GetSurroundObsCloud(FARUtil::surround_obs_cloud_);
       FARUtil::FilterCloud(FARUtil::cur_dyobs_cloud_, master_params_.voxel_dim);
-      // update new cloud
-      // 把“本帧检测到的动态障碍点”追加到“本帧新增障碍点缓冲”里。
       *FARUtil::cur_new_cloud_ += *FARUtil::cur_dyobs_cloud_;
       FARUtil::FilterCloud(FARUtil::cur_new_cloud_, master_params_.voxel_dim);
     }
-    // update world dynamic obstacles
-     // 动态障碍做时间栈衰减，动态障碍会保留一段时间再衰减，避免一帧抖动导致反复“加了又删”。
     FARUtil::StackCloudByTime(FARUtil::cur_dyobs_cloud_, FARUtil::stack_dyobs_cloud_, FARUtil::kObsDecayTime);
   }
-  
-  // create and update kdtrees
-  // 把本帧新点 cur_new_cloud_ 加到历史缓冲 stack_new_cloud_，并按时间淘汰超过 kNewDecayTime 的旧点。也就是一个“带过期时间的滑动窗口点云”
- 
+
   FARUtil::StackCloudByTime(FARUtil::cur_new_cloud_, FARUtil::stack_new_cloud_, FARUtil::kNewDecayTime);
   FARUtil::UpdateKdTrees(FARUtil::stack_new_cloud_);
-  // 主要是为了保证后续可见图更新有障碍边界可提取，避免在全空数据时误进入主流程
   if (!FARUtil::surround_obs_cloud_->empty()) is_cloud_init_ = true;
 
-  /* visualize clouds */
   planner_viz_.VizPointCloud(new_PCL_pub_, FARUtil::stack_new_cloud_);
   planner_viz_.VizPointCloud(dynamic_obs_pub_, FARUtil::cur_dyobs_cloud_);
   planner_viz_.VizPointCloud(surround_free_debug_, FARUtil::surround_free_cloud_);
@@ -795,12 +715,10 @@ void FARMaster::TerrainCallBack(const sensor_msgs::PointCloud2ConstPtr& pc) {
   planner_viz_.VizPointCloud(surround_obs_before_dyremove_debug_, dyremove_before_obs_ptr_);
   planner_viz_.VizPointCloud(surround_obs_after_dyremove_debug_, FARUtil::surround_obs_cloud_);
   planner_viz_.VizPointCloud(terrain_height_pub_, terrain_height_ptr_);
-  // visualize map grid
   PointStack neighbor_centers, occupancy_centers;
   map_handler_.GetNeighborCeilsCenters(neighbor_centers);
   map_handler_.GetOccupancyCeilsCenters(occupancy_centers);
-  planner_viz_.VizMapGrids(neighbor_centers, occupancy_centers, map_params_.cell_length, map_params_.cell_height);
-  // DBBUG visual raycast grids
+  planner_viz_.VizMapGrids(neighbor_centers, occupancy_centers, FARUtil::kCellLength, FARUtil::kCellHeight);
   if (!master_params_.is_static_env) {
     scan_handler_.GridVisualCloud(scan_grid_ptr_, GridStatus::RAY);
     planner_viz_.VizPointCloud(scan_grid_debug_, scan_grid_ptr_);
@@ -852,8 +770,6 @@ PointCloudPtr  FARUtil::cur_new_cloud_       = PointCloudPtr(new pcl::PointCloud
 PointCloudPtr  FARUtil::cur_dyobs_cloud_     = PointCloudPtr(new pcl::PointCloud<PCLPoint>());
 PointCloudPtr  FARUtil::stack_dyobs_cloud_   = PointCloudPtr(new pcl::PointCloud<PCLPoint>());
 PointCloudPtr  FARUtil::cur_scan_cloud_      = PointCloudPtr(new pcl::PointCloud<PCLPoint>());
-PointCloudPtr  FARUtil::local_terrain_obs_   = PointCloudPtr(new pcl::PointCloud<PCLPoint>());
-PointCloudPtr  FARUtil::local_terrain_free_  = PointCloudPtr(new pcl::PointCloud<PCLPoint>());
 PointKdTreePtr FARUtil::kdtree_new_cloud_    = PointKdTreePtr(new pcl::KdTreeFLANN<PCLPoint>());
 PointKdTreePtr FARUtil::kdtree_filter_cloud_ = PointKdTreePtr(new pcl::KdTreeFLANN<PCLPoint>());
 /* init static utility values */
@@ -917,13 +833,6 @@ std::unordered_set<NavEdge, navedge_hash> ContourGraph::boundary_contour_set_;
 
 /* init terrain map values */
 PointKdTreePtr MapHandler::kdtree_terrain_clould_;
-std::vector<int> MapHandler::terrain_grid_occupy_list_;
-std::vector<int> MapHandler::terrain_grid_traverse_list_;
-std::unordered_set<int> MapHandler::neighbor_obs_indices_;
-std::unordered_set<int> MapHandler::extend_obs_indices_;
-std::unique_ptr<grid_ns::Grid<PointCloudPtr>> MapHandler::world_free_cloud_grid_;
-std::unique_ptr<grid_ns::Grid<PointCloudPtr>> MapHandler::world_obs_cloud_grid_;
-std::unique_ptr<grid_ns::Grid<std::vector<float>>> MapHandler::terrain_height_grid_;
 
 
 int main(int argc, char** argv){

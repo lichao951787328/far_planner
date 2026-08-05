@@ -115,8 +115,6 @@ public:
     static PointCloudPtr cur_new_cloud_;
     static PointCloudPtr cur_dyobs_cloud_;
     static PointCloudPtr cur_scan_cloud_;
-    static PointCloudPtr local_terrain_obs_;
-    static PointCloudPtr local_terrain_free_;
     // kdTree cloud
     static PointKdTreePtr kdtree_new_cloud_;
     static PointKdTreePtr kdtree_filter_cloud_;

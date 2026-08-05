@@ -46,7 +46,7 @@ void TerrainPlanner::UpdateCenterNode(const NavNodePtr& node_ptr) {
 // 把障碍点坐标投影到 terrain_grids_ 的二维网格下标。
 // 以这个格子为中心，按 inflate_size 做一个小范围膨胀。
 // 把膨胀范围内的格子都标成 is_occupied = true。
-// 每次机器人位置更新时，都会把 FARUtil::local_terrain_obs_ 送给 terrain_planner_。这表示 TerrainPlanner 一直维护一张“当前机器人周围的局部障碍地图”。
+// 每次机器人位置更新时，都会把 FARUtil::surround_obs_cloud_ 送给 terrain_planner_。这表示 TerrainPlanner 一直维护一张“当前机器人周围的局部障碍地图”。
 // 目的：让 TerrainPlanner 能判断两点之间是否被障碍挡住
 void TerrainPlanner::SetLocalTerrainObsCloud(const PointCloudPtr& obsCloudIn) {
     if (!is_grids_init_ || obsCloudIn->empty()) return;
