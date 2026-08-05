@@ -674,55 +674,23 @@ void FARMaster::SemanticMapCallBack(const octomap_msgs::OctomapConstPtr& msg) {
   map_handler_.UpdateRobotPosition(FARUtil::robot_pos);
 
   // semantic octomap path: read derived obstacle / terrain-support clouds only
-  map_handler_.GetSurroundFreeCloud(FARUtil::surround_free_cloud_);
-  map_handler_.GetSurroundObsCloud(FARUtil::surround_obs_cloud_);
-  map_handler_.UpdateTerrainHeightGrid(FARUtil::surround_free_cloud_, terrain_height_ptr_);
+  
 
-  FARUtil::cur_new_cloud_->clear();
-  if (!is_stop_update_) {
-    *FARUtil::cur_new_cloud_ = *FARUtil::surround_obs_cloud_;
-  }
-
-  FARUtil::cur_dyobs_cloud_->clear();
-  dyremove_before_obs_ptr_->clear();
-  if (!master_params_.is_static_env && !is_stop_update_) {
-    this->ExtractDynamicObsFromScan(FARUtil::cur_scan_cloud_,
-                                    FARUtil::surround_obs_cloud_,
-                                    FARUtil::surround_free_cloud_,
-                                    FARUtil::cur_dyobs_cloud_);
-    if (FARUtil::cur_dyobs_cloud_->size() > FARUtil::kDyObsThred) {
-      if (FARUtil::IsDebug) ROS_WARN("FARMaster: dynamic obstacle detected, size: %ld", FARUtil::cur_dyobs_cloud_->size());
-
-      pcl::copyPointCloud(*FARUtil::surround_obs_cloud_, *dyremove_before_obs_ptr_);
-
-      FARUtil::InflateCloud(FARUtil::cur_dyobs_cloud_, master_params_.voxel_dim, 1, true);
-      FARUtil::RemoveOverlapCloud(FARUtil::surround_obs_cloud_, FARUtil::cur_dyobs_cloud_);
-      FARUtil::FilterCloud(FARUtil::cur_dyobs_cloud_, master_params_.voxel_dim);
-      *FARUtil::cur_new_cloud_ += *FARUtil::cur_dyobs_cloud_;
-      FARUtil::FilterCloud(FARUtil::cur_new_cloud_, master_params_.voxel_dim);
-    }
-    FARUtil::StackCloudByTime(FARUtil::cur_dyobs_cloud_, FARUtil::stack_dyobs_cloud_, FARUtil::kObsDecayTime);
-  }
-
-  FARUtil::StackCloudByTime(FARUtil::cur_new_cloud_, FARUtil::stack_new_cloud_, FARUtil::kNewDecayTime);
-  FARUtil::UpdateKdTrees(FARUtil::stack_new_cloud_);
-  if (!FARUtil::surround_obs_cloud_->empty()) is_cloud_init_ = true;
-
-  planner_viz_.VizPointCloud(new_PCL_pub_, FARUtil::stack_new_cloud_);
-  planner_viz_.VizPointCloud(dynamic_obs_pub_, FARUtil::cur_dyobs_cloud_);
-  planner_viz_.VizPointCloud(surround_free_debug_, FARUtil::surround_free_cloud_);
-  planner_viz_.VizPointCloud(surround_obs_debug_,  FARUtil::surround_obs_cloud_);
-  planner_viz_.VizPointCloud(surround_obs_before_dyremove_debug_, dyremove_before_obs_ptr_);
-  planner_viz_.VizPointCloud(surround_obs_after_dyremove_debug_, FARUtil::surround_obs_cloud_);
-  planner_viz_.VizPointCloud(terrain_height_pub_, terrain_height_ptr_);
-  PointStack neighbor_centers, occupancy_centers;
-  map_handler_.GetNeighborCeilsCenters(neighbor_centers);
-  map_handler_.GetOccupancyCeilsCenters(occupancy_centers);
-  planner_viz_.VizMapGrids(neighbor_centers, occupancy_centers, FARUtil::kCellLength, FARUtil::kCellHeight);
-  if (!master_params_.is_static_env) {
-    scan_handler_.GridVisualCloud(scan_grid_ptr_, GridStatus::RAY);
-    planner_viz_.VizPointCloud(scan_grid_debug_, scan_grid_ptr_);
-  }
+  // planner_viz_.VizPointCloud(new_PCL_pub_, FARUtil::stack_new_cloud_);
+  // planner_viz_.VizPointCloud(dynamic_obs_pub_, FARUtil::cur_dyobs_cloud_);
+  // planner_viz_.VizPointCloud(surround_free_debug_, FARUtil::surround_free_cloud_);
+  // planner_viz_.VizPointCloud(surround_obs_debug_,  FARUtil::surround_obs_cloud_);
+  // planner_viz_.VizPointCloud(surround_obs_before_dyremove_debug_, dyremove_before_obs_ptr_);
+  // planner_viz_.VizPointCloud(surround_obs_after_dyremove_debug_, FARUtil::surround_obs_cloud_);
+  // planner_viz_.VizPointCloud(terrain_height_pub_, terrain_height_ptr_);
+  // PointStack neighbor_centers, occupancy_centers;
+  // map_handler_.GetNeighborCeilsCenters(neighbor_centers);
+  // map_handler_.GetOccupancyCeilsCenters(occupancy_centers);
+  // planner_viz_.VizMapGrids(neighbor_centers, occupancy_centers, FARUtil::kCellLength, FARUtil::kCellHeight);
+  // if (!master_params_.is_static_env) {
+  //   scan_handler_.GridVisualCloud(scan_grid_ptr_, GridStatus::RAY);
+  //   planner_viz_.VizPointCloud(scan_grid_debug_, scan_grid_ptr_);
+  // }
 }
 
 // 得到动态点云

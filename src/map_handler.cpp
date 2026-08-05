@@ -181,25 +181,159 @@ void MapHandler::ClearObsCellThroughPosition(const Point3D& point) {
 }
 
 // is_large 就是控制“水平范围是否扩大一圈”的开关
+// 实现逻辑，因为这个是在找整个全局地图中的邻域点，所以需要遍历帧整个八叉树地图，找到八叉树内不同属性的点集。
+
+int getSphereBoxState(const point3d& node_center, double node_size, 
+                      const point3d& sphere_center, double radius) {
+    double half_size = node_size / 2.0;
+    double r_sq = radius * radius;
+    
+    // 1. 判断是否完全在球形区域内 (计算正方体上距离球心最远点的距离)
+    double dx_max = std::fabs(sphere_center.x() - node_center.x()) + half_size;
+    double dy_max = std::fabs(sphere_center.y() - node_center.y()) + half_size;
+    double dz_max = std::fabs(sphere_center.z() - node_center.z()) + half_size;
+    double dist_max_sq = dx_max*dx_max + dy_max*dy_max + dz_max*dz_max;
+    
+    if (dist_max_sq <= r_sq) {
+        return 1; // 全包：整个方形区域都在球形区域内
+    }
+    
+    // 2. 判断是否完全在球形区域外 (计算正方体上距离球心最近点的距离)
+    double dx_min = std::max(std::fabs(sphere_center.x() - node_center.x()) - half_size, 0.0);
+    double dy_min = std::max(std::fabs(sphere_center.y() - node_center.y()) - half_size, 0.0);
+    double dz_min = std::max(std::fabs(sphere_center.z() - node_center.z()) - half_size, 0.0);
+    double dist_min_sq = dx_min*dx_min + dy_min*dy_min + dz_min*dz_min;
+    
+    if (dist_min_sq > r_sq) {
+        return 0; // 未包：完全在球形区域外
+    }
+    
+    return 2; // 半包：与球形区域相交
+}
+ 
+// 辅助函数：全包状态下，直接高速生成该节点包含的所有最大深度节点坐标
+void expandToMaxDepth(const point3d& node_center, double node_size, double resolution, 
+                      std::vector<point3d>& results) {
+    // 如果当前节点尺寸已经达到最大分辨率，直接作为结果收录
+    if (node_size <= resolution + 1e-6) {
+        results.push_back(node_center);
+        return;
+    }
+    
+    // 虚拟拆分为8个子节点
+    double half = node_size / 2.0;
+    double quarter = half / 2.0;
+    for (int i = 0; i < 8; ++i) {
+        point3d child_center = node_center;
+        child_center.x() += (i & 1) ? quarter : -quarter;
+        child_center.y() += (i & 2) ? quarter : -quarter;
+        child_center.z() += (i & 4) ? quarter : -quarter;
+        // 递归展开到最大深度
+        expandToMaxDepth(child_center, half, resolution, results);
+    }
+}
+ 
+// 主处理函数：递归拆分与判断
+void processNode(const point3d& node_center, double node_size, double resolution, 
+                 const point3d& sphere_center, double radius, std::vector<point3d>& results) {
+    int state = getSphereBoxState(node_center, node_size, sphere_center, radius);
+    
+    if (state == 0) {
+        return; // 未包：直接忽略
+    }
+    
+    // 如果已经达到最大深度，无论全包还是半包，都作为最终结果收录
+    // (半包状态下，最大深度的体素与球体有交集，通常也是我们需要的)
+    if (node_size <= resolution + 1e-6) {
+        results.push_back(node_center);
+        return;
+    }
+    
+    double half = node_size / 2.0;
+    double quarter = half / 2.0;
+    
+    if (state == 1) {
+        // 全包：无需再对子节点做球体相交判断，直接全量展开到最大深度
+        expandToMaxDepth(node_center, node_size, resolution, results);
+    } else if (state == 2) {
+        // 半包：必须拆分为8个子节点，递归重新判断状态
+        for (int i = 0; i < 8; ++i) {
+            point3d child_center = node_center;
+            child_center.x() += (i & 1) ? quarter : -quarter;
+            child_center.y() += (i & 2) ? quarter : -quarter;
+            child_center.z() += (i & 4) ? quarter : -quarter;
+            processNode(child_center, half, resolution, sphere_center, radius, results);
+        }
+    }
+}
+ 
+
 void MapHandler::GetCloudOfPoint(const Point3D& center, 
                                  const PointCloudPtr& cloudOut,
                                  const CloudType& type,
                                  const bool& is_large) 
 {
     cloudOut->clear();
-    if (!has_semantic_map_) return;
+    if (!has_semantic_map_ || !semantic_map_msg_) return;
+    if (type != CloudType::OBS_CLOUD && type != CloudType::FREE_CLOUD) {
+        if (FARUtil::IsDebug) ROS_ERROR("MH: Assigned cloud type invalid.");
+        return;
+    }
 
     const float radius = is_large ? semantic_params_.local_window_radius : semantic_params_.local_window_radius * 0.5f;
-    if (type == CloudType::OBS_CLOUD) {
-        if (semantic_obs_cloud_ && !semantic_obs_cloud_->empty()) {
-            CropCloudAroundCenter(semantic_obs_cloud_, center, radius, cloudOut);
+    if (radius <= 0.0f) return;
+
+    std::unique_ptr<octomap::AbstractOcTree> tree(octomap_msgs::msgToMap(*semantic_map_msg_));
+    if (!tree) {
+        ROS_WARN_THROTTLE(1.0, "MH: failed to deserialize semantic octomap in GetCloudOfPoint.");
+        return;
+    }
+
+    const auto* semantic_tree = dynamic_cast<const SemanticOctree*>(tree.get());
+    const auto* color_tree = dynamic_cast<const octomap::ColorOcTree*>(tree.get());
+    if (!semantic_tree && !color_tree) return;
+
+    std::vector<point3d> query_voxel_centers;
+    query_voxel_centers.reserve(4096);
+    const point3d sphere_center(center.x, center.y, center.z);
+    const double resolution = tree->getResolution();
+    processNode(sphere_center, static_cast<double>(radius) * 2.0, resolution, sphere_center, radius, query_voxel_centers);
+
+    for (const auto& query_center : query_voxel_centers) {
+        ColorOcTreeNode::Color semantic_color;
+        bool matched = false;
+
+        if (semantic_tree) {
+            const SemanticOcTreeNode* node = semantic_tree->search(query_center);
+            if (!node || !semantic_tree->isNodeOccupied(node)) continue;
+            semantic_color = node->isSemanticsSet()
+                ? node->getSemantics().getSemanticColor()
+                : node->getColor();
+            const uint32_t rgb_key = MakeRgbKey(semantic_color.r, semantic_color.g, semantic_color.b);
+            matched = (type == CloudType::OBS_CLOUD)
+                ? MatchRgbKey(obstacle_groups_, rgb_key)
+                : MatchRgbKey(terrain_support_groups_, rgb_key);
+        } else {
+            const octomap::ColorOcTreeNode* node = color_tree->search(query_center);
+            if (!node || !color_tree->isNodeOccupied(node)) continue;
+            semantic_color = node->getColor();
+            const uint32_t rgb_key = MakeRgbKey(semantic_color.r, semantic_color.g, semantic_color.b);
+            matched = (type == CloudType::OBS_CLOUD)
+                ? MatchRgbKey(obstacle_groups_, rgb_key)
+                : MatchRgbKey(terrain_support_groups_, rgb_key);
         }
-    } else if (type == CloudType::FREE_CLOUD) {
-        if (semantic_terrain_support_cloud_ && !semantic_terrain_support_cloud_->empty()) {
-            CropCloudAroundCenter(semantic_terrain_support_cloud_, center, radius, cloudOut);
-        }
-    } else {
-        if (FARUtil::IsDebug) ROS_ERROR("MH: Assigned cloud type invalid.");
+
+        if (!matched) continue;
+        PCLPoint p;
+        p.x = query_center.x();
+        p.y = query_center.y();
+        p.z = query_center.z();
+        p.intensity = 0.0f;
+        cloudOut->points.push_back(p);
+    }
+
+    if (!cloudOut->empty()) {
+        FARUtil::FilterCloud(cloudOut, FARUtil::kLeafSize);
     }
 }
 
@@ -219,33 +353,55 @@ void MapHandler::UpdateRobotPosition(const Point3D& odom_pos) {
     robot_pos_cache_ = odom_pos;
 }
 
-void MapHandler::GetSurroundObsCloud(const PointCloudPtr& obsCloudOut) {
-    if (!is_init_) return;
-    obsCloudOut->clear();
-    if (!has_semantic_map_ || !semantic_obs_cloud_ || semantic_obs_cloud_->empty()) return;
-    CropCloudAroundCenter(semantic_obs_cloud_, robot_pos_cache_, semantic_params_.local_window_radius, obsCloudOut);
-}
+// void MapHandler::GetSurroundObsCloud(const PointCloudPtr& obsCloudOut) {
+//     if (!is_init_) return;
+//     obsCloudOut->clear();
+//     if (!has_semantic_map_ || !semantic_obs_cloud_ || semantic_obs_cloud_->empty()) return;
+//     CropCloudAroundCenter(semantic_obs_cloud_, robot_pos_cache_, semantic_params_.local_window_radius, obsCloudOut);
+// }
 
-void MapHandler::GetSurroundFreeCloud(const PointCloudPtr& freeCloudOut) {
-    if (!is_init_) return;
-    freeCloudOut->clear();
-    if (!has_semantic_map_ || !semantic_terrain_support_cloud_ || semantic_terrain_support_cloud_->empty()) return;
-    CropCloudAroundCenter(semantic_terrain_support_cloud_, robot_pos_cache_, semantic_params_.local_window_radius, freeCloudOut);
-}
+// void MapHandler::GetSurroundFreeCloud(const PointCloudPtr& freeCloudOut) {
+//     if (!is_init_) return;
+//     freeCloudOut->clear();
+//     if (!has_semantic_map_ || !semantic_terrain_support_cloud_ || semantic_terrain_support_cloud_->empty()) return;
+//     CropCloudAroundCenter(semantic_terrain_support_cloud_, robot_pos_cache_, semantic_params_.local_window_radius, freeCloudOut);
+// }
 
 // 把当前帧障碍点云写入“障碍栅格地图”，只保留机器人邻域内的点，并对被修改过的格子做降采样滤波。
 // 同时把输入点云替换为“有效点”（在范围内且被接受）。
-void MapHandler::UpdateObsCloudGrid(const PointCloudPtr& obsCloudInOut) {
-    (void)obsCloudInOut;
-}
+// void MapHandler::UpdateObsCloudGrid(const PointCloudPtr& obsCloudInOut) {
+//     (void)obsCloudInOut;
+// }
 
 // 把新来的 free 点云写入全局 free 栅格地图，并对改动过的格子做去冗余滤波
-void MapHandler::UpdateFreeCloudGrid(const PointCloudPtr& freeCloudIn){
-    (void)freeCloudIn;
-}
+// void MapHandler::UpdateFreeCloudGrid(const PointCloudPtr& freeCloudIn){
+//     (void)freeCloudIn;
+// }
 
 // 在“查询某个点的地面高度”，并通过 is_matched 告诉你是否直接匹配成功。
 float MapHandler::TerrainHeightOfPoint(const Point3D& p, bool& is_matched, const bool& is_search) {
+
+    if (!semantic_terrain_support_octree_) {
+        return NAN; // 地形树未构建
+    }
+ 
+    // 设定射线起点 (x, y, 高空) 和方向 (垂直向下)
+    // 注意：起点Z需要高于地图中可能的最高地形
+    octomap::point3d start(x, y, 10.0); 
+    octomap::point3d direction(0.0f, 0.0f, -1.0f);
+    octomap::point3d end;
+ 
+    // 执行射线投射，最大距离设为20米
+    bool hit = semantic_terrain_support_octree_->castRay(start, direction, end, true, 20.0);
+    
+    if (hit) {
+        // end.z() 即为射线击中地形表层体素的中心 Z 坐标
+        return end.z();
+    }
+ 
+    return NAN; // 该点下方未找到地形
+
+    
     is_matched = false;
     if (kdtree_terrain_clould_ && kdtree_terrain_clould_->getInputCloud() && !kdtree_terrain_clould_->getInputCloud()->empty()) {
         float dist_square = FARUtil::kINF;
@@ -355,38 +511,38 @@ void MapHandler::UpdateTerrainHeightGrid(const PointCloudPtr& freeCloudIn, const
     kdtree_terrain_clould_->setInputCloud(flat_terrain_cloud_);
 }
 
-void MapHandler::GetNeighborCeilsCenters(PointStack& neighbor_centers) {
-    if (!is_init_) return;
-    neighbor_centers.clear();
-    if (!has_semantic_map_ || !semantic_obs_cloud_) return;
-    PointCloudPtr local_obs(new pcl::PointCloud<PCLPoint>());
-    CropCloudAroundCenter(semantic_obs_cloud_, robot_pos_cache_, semantic_params_.local_window_radius, local_obs);
-    for (const auto& point : local_obs->points) {
-        neighbor_centers.emplace_back(point.x, point.y, point.z);
-    }
-}
+// void MapHandler::GetNeighborCeilsCenters(PointStack& neighbor_centers) {
+//     if (!is_init_) return;
+//     neighbor_centers.clear();
+//     if (!has_semantic_map_ || !semantic_obs_cloud_) return;
+//     PointCloudPtr local_obs(new pcl::PointCloud<PCLPoint>());
+//     CropCloudAroundCenter(semantic_obs_cloud_, robot_pos_cache_, semantic_params_.local_window_radius, local_obs);
+//     for (const auto& point : local_obs->points) {
+//         neighbor_centers.emplace_back(point.x, point.y, point.z);
+//     }
+// }
 
-void MapHandler::GetOccupancyCeilsCenters(PointStack& occupancy_centers) {
-    if (!is_init_) return;
-    occupancy_centers.clear();
-    if (!has_semantic_map_) return;
-    if (semantic_obs_cloud_) {
-        PointCloudPtr local_obs(new pcl::PointCloud<PCLPoint>());
-        CropCloudAroundCenter(semantic_obs_cloud_, robot_pos_cache_, semantic_params_.local_window_radius, local_obs);
-        for (const auto& point : local_obs->points) {
-            occupancy_centers.emplace_back(point.x, point.y, point.z);
-        }
-    }
-    if (semantic_terrain_support_cloud_) {
-        PointCloudPtr local_terrain(new pcl::PointCloud<PCLPoint>());
-        CropCloudAroundCenter(semantic_terrain_support_cloud_, robot_pos_cache_, semantic_params_.local_window_radius, local_terrain);
-        for (const auto& point : local_terrain->points) {
-            occupancy_centers.emplace_back(point.x, point.y, point.z);
-        }
-    }
-}
+// void MapHandler::GetOccupancyCeilsCenters(PointStack& occupancy_centers) {
+//     if (!is_init_) return;
+//     occupancy_centers.clear();
+//     if (!has_semantic_map_) return;
+//     if (semantic_obs_cloud_) {
+//         PointCloudPtr local_obs(new pcl::PointCloud<PCLPoint>());
+//         CropCloudAroundCenter(semantic_obs_cloud_, robot_pos_cache_, semantic_params_.local_window_radius, local_obs);
+//         for (const auto& point : local_obs->points) {
+//             occupancy_centers.emplace_back(point.x, point.y, point.z);
+//         }
+//     }
+//     if (semantic_terrain_support_cloud_) {
+//         PointCloudPtr local_terrain(new pcl::PointCloud<PCLPoint>());
+//         CropCloudAroundCenter(semantic_terrain_support_cloud_, robot_pos_cache_, semantic_params_.local_window_radius, local_terrain);
+//         for (const auto& point : local_terrain->points) {
+//             occupancy_centers.emplace_back(point.x, point.y, point.z);
+//         }
+//     }
+// }
 
-void MapHandler::RemoveObsCloudFromGrid(const PointCloudPtr& obsCloud) {
-    (void)obsCloud;
-}
+// void MapHandler::RemoveObsCloudFromGrid(const PointCloudPtr& obsCloud) {
+//     (void)obsCloud;
+// }
 
