@@ -3,29 +3,21 @@
 
 #include "utility.h"
 #include <octomap/octomap.h>
+#include <octomap_msgs/Octomap.h>
 #include <cstdint>
 #include <memory>
-#include <boost/shared_ptr.hpp>
 #include <unordered_map>
 #include <unordered_set>
 
-namespace octomap_msgs {
-struct Octomap;
-using OctomapConstPtr = boost::shared_ptr<const Octomap>;
-}  // namespace octomap_msgs
 enum CloudType {
     FREE_CLOUD = 0,
     OBS_CLOUD  = 1
 };
 
-struct MapHandlerParams {
-    MapHandlerParams() = default;
-    float sensor_range;
-    float floor_height;
-};
-
 struct SemanticClassGroup {
     SemanticClassGroup() = default;
+    SemanticClassGroup(const std::string& group_name, const uint32_t key)
+        : name(group_name), rgb_key(key) {}
     std::string name;
     uint32_t rgb_key = 0;
 };
@@ -33,9 +25,24 @@ struct SemanticClassGroup {
 struct SemanticMapParams {
     SemanticMapParams() = default;
     float local_window_radius = 0.0f;
-    float terrain_search_radius = 0.0f;
+    float terrain_search_radius = 0.8f;
+    float terrain_neighbor_radius = 1.0f;
+    float local_planner_radius = 5.0f;
+    float local_planner_resolution = 0.2f;
+    float local_planner_obstacle_intensity = 200.0f;
     bool  use_top1_only = true;
     float min_semantic_prob = 0.55f;
+};
+
+struct MapHandlerParams {
+    MapHandlerParams() = default;
+
+    float sensor_range = 0.0f;
+    float floor_height = 0.0f;
+    SemanticMapParams semantic_params;
+    std::vector<SemanticClassGroup> obstacle_groups;
+    std::vector<SemanticClassGroup> terrain_support_groups;
+    std::vector<SemanticClassGroup> dynamic_obstacle_groups;
 };
 
 struct SemanticVoxelSample {
@@ -53,12 +60,12 @@ struct SemanticVoxelSample {
 class MapHandler {
 
 public:
-    MapHandler() = default;
+    MapHandler();
     ~MapHandler() = default;
 
     void Init(const MapHandlerParams& params);
-    // TODO: semantic octomap 先做原始消息缓存，后续再实现局部语义提取。
-    void SetSemanticOctomap(const octomap_msgs::OctomapConstPtr& msg);
+    // 仅在消息被成功验证并替换当前快照时返回 true。
+    bool SetSemanticOctomap(const octomap_msgs::OctomapConstPtr& msg);
     bool HasSemanticMap() const { return has_semantic_map_; }
     void SetMapOrigin(const Point3D& robot_pos);
 
@@ -72,6 +79,11 @@ public:
                                       bool& is_matched, 
                                       const bool& is_search);
 
+    /**
+     * Check whether the nav point's ground-referenced height overlaps the
+     * terrain-aligned local grid band. is_extend adds the legacy one-cell
+     * downward inflation; it does not enlarge the horizontal search radius.
+     */
     static bool IsNavPointOnTerrainNeighbor(const Point3D& p, const bool& is_extend);
 
     static float NearestTerrainHeightofNavPoint(const Point3D& point, bool& is_associated);
@@ -93,6 +105,13 @@ public:
         pcl_p.x = p.x, pcl_p.y = p.y, pcl_p.z = 0.0f, pcl_p.intensity = 0.0f;
         minH = maxH = p.z;
         is_matched = false;
+        if (!local_terrain_support_octree_ ||
+            local_terrain_support_octree_->size() == 0 ||
+            !kdtree_terrain_clould_ ||
+            !kdtree_terrain_clould_->getInputCloud() ||
+            kdtree_terrain_clould_->getInputCloud()->empty()) {
+            return p.z;
+        }
         if (kdtree_terrain_clould_->radiusSearch(pcl_p, radius, pIdxK, pdDistK) > 0) {
             float avgH = kdtree_terrain_clould_->getInputCloud()->points[pIdxK[0]].intensity;
             minH = maxH = avgH;
@@ -114,11 +133,28 @@ public:
     void UpdateFreeCloudGrid(const PointCloudPtr& freeCloudIn);
     void UpdateTerrainHeightGrid(const PointCloudPtr& freeCloudIn, const PointCloudPtr& terrainHeightOut);
 
-    /** Extract Surrounding Free & Obs clouds 
-     * @param SurroundCloudOut output surrounding cloud ptr
-    */
+    /** Effective local obstacle view used by contour extraction and Graph updates.
+     *  Includes persistent static semantics and dynamic obstacles from the
+     *  latest local snapshot; every addition/removal also enters the
+     *  incremental changed-obstacle pipeline.
+     */
     void GetSurroundObsCloud(const PointCloudPtr& obsCloudOut);
-    void GetSurroundFreeCloud(const PointCloudPtr& freeCloudOut);
+    /** Current static obstacles plus dynamic obstacles in the latest local snapshot. */
+    void GetCollisionObsCloud(const PointCloudPtr& obsCloudOut) const;
+    /** Dynamic obstacles currently reported occupied by the semantic octree. */
+    void GetCurrentDynamicObsCloud(const PointCloudPtr& obsCloudOut) const;
+    /** Dynamic obstacles in the latest local semantic-map snapshot. */
+    void GetEffectiveDynamicObsCloud(const PointCloudPtr& obsCloudOut) const;
+    /** Dense 2.5D static collision layer consumed by the trajectory local planner. */
+    void GetLocalPlannerStaticObsCloud(const PointCloudPtr& cloudOut) const;
+    /** Dense current dynamic-obstacle layer consumed through /added_obstacles. */
+    void GetLocalPlannerDynamicObsCloud(const PointCloudPtr& cloudOut) const;
+    /** Dynamic points that appeared in the latest accepted snapshot. */
+    void GetDynamicAddedCloud(const PointCloudPtr& cloudOut) const;
+    /** Previous-snapshot dynamic points absent from the latest local snapshot. */
+    void GetDynamicRemovedCloud(const PointCloudPtr& cloudOut) const;
+    /** Return obstacle positions added, removed, or reclassified by the latest local rebuild. */
+    void GetChangedObsCloud(const PointCloudPtr& changedCloudOut) const;
 
     /** Extract local semantic clouds around a given center.
      * @param center the query center
@@ -153,24 +189,29 @@ public:
     void ClearObsCellThroughPosition(const Point3D& point);
 
 private:
-    void RebuildDerivedOctomapCachesFromSemanticTree(const octomap::AbstractOcTree& tree);
-    void RebuildPointCloudCachesFromDerivedOctomaps();
-    void CopyOccupancyTree(const octomap::AbstractOcTree& source_tree,
-                           std::shared_ptr<octomap::OcTree>& target_tree) const;
+    void RefreshLocalTerrainSupportOctomap();
+    void BuildLocalPlannerObstacleCloud(const PointCloudPtr& source,
+                                        const PointCloudPtr& cloudOut) const;
 
-    // 外部 semantic octomap 的派生缓存入口。
-    // TODO: 当前先用点云缓存承接语义地图派生结果，后续可替换为更直接的 semantic octree 快照对象。
-    // octomap::OcTree* octree_ = nullptr;
-    octomap_msgs::OctomapConstPtr semantic_map_msg_;
+    // 经验证的 semantic octree 快照：每条消息只反序列化一次。
+    std::unique_ptr<octomap::AbstractOcTree> semantic_tree_snapshot_;
     ros::Time semantic_stamp_;
     std::string semantic_frame_id_;
     SemanticMapParams semantic_params_;
     std::vector<SemanticClassGroup> obstacle_groups_;
     std::vector<SemanticClassGroup> terrain_support_groups_;
-    std::shared_ptr<octomap::OcTree> semantic_obs_octree_;
-    std::shared_ptr<octomap::OcTree> semantic_terrain_support_octree_;
+    std::vector<SemanticClassGroup> dynamic_obstacle_groups_;
+    static std::shared_ptr<octomap::OcTree> local_terrain_support_octree_;
     PointCloudPtr semantic_obs_cloud_;
     PointCloudPtr semantic_terrain_support_cloud_;
+    PointCloudPtr current_dynamic_obs_cloud_;
+    PointCloudPtr effective_dynamic_obs_cloud_;
+    PointCloudPtr collision_obs_cloud_;
+    PointCloudPtr dynamic_added_cloud_;
+    PointCloudPtr dynamic_removed_cloud_;
+    PointCloudPtr changed_obs_cloud_;
+    std::unordered_map<uint64_t, PCLPoint> previous_local_obs_voxels_;
+    std::unordered_map<uint64_t, PCLPoint> previous_local_dynamic_voxels_;
     bool has_semantic_map_ = false;
 
 
@@ -179,21 +220,41 @@ private:
     bool is_init_ = false;
     PointCloudPtr flat_terrain_cloud_;
     static PointKdTreePtr kdtree_terrain_clould_;
+    static float terrain_search_radius_;
+    static float terrain_neighbor_radius_;
 
     template <typename Position>
-    static inline float NearestHeightOfPoint(const Position& p, float& dist_square) {
+    static inline float NearestHeightOfPoint(const Position& p,
+                                             float& dist_square,
+                                             const float search_radius = -1.0f) {
         std::vector<int> pIdxK;
         std::vector<float> pdDistK;
         PCLPoint pcl_p;
         dist_square = FARUtil::kINF;
         pcl_p.x = p.x, pcl_p.y = p.y, pcl_p.z = 0.0f, pcl_p.intensity = 0.0f;
-        const float radius = std::max(FARUtil::kLeafSize, 1e-3f);
+        const float radius = search_radius > 0.0f
+            ? search_radius
+            : std::max(FARUtil::kLeafSize, 1e-3f);
+        if (!local_terrain_support_octree_ ||
+            local_terrain_support_octree_->size() == 0 ||
+            !kdtree_terrain_clould_ ||
+            !kdtree_terrain_clould_->getInputCloud() ||
+            kdtree_terrain_clould_->getInputCloud()->empty()) {
+            return p.z;
+        }
         if (kdtree_terrain_clould_->radiusSearch(pcl_p, radius, pIdxK, pdDistK) > 0) {
             int best_idx = 0;
             float best_dist = pdDistK[0];
+            float best_height_delta = std::fabs(
+                kdtree_terrain_clould_->getInputCloud()->points[pIdxK[0]].intensity - p.z);
             for (int i = 1; i < static_cast<int>(pdDistK.size()); ++i) {
-                if (pdDistK[i] < best_dist) {
+                const float height_delta = std::fabs(
+                    kdtree_terrain_clould_->getInputCloud()->points[pIdxK[i]].intensity - p.z);
+                if (pdDistK[i] < best_dist - 1e-6f ||
+                    (std::fabs(pdDistK[i] - best_dist) <= 1e-6f &&
+                     height_delta < best_height_delta)) {
                     best_dist = pdDistK[i];
+                    best_height_delta = height_delta;
                     best_idx = i;
                 }
             }

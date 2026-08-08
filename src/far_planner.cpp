@@ -8,40 +8,106 @@
 
 #include "far_planner/far_planner.h"
 #include <octomap_msgs/Octomap.h>
+#include <XmlRpcValue.h>
+
+namespace {
+
+bool ParseSemanticGroups(const ros::NodeHandle& private_nh,
+                         const std::string& parameter,
+                         std::vector<SemanticClassGroup>& groups) {
+  XmlRpc::XmlRpcValue value;
+  if (!private_nh.getParam(parameter, value)) {
+    ROS_ERROR("FARMaster: required semantic class parameter ~%s is missing.",
+              parameter.c_str());
+    return false;
+  }
+  if (value.getType() != XmlRpc::XmlRpcValue::TypeArray || value.size() == 0) {
+    ROS_ERROR("FARMaster: ~%s must be a nonempty YAML list.", parameter.c_str());
+    return false;
+  }
+
+  std::vector<SemanticClassGroup> parsed;
+  parsed.reserve(value.size());
+  for (int i = 0; i < value.size(); ++i) {
+    XmlRpc::XmlRpcValue& entry = value[i];
+    if (entry.getType() != XmlRpc::XmlRpcValue::TypeStruct ||
+        !entry.hasMember("name") || !entry.hasMember("rgb") ||
+        entry["name"].getType() != XmlRpc::XmlRpcValue::TypeString ||
+        entry["rgb"].getType() != XmlRpc::XmlRpcValue::TypeArray ||
+        entry["rgb"].size() != 3) {
+      ROS_ERROR("FARMaster: invalid entry %d in ~%s; expected {name, rgb: [r,g,b]}.",
+                i, parameter.c_str());
+      return false;
+    }
+    int rgb[3];
+    for (int channel = 0; channel < 3; ++channel) {
+      if (entry["rgb"][channel].getType() != XmlRpc::XmlRpcValue::TypeInt) {
+        ROS_ERROR("FARMaster: RGB channels in ~%s must be integers.", parameter.c_str());
+        return false;
+      }
+      rgb[channel] = static_cast<int>(entry["rgb"][channel]);
+      if (rgb[channel] < 0 || rgb[channel] > 255) {
+        ROS_ERROR("FARMaster: RGB channels in ~%s must be in [0,255].", parameter.c_str());
+        return false;
+      }
+    }
+    const uint32_t key = (static_cast<uint32_t>(rgb[0]) << 16) |
+                         (static_cast<uint32_t>(rgb[1]) << 8) |
+                         static_cast<uint32_t>(rgb[2]);
+    parsed.emplace_back(static_cast<std::string>(entry["name"]), key);
+  }
+  groups.swap(parsed);
+  return true;
+}
+
+void PublishSeconds(const ros::Publisher& publisher, const ros::WallDuration& duration) {
+  std_msgs::Float32 message;
+  message.data = static_cast<float>(duration.toSec());
+  publisher.publish(message);
+}
+
+}  // namespace
 
 /***************************************************************************************/
 
 void FARMaster::Init() {
   /* initialize subscriber and publisher */
-  reset_graph_sub_    = nh.subscribe("/reset_visibility_graph", 5, &FARMaster::ResetGraphCallBack, this);
-  odom_sub_           = nh.subscribe("/odom_world", 5, &FARMaster::OdomCallBack, this);
+  reset_graph_sub_    = nh.subscribe("reset_visibility_graph", 5, &FARMaster::ResetGraphCallBack, this);
+  odom_sub_           = nh.subscribe("odom_world", 5, &FARMaster::OdomCallBack, this);
   // registered_scan
   // scan_sub_           = nh.subscribe("/scan_cloud", 5, &FARMaster::ScanCallBack, this);
   // 这个是什么级别的终点。用户全局指定的终点，不是规划器自己的目标点。
-  waypoint_sub_       = nh.subscribe("/goal_point", 1, &FARMaster::WaypointCallBack, this);
+  waypoint_sub_       = nh.subscribe("goal_point", 1, &FARMaster::WaypointCallBack, this);
   // joy_command_sub_    = nh.subscribe("/joy", 5, &FARMaster::JoyCommandCallBack, this);
-  update_command_sub_ = nh.subscribe("/update_visibility_graph", 5, &FARMaster::UpdateCommandCallBack, this);
+  update_command_sub_ = nh.subscribe("update_visibility_graph", 5, &FARMaster::UpdateCommandCallBack, this);
   // 发给下游规划器的目标点，也就是局部终点
-  goal_pub_           = nh.advertise<geometry_msgs::PointStamped>("/way_point",5);
-  boundary_pub_       = nh.advertise<geometry_msgs::PolygonStamped>("/navigation_boundary",5);
+  goal_pub_           = nh.advertise<geometry_msgs::PointStamped>("way_point",5);
+  boundary_pub_       = nh.advertise<geometry_msgs::PolygonStamped>("navigation_boundary",5);
   // Timers
-  runtime_pub_        = nh.advertise<std_msgs::Float32>("/runtime",1);
-  planning_time_pub_  = nh.advertise<std_msgs::Float32>("/planning_time",1);
-  traverse_time_pub_  = nh.advertise<std_msgs::Float32>("/far_traverse_time", 5);
+  runtime_pub_        = nh.advertise<std_msgs::Float32>("runtime",1);
+  planning_time_pub_  = nh.advertise<std_msgs::Float32>("planning_time",1);
+  traverse_time_pub_  = nh.advertise<std_msgs::Float32>("far_traverse_time", 5);
+  semantic_snapshot_time_pub_ = nh.advertise<std_msgs::Float32>("semantic_snapshot_time", 5);
+  semantic_update_time_pub_ = nh.advertise<std_msgs::Float32>("semantic_planner_update_time", 5);
+  semantic_callback_time_pub_ = nh.advertise<std_msgs::Float32>("semantic_callback_time", 5);
+  main_loop_time_pub_ = nh.advertise<std_msgs::Float32>("far_main_loop_time", 5);
   // planning status publisher
-  reach_goal_pub_     = nh.advertise<std_msgs::Bool>("/far_reach_goal_status", 5);
+  reach_goal_pub_     = nh.advertise<std_msgs::Bool>("far_reach_goal_status", 5);
   // Terminal formatting subscriber
-  read_command_sub_   = nh.subscribe("/read_file_dir", 1, &FARMaster::ReadFileCommand, this);
-  save_command_sub_   = nh.subscribe("/save_file_dir", 1, &FARMaster::SaveFileCommand, this);
+  read_command_sub_   = nh.subscribe("read_file_dir", 1, &FARMaster::ReadFileCommand, this);
+  save_command_sub_   = nh.subscribe("save_file_dir", 1, &FARMaster::SaveFileCommand, this);
   // DEBUG Publisher
-  dynamic_obs_pub_     = nh.advertise<sensor_msgs::PointCloud2>("/FAR_dynamic_obs_debug",1);
-  surround_free_debug_ = nh.advertise<sensor_msgs::PointCloud2>("/FAR_free_debug",1);
-  surround_obs_debug_  = nh.advertise<sensor_msgs::PointCloud2>("/FAR_obs_debug",1);
-  surround_obs_before_dyremove_debug_ = nh.advertise<sensor_msgs::PointCloud2>("/FAR_obs_before_dyremove_debug",1);
-  surround_obs_after_dyremove_debug_  = nh.advertise<sensor_msgs::PointCloud2>("/FAR_obs_after_dyremove_debug",1);
-  scan_grid_debug_     = nh.advertise<sensor_msgs::PointCloud2>("/FAR_scanGrid_debug",1);
-  new_PCL_pub_         = nh.advertise<sensor_msgs::PointCloud2>("/FAR_new_debug",1);
-  terrain_height_pub_  = nh.advertise<sensor_msgs::PointCloud2>("/FAR_terrain_height_debug",1);
+  dynamic_obs_pub_     = nh.advertise<sensor_msgs::PointCloud2>("FAR_dynamic_obs_debug",1);
+  surround_obs_debug_  = nh.advertise<sensor_msgs::PointCloud2>("FAR_obs_debug",1);
+  local_planner_static_obs_pub_ =
+      nh.advertise<sensor_msgs::PointCloud2>("semantic_local_static_obstacles", 1);
+  local_planner_dynamic_obs_pub_ =
+      nh.advertise<sensor_msgs::PointCloud2>("semantic_local_dynamic_obstacles", 1);
+  surround_obs_before_dyremove_debug_ = nh.advertise<sensor_msgs::PointCloud2>("FAR_obs_before_dyremove_debug",1);
+  surround_obs_after_dyremove_debug_  = nh.advertise<sensor_msgs::PointCloud2>("FAR_obs_after_dyremove_debug",1);
+  scan_grid_debug_     = nh.advertise<sensor_msgs::PointCloud2>("FAR_scanGrid_debug",1);
+  new_PCL_pub_         = nh.advertise<sensor_msgs::PointCloud2>("FAR_new_debug",1);
+  terrain_height_pub_  = nh.advertise<sensor_msgs::PointCloud2>("FAR_terrain_height_debug",1);
 
   this->LoadROSParams();
 
@@ -69,8 +135,13 @@ void FARMaster::Init() {
   is_scan_init_       = false;
   is_planner_running_ = false;
   is_graph_init_      = false;
+  has_pending_route_goal_ = false;
   is_reset_env_       = false;
   is_stop_update_     = false;
+  semantic_graph_dirty_ = false;
+  timeout_stop_active_ = false;
+  last_odom_receipt_ = ros::WallTime();
+  last_semantic_map_receipt_ = ros::WallTime();
 
   // allocate memory to pointers
   new_vertices_ptr_     = PointCloudPtr(new pcl::PointCloud<PCLPoint>());
@@ -80,6 +151,12 @@ void FARMaster::Init() {
   scan_grid_ptr_        = PointCloudPtr(new pcl::PointCloud<PCLPoint>());
   terrain_height_ptr_   = PointCloudPtr(new pcl::PointCloud<PCLPoint>());
   dyremove_before_obs_ptr_ = PointCloudPtr(new pcl::PointCloud<PCLPoint>());
+  collision_obs_ptr_       = PointCloudPtr(new pcl::PointCloud<PCLPoint>());
+  effective_dynamic_obs_ptr_ = PointCloudPtr(new pcl::PointCloud<PCLPoint>());
+  dynamic_added_ptr_       = PointCloudPtr(new pcl::PointCloud<PCLPoint>());
+  dynamic_removed_ptr_     = PointCloudPtr(new pcl::PointCloud<PCLPoint>());
+  local_planner_static_obs_ptr_ = PointCloudPtr(new pcl::PointCloud<PCLPoint>());
+  local_planner_dynamic_obs_ptr_ = PointCloudPtr(new pcl::PointCloud<PCLPoint>());
   viewpoint_around_ptr_ = PointCloudPtr(new pcl::PointCloud<PCLPoint>());
   kdtree_viewpoint_obs_cloud_ = PointKdTreePtr(new pcl::KdTreeFLANN<PCLPoint>());
 
@@ -125,11 +202,18 @@ void FARMaster::ResetEnvironmentAndGraph() {
   contour_graph_.ResetCurrentContour();
   /* Reset clouds */
   FARUtil::surround_obs_cloud_->clear();
-  FARUtil::surround_free_cloud_->clear();
   FARUtil::stack_new_cloud_->clear();
   FARUtil::stack_dyobs_cloud_->clear();
   FARUtil::cur_new_cloud_->clear();
   FARUtil::cur_dyobs_cloud_->clear();
+  if (collision_obs_ptr_) collision_obs_ptr_->clear();
+  if (effective_dynamic_obs_ptr_) effective_dynamic_obs_ptr_->clear();
+  if (dynamic_added_ptr_) dynamic_added_ptr_->clear();
+  if (dynamic_removed_ptr_) dynamic_removed_ptr_->clear();
+  if (local_planner_static_obs_ptr_) local_planner_static_obs_ptr_->clear();
+  if (local_planner_dynamic_obs_ptr_) local_planner_dynamic_obs_ptr_->clear();
+  is_cloud_init_ = false;
+  last_semantic_map_receipt_ = ros::WallTime();
   /* Stop the robot if it is moving */
   goal_waypoint_stamped_.header.stamp = ros::Time::now();
   goal_waypoint_stamped_.point = FARUtil::Point3DToGeoMsgPoint(robot_pos_);
@@ -138,9 +222,55 @@ void FARMaster::ResetEnvironmentAndGraph() {
   planner_viz_.VizPath(empty_path);
 }
 
+bool FARMaster::DataIsFresh(std::string* reason) const {
+  if (!is_cloud_init_ || !is_odom_init_) return false;
+  const ros::WallTime now = ros::WallTime::now();
+  if (master_params_.odom_timeout > 0.0f &&
+      !last_odom_receipt_.isZero() &&
+      (now - last_odom_receipt_).toSec() > master_params_.odom_timeout) {
+    if (reason) *reason = "odometry input timed out";
+    return false;
+  }
+  if (master_params_.semantic_map_timeout > 0.0f &&
+      !last_semantic_map_receipt_.isZero() &&
+      (now - last_semantic_map_receipt_).toSec() > master_params_.semantic_map_timeout) {
+    if (reason) *reason = "semantic octomap input timed out";
+    return false;
+  }
+  return true;
+}
+
+void FARMaster::PublishStopCommand(const std::string& reason) {
+  if (timeout_stop_active_) return;
+  timeout_stop_active_ = true;
+  is_planner_running_ = false;
+  nav_heading_ = Point3D(0, 0, 0);
+  goal_waypoint_stamped_.header.stamp = ros::Time::now();
+  goal_waypoint_stamped_.point = FARUtil::Point3DToGeoMsgPoint(robot_pos_);
+  goal_pub_.publish(goal_waypoint_stamped_);
+  planner_viz_.VizPath(NodePtrStack());
+  ROS_ERROR("FARMaster: %s; publishing a stop waypoint and empty path.",
+            reason.c_str());
+}
+
+bool FARMaster::PreconditionCheck() {
+  if (!is_cloud_init_ || !is_odom_init_) return false;
+  std::string reason;
+  if (!this->DataIsFresh(&reason)) {
+    this->PublishStopCommand(reason);
+    return false;
+  }
+  if (timeout_stop_active_) {
+    timeout_stop_active_ = false;
+    ROS_INFO("FARMaster: odometry and semantic map inputs are fresh again; planning may resume.");
+  }
+  return true;
+}
+
 void FARMaster::Loop() {
   ros::Rate loop_rate(master_params_.main_run_freq);
   while (ros::ok()) {
+    const ros::WallTime loop_start = ros::WallTime::now();
     if (is_reset_env_) {
       this->ResetEnvironmentAndGraph(); 
       is_reset_env_ = false;
@@ -167,7 +297,9 @@ void FARMaster::Loop() {
     // 在做“从周围障碍点云里提取轮廓”的核心步骤，作用是把稠密点云转换成后续可建图的几何边界。
     // 不是“检测整个地图的轮廓”，而是检测机器人当前周围局部障碍云的轮廓。
     // 以当前 odom 节点为中心，把机器人周围的局部障碍点云投影成图像，然后提取这片局部环境的障碍轮廓。
-    contour_detector_.BuildTerrainImgAndExtractContour(odom_node_ptr_, FARUtil::surround_obs_cloud_, realworld_contour_);
+    contour_detector_.BuildTerrainImgAndExtractContour(
+        odom_node_ptr_, FARUtil::surround_obs_cloud_, realworld_contour_,
+        true);  // semantic octomap points are verified occupied voxels
     // 把刚提取出的“真实世界轮廓”写进轮廓图模块，完成轮廓图的本帧更新。
     contour_graph_.UpdateContourGraph(odom_node_ptr_, realworld_contour_);
     if (is_graph_init_) {
@@ -238,6 +370,9 @@ void FARMaster::Loop() {
     graph_planner_.UpdaetVGraph(nav_graph_);     // Graph Planner Update
     // 把同一份最新全局图同步到消息发布模块，用于对外发送图结构（多机通信/可视化消费者）。
     graph_msger_.UpdateGlobalGraph(nav_graph_);  // Graph Messager Update
+    // Planning callbacks are allowed again only after contours, nodes, edges,
+    // and the GraphPlanner snapshot all correspond to the newest semantic map.
+    semantic_graph_dirty_ = false;
 
     /* Publish local boundary to lower level local planner */
     // 局部地图中和当前运动相关的一些边界点对，供下游局部规划器使用。比如在局部规划器里做“局部可通行性检查”时，可以用这些边界点对来判断是否碰到障碍。
@@ -269,14 +404,26 @@ void FARMaster::Loop() {
       is_graph_init_ = true;
       printf("\033[A"), printf("\033[A"), printf("\033[2K");
       std::cout<< "\033[1;32m V-Graph Initialized \033[0m\n" << std::endl;
+      if (has_pending_route_goal_) {
+        const geometry_msgs::PointStamped pending_goal = pending_route_goal_;
+        has_pending_route_goal_ = false;
+        ROS_INFO("FARMaster: applying the goal retained during V-Graph initialization.");
+        this->WaypointCallBack(pending_goal);
+      }
     }
+    PublishSeconds(main_loop_time_pub_, ros::WallTime::now() - loop_start);
     loop_rate.sleep();
   }
 }
 
 // 规划器的核心循环函数，定时器触发，频率由 main_run_freq 决定。
 void FARMaster::PlanningCallBack(const ros::TimerEvent& event) {
+  if (!this->PreconditionCheck()) return;
   if (!is_graph_init_) return;
+  // A map callback can be dispatched earlier in the same spinOnce() than this
+  // timer. Never search the previous Graph against a newly replaced map; the
+  // main loop will rebuild the ordinary contour/visibility graph first.
+  if (semantic_graph_dirty_) return;
   const NavNodePtr goal_ptr = graph_planner_.GetGoalNodePtr();
   if (goal_ptr == NULL) {
     /* Graph Traversablity Update */
@@ -316,8 +463,16 @@ void FARMaster::PlanningCallBack(const ros::TimerEvent& event) {
     goal_waypoint_stamped_.header.stamp = ros::Time::now();
     bool is_current_free_nav = false;
     bool is_reach_goal = false;
+    bool is_dynamic_wait = false;
+    const bool has_effective_dynamic_obstacles =
+        effective_dynamic_obs_ptr_ && !effective_dynamic_obs_ptr_->empty();
     // 根据当前可见图和目标节点搜索出来的一条“图路径”（节点序列）global_path
-    if (graph_planner_.PathToGoal(goal_ptr, global_path, nav_node_ptr_, current_free_goal, is_planning_fails, is_reach_goal, is_current_free_nav) && nav_node_ptr_ != NULL) {
+    if (graph_planner_.PathToGoal(goal_ptr, global_path, nav_node_ptr_,
+                                  current_free_goal, is_planning_fails,
+                                  has_effective_dynamic_obstacles,
+                                  is_dynamic_wait, is_reach_goal,
+                                  is_current_free_nav) &&
+        nav_node_ptr_ != NULL) {
       Point3D waypoint = nav_node_ptr_->position;
       if (nav_node_ptr_ != goal_ptr) {
         waypoint = this->ProjectNavWaypoint(nav_node_ptr_, last_nav_ptr);
@@ -331,6 +486,18 @@ void FARMaster::PlanningCallBack(const ros::TimerEvent& event) {
       planner_viz_.VizPoint3D(waypoint, "waypoint", VizColor::MAGNA, 1.5);
       planner_viz_.VizPoint3D(current_free_goal, "free_goal", VizColor::GREEN, 1.5);
       planner_viz_.VizPath(global_path, is_current_free_nav);
+    } else if (is_dynamic_wait) {
+      // The newest dynamic obstacle has already passed through the ordinary
+      // contour and visibility-graph update. If that complete Graph still has
+      // no route, stop safely but retain the goal for automatic retry. A
+      // bypass, when one exists, is returned by the normal success branch
+      // above rather than by a special dynamic-edge filter.
+      global_path.clear();
+      planner_viz_.VizPath(global_path);
+      goal_waypoint_stamped_.point = FARUtil::Point3DToGeoMsgPoint(robot_pos_);
+      goal_pub_.publish(goal_waypoint_stamped_);
+      is_planner_running_ = false;
+      nav_heading_ = Point3D(0,0,0);
     } else if (is_planner_running_) {
       // stop robot
       global_path.clear();
@@ -507,7 +674,9 @@ Point3D FARMaster::ExtendViewpointOnObsCloud(const NavNodePtr& nav_node_ptr, con
 
 
 void FARMaster::LoadROSParams() {
-  const std::string master_prefix   = "/far_planner/";
+  // All parameters are private to the node. This keeps the planner reusable
+  // under a namespace while preserving the existing YAML key layout.
+  const std::string master_prefix   = "";
   const std::string map_prefix      = master_prefix + "MapHandler/";
   const std::string scan_prefix     = master_prefix + "ScanHandler/";
   const std::string cdetect_prefix  = master_prefix + "CDetector/";
@@ -519,40 +688,74 @@ void FARMaster::LoadROSParams() {
   const std::string msger_prefix    = master_prefix + "GraphMsger/";
 
   // master params
-  nh.param<float>(master_prefix + "main_run_freq",         master_params_.main_run_freq, 5.0);
-  nh.param<float>(master_prefix + "voxel_dim",             master_params_.voxel_dim, 0.2);
-  nh.param<float>(master_prefix + "robot_dim",             master_params_.robot_dim, 0.8);
-  nh.param<float>(master_prefix + "vehicle_height",        master_params_.vehicle_height, 0.75);
-  nh.param<float>(master_prefix + "sensor_range",          master_params_.sensor_range, 50.0);
-  nh.param<float>(master_prefix + "terrain_range",         master_params_.terrain_range, 15.0);
-  nh.param<float>(master_prefix + "local_planner_range",   master_params_.local_planner_range, 5.0);
-  nh.param<float>(master_prefix + "visualize_ratio",       master_params_.viz_ratio, 1.0);
-  nh.param<bool>(master_prefix  + "is_viewpoint_extend",   master_params_.is_viewpoint_extend, true);
-  nh.param<bool>(master_prefix  + "is_multi_layer",        master_params_.is_multi_layer, false);
-  nh.param<bool>(master_prefix  + "is_opencv_visual",      master_params_.is_visual_opencv, true);
-  nh.param<bool>(master_prefix  + "is_static_env",         master_params_.is_static_env, true);
-  nh.param<bool>(master_prefix  + "is_pub_boundary",       master_params_.is_pub_boundary, true);
-  nh.param<bool>(master_prefix  + "is_debug_output",       master_params_.is_debug_output, false);
-  nh.param<bool>(master_prefix  + "is_attempt_autoswitch", master_params_.is_attempt_autoswitch, true);
-  nh.param<std::string>(master_prefix + "world_frame",     master_params_.world_frame, "map");
-  nh.param<std::string>(master_prefix + "semantic_map_topic", master_params_.semantic_map_topic, "/octomap_full");
+  private_nh_.param<float>(master_prefix + "main_run_freq",         master_params_.main_run_freq, 5.0);
+  private_nh_.param<float>(master_prefix + "voxel_dim",             master_params_.voxel_dim, 0.2);
+  private_nh_.param<float>(master_prefix + "robot_dim",             master_params_.robot_dim, 0.8);
+  private_nh_.param<float>(master_prefix + "vehicle_height",        master_params_.vehicle_height, 0.75);
+  private_nh_.param<float>(master_prefix + "sensor_range",          master_params_.sensor_range, 50.0);
+  private_nh_.param<float>(master_prefix + "terrain_range",         master_params_.terrain_range, 15.0);
+  private_nh_.param<float>(master_prefix + "local_planner_range",   master_params_.local_planner_range, 5.0);
+  private_nh_.param<float>(master_prefix + "visualize_ratio",       master_params_.viz_ratio, 1.0);
+  private_nh_.param<bool>(master_prefix  + "is_viewpoint_extend",   master_params_.is_viewpoint_extend, true);
+  private_nh_.param<bool>(master_prefix  + "is_multi_layer",        master_params_.is_multi_layer, false);
+  private_nh_.param<bool>(master_prefix  + "is_opencv_visual",      master_params_.is_visual_opencv, true);
+  private_nh_.param<bool>(master_prefix  + "is_static_env",         master_params_.is_static_env, true);
+  private_nh_.param<bool>(master_prefix  + "is_pub_boundary",       master_params_.is_pub_boundary, true);
+  private_nh_.param<bool>(master_prefix  + "is_debug_output",       master_params_.is_debug_output, false);
+  private_nh_.param<bool>(master_prefix  + "is_attempt_autoswitch", master_params_.is_attempt_autoswitch, true);
+  private_nh_.param<float>(master_prefix + "odom_timeout",          master_params_.odom_timeout, 0.5f);
+  private_nh_.param<float>(master_prefix + "semantic_map_timeout",  master_params_.semantic_map_timeout, 1.0f);
+  private_nh_.param<std::string>(master_prefix + "world_frame",     master_params_.world_frame, "map");
+  private_nh_.param<std::string>(master_prefix + "semantic_map_topic", master_params_.semantic_map_topic, "octomap_full");
   master_params_.terrain_range = std::min(master_params_.terrain_range, master_params_.sensor_range);
 
   // map handler params
-  nh.param<float>(map_prefix + "floor_height",        map_params_.floor_height, 2.0);
+  private_nh_.param<float>(map_prefix + "floor_height",        map_params_.floor_height, 2.0);
+  private_nh_.param<float>(map_prefix + "semantic_local_window_radius",
+                  map_params_.semantic_params.local_window_radius,
+                  master_params_.terrain_range);
+  private_nh_.param<float>(map_prefix + "terrain_search_radius",
+                  map_params_.semantic_params.terrain_search_radius,
+                  master_params_.robot_dim);
+  private_nh_.param<float>(map_prefix + "terrain_neighbor_radius",
+                  map_params_.semantic_params.terrain_neighbor_radius,
+                  1.0f);
+  private_nh_.param<float>(map_prefix + "local_planner_radius",
+                  map_params_.semantic_params.local_planner_radius,
+                  master_params_.local_planner_range);
+  private_nh_.param<float>(map_prefix + "local_planner_resolution",
+                  map_params_.semantic_params.local_planner_resolution,
+                  0.2f);
+  private_nh_.param<float>(map_prefix + "local_planner_obstacle_intensity",
+                  map_params_.semantic_params.local_planner_obstacle_intensity,
+                  200.0f);
+  private_nh_.param<bool>(map_prefix + "semantic_top1_only",
+                          map_params_.semantic_params.use_top1_only, true);
+  private_nh_.param<float>(map_prefix + "semantic_min_probability",
+                           map_params_.semantic_params.min_semantic_prob, 0.55f);
+  const bool obstacle_groups_ok = ParseSemanticGroups(
+      private_nh_, map_prefix + "obstacle_groups", map_params_.obstacle_groups);
+  const bool terrain_groups_ok = ParseSemanticGroups(
+      private_nh_, map_prefix + "terrain_support_groups", map_params_.terrain_support_groups);
+  const bool dynamic_groups_ok = ParseSemanticGroups(
+      private_nh_, map_prefix + "dynamic_obstacle_groups", map_params_.dynamic_obstacle_groups);
+  if (!obstacle_groups_ok || !terrain_groups_ok || !dynamic_groups_ok) {
+    ROS_FATAL("FARMaster: semantic class parameters are invalid; refusing to continue.");
+    ros::shutdown();
+  }
   map_params_.sensor_range     = master_params_.sensor_range;
 
   // utility params
-  nh.param<float>(utility_prefix + "angle_noise",            FARUtil::kAngleNoise, 15.0);
-  nh.param<float>(utility_prefix + "accept_max_align_angle", FARUtil::kAcceptAlign, 15.0);
-  nh.param<float>(utility_prefix + "new_intensity_thred",    FARUtil::kNewPIThred, 2.0);
-  nh.param<float>(utility_prefix + "nav_clear_dist",         FARUtil::kNavClearDist, 0.5);
-  nh.param<float>(utility_prefix + "terrain_free_Z",         FARUtil::kFreeZ, 0.1);
-  nh.param<int>(utility_prefix   + "dyosb_update_thred",     FARUtil::kDyObsThred, 4);
-  nh.param<int>(utility_prefix   + "new_point_counter",      FARUtil::KNewPointC, 10);
-  nh.param<float>(utility_prefix + "dynamic_obs_dacay_time", FARUtil::kObsDecayTime, 10.0);
-  nh.param<float>(utility_prefix + "new_points_decay_time",  FARUtil::kNewDecayTime, 2.0);
-  nh.param<int>(utility_prefix   + "obs_inflate_size",       FARUtil::kObsInflate, 2);
+  private_nh_.param<float>(utility_prefix + "angle_noise",            FARUtil::kAngleNoise, 15.0);
+  private_nh_.param<float>(utility_prefix + "accept_max_align_angle", FARUtil::kAcceptAlign, 15.0);
+  private_nh_.param<float>(utility_prefix + "new_intensity_thred",    FARUtil::kNewPIThred, 2.0);
+  private_nh_.param<float>(utility_prefix + "nav_clear_dist",         FARUtil::kNavClearDist, 0.5);
+  private_nh_.param<float>(utility_prefix + "terrain_free_Z",         FARUtil::kFreeZ, 0.1);
+  private_nh_.param<int>(utility_prefix   + "dyosb_update_thred",     FARUtil::kDyObsThred, 4);
+  private_nh_.param<int>(utility_prefix   + "new_point_counter",      FARUtil::KNewPointC, 10);
+  private_nh_.param<float>(utility_prefix + "dynamic_obs_dacay_time", FARUtil::kObsDecayTime, 10.0);
+  private_nh_.param<float>(utility_prefix + "new_points_decay_time",  FARUtil::kNewDecayTime, 2.0);
+  private_nh_.param<int>(utility_prefix   + "obs_inflate_size",       FARUtil::kObsInflate, 2);
   FARUtil::kLeafSize       = master_params_.voxel_dim;
   FARUtil::kNearDist       = master_params_.robot_dim;
   FARUtil::kHeightVoxel    = master_params_.voxel_dim * 2.0f;
@@ -578,11 +781,11 @@ void FARMaster::LoadROSParams() {
   FARUtil::kLocalPlanRange = master_params_.local_planner_range;
 
   // graph planner params
-  nh.param<float>(planner_prefix + "converge_distance",    gp_params_.converge_dist, 1.0);
-  nh.param<float>(planner_prefix + "goal_adjust_radius",   gp_params_.adjust_radius, 10.0);
-  nh.param<int>(planner_prefix   + "free_counter_thred",   gp_params_.free_thred, 5);
-  nh.param<int>(planner_prefix   + "reach_goal_vote_size", gp_params_.votes_size, 5);
-  nh.param<int>(planner_prefix   + "path_momentum_thred",  gp_params_.momentum_thred, 5);
+  private_nh_.param<float>(planner_prefix + "converge_distance",    gp_params_.converge_dist, 1.0);
+  private_nh_.param<float>(planner_prefix + "goal_adjust_radius",   gp_params_.adjust_radius, 10.0);
+  private_nh_.param<int>(planner_prefix   + "free_counter_thred",   gp_params_.free_thred, 5);
+  private_nh_.param<int>(planner_prefix   + "reach_goal_vote_size", gp_params_.votes_size, 5);
+  private_nh_.param<int>(planner_prefix   + "path_momentum_thred",  gp_params_.momentum_thred, 5);
   gp_params_.momentum_dist = master_params_.robot_dim / 2.0f;
   gp_params_.is_autoswitch = master_params_.is_attempt_autoswitch;
 
@@ -590,19 +793,19 @@ void FARMaster::LoadROSParams() {
   cg_params_.kPillarPerimeter = master_params_.robot_dim * 4.0f;
 
   // dynamic graph params
-  nh.param<int>(graph_prefix    + "connect_votes_size",        graph_params_.votes_size, 10);
-  nh.param<int>(graph_prefix    + "clear_dumper_thred",        graph_params_.dumper_thred, 3);
-  nh.param<int>(graph_prefix    + "node_finalize_thred",       graph_params_.finalize_thred, 3);
-  nh.param<int>(graph_prefix    + "filter_pool_size",          graph_params_.pool_size, 12);
-  nh.param<float>(graph_prefix  + "connect_angle_thred",       graph_params_.kConnectAngleThred, 10.0);
-  nh.param<float>(graph_prefix  + "dirs_filter_margin",        graph_params_.filter_dirs_margin, 10.0);
+  private_nh_.param<int>(graph_prefix    + "connect_votes_size",        graph_params_.votes_size, 10);
+  private_nh_.param<int>(graph_prefix    + "clear_dumper_thred",        graph_params_.dumper_thred, 3);
+  private_nh_.param<int>(graph_prefix    + "node_finalize_thred",       graph_params_.finalize_thred, 3);
+  private_nh_.param<int>(graph_prefix    + "filter_pool_size",          graph_params_.pool_size, 12);
+  private_nh_.param<float>(graph_prefix  + "connect_angle_thred",       graph_params_.kConnectAngleThred, 10.0);
+  private_nh_.param<float>(graph_prefix  + "dirs_filter_margin",        graph_params_.filter_dirs_margin, 10.0);
   graph_params_.filter_pos_margin        = FARUtil::kNavClearDist;
   graph_params_.filter_dirs_margin       = FARUtil::kAngleNoise;
   graph_params_.kConnectAngleThred       = FARUtil::kAcceptAlign;
   graph_params_.frontier_perimeter_thred = FARUtil::kMatchDist * 4.0f;
 
   // graph messager params
-  nh.param<int>(msger_prefix + "robot_id", msger_parmas_.robot_id, 0);
+  private_nh_.param<int>(msger_prefix + "robot_id", msger_parmas_.robot_id, 0);
   msger_parmas_.frame_id    = master_params_.world_frame;
   msger_parmas_.votes_size  = graph_params_.votes_size;
   msger_parmas_.pool_size   = graph_params_.pool_size;
@@ -614,10 +817,10 @@ void FARMaster::LoadROSParams() {
   scan_params_.ceil_height   = map_params_.floor_height;
 
   // contour detector params
-  nh.param<float>(cdetect_prefix       + "resize_ratio",       cdetect_params_.kRatio, 5.0);
-  nh.param<int>(cdetect_prefix         + "filter_count_value", cdetect_params_.kThredValue, 5);
-  nh.param<bool>(cdetect_prefix        + "is_save_img",        cdetect_params_.is_save_img, false);
-  nh.param<std::string>(cdetect_prefix + "img_folder_path",    cdetect_params_.img_path, "");
+  private_nh_.param<float>(cdetect_prefix       + "resize_ratio",       cdetect_params_.kRatio, 5.0);
+  private_nh_.param<int>(cdetect_prefix         + "filter_count_value", cdetect_params_.kThredValue, 5);
+  private_nh_.param<bool>(cdetect_prefix        + "is_save_img",        cdetect_params_.is_save_img, false);
+  private_nh_.param<std::string>(cdetect_prefix + "img_folder_path",    cdetect_params_.img_path, "");
   cdetect_params_.kBlurSize    = (int)std::round(FARUtil::kNavClearDist / master_params_.voxel_dim);
   cdetect_params_.sensor_range = master_params_.sensor_range;
   cdetect_params_.voxel_dim    = master_params_.voxel_dim;
@@ -651,12 +854,17 @@ void FARMaster::OdomCallBack(const nav_msgs::OdometryConstPtr& msg) {
   double roll, pitch, yaw;
   tf_odom_pose.getBasis().getRPY(roll, pitch, yaw);
   robot_heading_ = Point3D(cos(yaw), sin(yaw), 0);
+  last_odom_receipt_ = ros::WallTime::now();
+  map_handler_.SetMapOrigin(robot_pos_);
 
   if (!is_odom_init_) {
     // system start time
     FARUtil::systemStartTime = ros::Time::now().toSec();
     FARUtil::map_origin = robot_pos_;
-    map_handler_.UpdateRobotPosition(robot_pos_);
+    if (map_handler_.HasSemanticMap()) {
+      map_handler_.UpdateRobotPosition(robot_pos_);
+      this->UpdatePlannerCloudsFromSemanticMap();
+    }
   }
 
   is_odom_init_ = true;
@@ -664,33 +872,68 @@ void FARMaster::OdomCallBack(const nav_msgs::OdometryConstPtr& msg) {
 
 void FARMaster::SemanticMapCallBack(const octomap_msgs::OctomapConstPtr& msg) {
   if (!msg) return;
-  if (!is_odom_init_) return;
 
-  // FARMaster subscribes and forwards; semantic map parsing/cache ownership is inside MapHandler.
-  map_handler_.SetSemanticOctomap(msg);
-  if (!map_handler_.HasSemanticMap()) return;
+  const ros::WallTime callback_start = ros::WallTime::now();
+  const ros::WallTime snapshot_start = ros::WallTime::now();
+  if (!map_handler_.SetSemanticOctomap(msg)) {
+    PublishSeconds(semantic_callback_time_pub_,
+                   ros::WallTime::now() - callback_start);
+    return;
+  }
+  PublishSeconds(semantic_snapshot_time_pub_,
+                 ros::WallTime::now() - snapshot_start);
+  last_semantic_map_receipt_ = ros::WallTime::now();
+  if (!is_odom_init_) {
+    PublishSeconds(semantic_callback_time_pub_,
+                   ros::WallTime::now() - callback_start);
+    return;
+  }
 
-  // keep the semantic-derived local caches aligned with the current robot position
-  map_handler_.UpdateRobotPosition(FARUtil::robot_pos);
+  const ros::WallTime planner_update_start = ros::WallTime::now();
+  this->UpdatePlannerCloudsFromSemanticMap();
+  PublishSeconds(semantic_update_time_pub_,
+                 ros::WallTime::now() - planner_update_start);
+  PublishSeconds(semantic_callback_time_pub_,
+                 ros::WallTime::now() - callback_start);
+}
 
-  // semantic octomap path: read derived obstacle / terrain-support clouds only
-  
+void FARMaster::UpdatePlannerCloudsFromSemanticMap() {
+  // The original FAR incremental pipeline now sees the effective static plus
+  // dynamic collision view. Dynamic add/remove events enter the changed-point
+  // KD-tree, so their contour vertices and affected connections are rebuilt
+  // locally instead of becoming permanent global-map structure.
+  map_handler_.GetSurroundObsCloud(FARUtil::surround_obs_cloud_);
+  map_handler_.GetCollisionObsCloud(collision_obs_ptr_);
+  map_handler_.GetEffectiveDynamicObsCloud(effective_dynamic_obs_ptr_);
+  map_handler_.GetDynamicAddedCloud(dynamic_added_ptr_);
+  map_handler_.GetDynamicRemovedCloud(dynamic_removed_ptr_);
+  map_handler_.GetLocalPlannerStaticObsCloud(local_planner_static_obs_ptr_);
+  map_handler_.GetLocalPlannerDynamicObsCloud(local_planner_dynamic_obs_ptr_);
+  semantic_graph_dirty_ = true;
+  if (is_stop_update_) {
+    FARUtil::cur_new_cloud_->clear();
+  } else {
+    map_handler_.GetChangedObsCloud(FARUtil::cur_new_cloud_);
+  }
+  FARUtil::StackCloudByTime(FARUtil::cur_new_cloud_,
+                            FARUtil::stack_new_cloud_,
+                            FARUtil::kNewDecayTime);
+  FARUtil::UpdateKdTrees(FARUtil::stack_new_cloud_);
 
-  // planner_viz_.VizPointCloud(new_PCL_pub_, FARUtil::stack_new_cloud_);
-  // planner_viz_.VizPointCloud(dynamic_obs_pub_, FARUtil::cur_dyobs_cloud_);
-  // planner_viz_.VizPointCloud(surround_free_debug_, FARUtil::surround_free_cloud_);
-  // planner_viz_.VizPointCloud(surround_obs_debug_,  FARUtil::surround_obs_cloud_);
-  // planner_viz_.VizPointCloud(surround_obs_before_dyremove_debug_, dyremove_before_obs_ptr_);
-  // planner_viz_.VizPointCloud(surround_obs_after_dyremove_debug_, FARUtil::surround_obs_cloud_);
-  // planner_viz_.VizPointCloud(terrain_height_pub_, terrain_height_ptr_);
-  // PointStack neighbor_centers, occupancy_centers;
-  // map_handler_.GetNeighborCeilsCenters(neighbor_centers);
-  // map_handler_.GetOccupancyCeilsCenters(occupancy_centers);
-  // planner_viz_.VizMapGrids(neighbor_centers, occupancy_centers, FARUtil::kCellLength, FARUtil::kCellHeight);
-  // if (!master_params_.is_static_env) {
-  //   scan_handler_.GridVisualCloud(scan_grid_ptr_, GridStatus::RAY);
-  //   planner_viz_.VizPointCloud(scan_grid_debug_, scan_grid_ptr_);
-  // }
+  // A valid semantic snapshot is sufficient to start FAR, including a valid
+  // empty-obstacle scene.
+  is_cloud_init_ = true;
+
+  planner_viz_.VizPointCloud(new_PCL_pub_, FARUtil::stack_new_cloud_);
+  planner_viz_.VizPointCloud(dynamic_obs_pub_, effective_dynamic_obs_ptr_);
+  planner_viz_.VizPointCloud(surround_obs_debug_, FARUtil::surround_obs_cloud_);
+  // Keep static semantics and the latest-snapshot dynamic layer on separate
+  // topics. The trajectory planner clears the latter immediately when an
+  // empty dynamic cloud arrives without erasing static geometry.
+  planner_viz_.VizPointCloud(local_planner_static_obs_pub_,
+                             local_planner_static_obs_ptr_);
+  planner_viz_.VizPointCloud(local_planner_dynamic_obs_pub_,
+                             local_planner_dynamic_obs_ptr_);
 }
 
 // 得到动态点云
@@ -711,7 +954,10 @@ void FARMaster::ExtractDynamicObsFromScan(const PointCloudPtr& scanCloudIn,
 // 可视化原始目标点并启动整体计时
 void FARMaster::WaypointCallBack(const geometry_msgs::PointStamped& route_goal) {
   if (!is_graph_init_) {
-    if (FARUtil::IsDebug) ROS_WARN("FARMaster: wait for v-graph to init before sending any goals");
+    pending_route_goal_ = route_goal;
+    has_pending_route_goal_ = true;
+    ROS_WARN_THROTTLE(1.0,
+        "FARMaster: V-Graph is not initialized; retaining the latest goal for automatic application.");
     return;
   }
   Point3D goal_p(route_goal.point.x, route_goal.point.y, route_goal.point.z);
@@ -732,7 +978,6 @@ void FARMaster::WaypointCallBack(const geometry_msgs::PointStamped& route_goal) 
 // 但是还需要查看这些变量相互之间有没有竞争关系
 
 PointCloudPtr  FARUtil::surround_obs_cloud_  = PointCloudPtr(new pcl::PointCloud<PCLPoint>());
-PointCloudPtr  FARUtil::surround_free_cloud_ = PointCloudPtr(new pcl::PointCloud<PCLPoint>());
 PointCloudPtr  FARUtil::stack_new_cloud_     = PointCloudPtr(new pcl::PointCloud<PCLPoint>());
 PointCloudPtr  FARUtil::cur_new_cloud_       = PointCloudPtr(new pcl::PointCloud<PCLPoint>());
 PointCloudPtr  FARUtil::cur_dyobs_cloud_     = PointCloudPtr(new pcl::PointCloud<PCLPoint>());

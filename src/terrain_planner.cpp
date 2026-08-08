@@ -22,8 +22,8 @@ void TerrainPlanner::Init(const ros::NodeHandle& nh, const TerrainPlannerParams&
     this->AllocateGridNodes(); 
     viz_path_stack_.clear();
 
-    local_path_pub_   = nh_.advertise<Marker>("/local_terrain_path_debug", 5);
-    terrain_map_pub_  = nh_.advertise<sensor_msgs::PointCloud2>("/local_terrain_map_debug", 5);
+    local_path_pub_   = nh_.advertise<Marker>("local_terrain_path_debug", 5);
+    terrain_map_pub_  = nh_.advertise<sensor_msgs::PointCloud2>("local_terrain_map_debug", 5);
 }
 
 void TerrainPlanner::UpdateCenterNode(const NavNodePtr& node_ptr) {
@@ -49,7 +49,14 @@ void TerrainPlanner::UpdateCenterNode(const NavNodePtr& node_ptr) {
 // 每次机器人位置更新时，都会把 FARUtil::surround_obs_cloud_ 送给 terrain_planner_。这表示 TerrainPlanner 一直维护一张“当前机器人周围的局部障碍地图”。
 // 目的：让 TerrainPlanner 能判断两点之间是否被障碍挡住
 void TerrainPlanner::SetLocalTerrainObsCloud(const PointCloudPtr& obsCloudIn) {
-    if (!is_grids_init_ || obsCloudIn->empty()) return;
+    if (!is_grids_init_) return;
+    // Rebuild from the latest snapshot. Merely adding occupied cells leaves a
+    // disappeared dynamic obstacle permanently stuck in this grid.
+    this->ResetGridsOccupancy();
+    if (!obsCloudIn || obsCloudIn->empty()) {
+        this->GridVisualCloud();
+        return;
+    }
     const int N_IF = tp_params_.inflate_size;
     for (const auto& point : obsCloudIn->points) {
         Eigen::Vector3i c_sub = terrain_grids_->Pos2Sub(Eigen::Vector3d(point.x, point.y, center_pos_.z));
@@ -203,4 +210,3 @@ void TerrainPlanner::VisualPaths() {
     local_path_pub_.publish(terrain_paths_marker);
     viz_path_stack_.clear();
 }
-

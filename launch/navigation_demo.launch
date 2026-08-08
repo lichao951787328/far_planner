@@ -1,0 +1,26 @@
+<launch>
+  <!-- Planning/visualization stage for the leadership demo.  Start the Go2
+       simulation and semantic octomap first.  This file deliberately leaves
+       pathFollower stopped so the initial unknown goal can be inspected. -->
+  <arg name="plannerConfig" default="default"/>
+  <arg name="rvizConfig" default="navigation_demo"/>
+  <arg name="launchRobotModel" default="true"/>
+  <arg name="startMonitor" default="true"/>
+  <arg name="outputCsv" default=""/>
+  <arg name="maximumDuration" default="600.0"/>
+
+  <include file="$(find far_planner)/launch/semantic_far_planner.launch">
+    <arg name="config" value="$(arg plannerConfig)"/>
+    <arg name="launchRviz" value="true"/>
+    <arg name="rvizConfig" value="$(arg rvizConfig)"/>
+    <arg name="launchRobotModel" value="$(arg launchRobotModel)"/>
+  </include>
+
+  <include file="$(find local_planner)/launch/local_planner_only.launch"/>
+
+  <include if="$(arg startMonitor)"
+           file="$(find far_planner)/launch/navigation_demo_monitor.launch">
+    <arg name="outputCsv" value="$(arg outputCsv)"/>
+    <arg name="maximumDuration" value="$(arg maximumDuration)"/>
+  </include>
+</launch>

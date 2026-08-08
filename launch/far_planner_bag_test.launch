@@ -1,0 +1,89 @@
+<launch>
+    <!--
+      Deterministic integration test for src/far_planner.cpp.
+      Play only /octomap_full and /model/husky_seg_cam/pose from the bag using
+      the /far_source prefix. The harness relays the map to /far_test after
+      injecting one occupied dynamic voxel followed by explicit-free frames.
+    -->
+    <arg name="config" default="default"/>
+    <arg name="source_map_topic" default="/far_source/octomap_full"/>
+    <arg name="source_pose_topic"
+         default="/far_source/model/husky_seg_cam/pose"/>
+    <arg name="goal_x" default="3.51322"/>
+    <arg name="goal_y" default="13.6717"/>
+    <arg name="goal_z" default="0.13228"/>
+
+    <node pkg="far_planner" type="far_planner" name="far_planner"
+          output="screen">
+        <rosparam command="load"
+                  file="$(find far_planner)/config/$(arg config).yaml"/>
+        <param name="world_frame" value="world"/>
+        <param name="semantic_map_topic" value="/far_test/octomap_full"/>
+        <param name="main_run_freq" value="5.0"/>
+        <param name="is_opencv_visual" value="false"/>
+        <param name="is_pub_boundary" value="true"/>
+        <param name="is_debug_output" value="true"/>
+
+        <remap from="/odom_world" to="/far_test/odom_world"/>
+        <remap from="/goal_point" to="/far_test/goal_point"/>
+        <remap from="/reset_visibility_graph"
+               to="/far_test/reset_visibility_graph"/>
+        <remap from="/update_visibility_graph"
+               to="/far_test/update_visibility_graph"/>
+        <remap from="/way_point" to="/far_test/way_point"/>
+        <remap from="/navigation_boundary"
+               to="/far_test/navigation_boundary"/>
+        <remap from="/runtime" to="/far_test/runtime"/>
+        <remap from="/planning_time" to="/far_test/planning_time"/>
+        <remap from="/far_traverse_time"
+               to="/far_test/far_traverse_time"/>
+        <remap from="/semantic_snapshot_time"
+               to="/far_test/semantic_snapshot_time"/>
+        <remap from="/semantic_planner_update_time"
+               to="/far_test/semantic_planner_update_time"/>
+        <remap from="/semantic_callback_time"
+               to="/far_test/semantic_callback_time"/>
+        <remap from="/far_main_loop_time"
+               to="/far_test/far_main_loop_time"/>
+        <remap from="/far_reach_goal_status"
+               to="/far_test/far_reach_goal_status"/>
+        <remap from="/FAR_obs_debug" to="/far_test/FAR_obs_debug"/>
+        <remap from="/FAR_dynamic_obs_debug"
+               to="/far_test/FAR_dynamic_obs_debug"/>
+        <remap from="/semantic_local_static_obstacles"
+               to="/far_test/semantic_local_static_obstacles"/>
+        <remap from="/semantic_local_dynamic_obstacles"
+               to="/far_test/semantic_local_dynamic_obstacles"/>
+        <remap from="/FAR_new_debug" to="/far_test/FAR_new_debug"/>
+        <remap from="/viz_graph_topic" to="/far_test/viz_graph_topic"/>
+        <remap from="/viz_contour_topic"
+               to="/far_test/viz_contour_topic"/>
+        <remap from="/viz_path_topic" to="/far_test/viz_path_topic"/>
+    </node>
+
+    <node pkg="far_planner" type="far_planner_bag_test"
+          name="far_planner_bag_test" output="screen" required="true">
+        <param name="source_pose_topic" value="$(arg source_pose_topic)"/>
+        <param name="source_map_topic" value="$(arg source_map_topic)"/>
+        <param name="odom_topic" value="/far_test/odom_world"/>
+        <param name="world_frame" value="world"/>
+        <param name="enable_goal_test" value="true"/>
+        <param name="goal_x" value="$(arg goal_x)"/>
+        <param name="goal_y" value="$(arg goal_y)"/>
+        <param name="goal_z" value="$(arg goal_z)"/>
+        <param name="minimum_path_points" value="3"/>
+        <param name="enable_secondary_goal" value="true"/>
+        <param name="secondary_goal_map_index" value="400"/>
+        <param name="secondary_goal_x" value="-4.0"/>
+        <param name="secondary_goal_y" value="4.0"/>
+        <param name="secondary_goal_z" value="0.13228"/>
+        <param name="observe_dynamic_behavior" value="true"/>
+        <param name="relay_semantic_map" value="true"/>
+        <param name="planner_map_topic" value="/far_test/octomap_full"/>
+        <param name="inject_dynamic_block" value="true"/>
+        <param name="expect_input_timeout_stop" value="true"/>
+        <param name="dynamic_injection_map_index" value="250"/>
+        <param name="dynamic_occupied_frames" value="10"/>
+        <param name="dynamic_free_frames" value="8"/>
+    </node>
+</launch>

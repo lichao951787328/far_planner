@@ -6,8 +6,9 @@ voxel_dim                               : 0.15  # Unit: meter
 robot_dim                               : 0.6   # Unit: meter
 # 计算哪些点被认为是可通行/可碰撞的高度范围
 # 影响地形高度和障碍过滤时的上下限判断
-# 如果你的系统是用激光雷达做障碍感知，那么它不一定等于雷达安装高度，而是更接近“机器人本体/车身允许通过的高度阈值”
-vehicle_height                          : 0.75  # Unit: meter
+# Go2 base_link (about 0.291 m) minus the occupied floor-voxel center
+# (about -0.2 m) is 0.491 m. A rounded 0.5 m also covers its body/sensor height.
+vehicle_height                          : 0.5   # Unit: meter
 sensor_range                            : 30.0  # Unit: meter
 # 主要用于局部地形/周围环境分析的范围
 terrain_range                           : 15.0  # Unit: meter
@@ -28,6 +29,11 @@ is_debug_output                         : false
 # 是否开启“自动切换到可尝试导航模式”的机制。
 is_attempt_autoswitch                   : true  # Auto switch to attemptable navigation
 world_frame                             : map
+semantic_map_topic                      : octomap_full
+# Safety watchdogs use message receipt wall-time, so they remain effective
+# even when simulated ROS time is paused.
+odom_timeout                            : 1.0   # seconds; > 2x the 0.4 s FAR main-loop period
+semantic_map_timeout                    : 1.0   # seconds; <= 0 disables the check
 
 # Graph Messager
 GraphMsger/robot_id                     : 1  # graph from robot id "0" is extracted from files
@@ -35,6 +41,27 @@ GraphMsger/robot_id                     : 1  # graph from robot id "0" is extrac
 # Map Handler Params
 # 表示地面/楼层的高度基准。这个值会影响点云被怎么划分到地面层和障碍层。地面应该空出多高来处理环境.
 MapHandler/floor_height                 : 3.0     # Unit: meter
+MapHandler/semantic_local_window_radius : 15.0    # Local semantic query half-extent
+MapHandler/terrain_search_radius        : 0.8     # XY fallback for terrain height
+MapHandler/terrain_neighbor_radius      : 1.0     # XY terrain-support radius (2 m diameter)
+MapHandler/local_planner_radius         : 5.0     # Radius of the local trajectory-planner collision map
+MapHandler/local_planner_resolution     : 0.2     # Dense XY sampling resolution for occupied octree voxels
+MapHandler/local_planner_obstacle_intensity: 200.0 # Hard-obstacle value for static and dynamic layers
+# The current planner intentionally uses binary top-1 semantics. The probability
+# field is retained for a future full SemanticOcTree decoder and is not applied yet.
+MapHandler/semantic_top1_only           : true
+MapHandler/semantic_min_probability     : 0.55
+MapHandler/obstacle_groups:
+  - {name: chair,         rgb: [0, 33, 193]}
+  - {name: television,    rgb: [0, 67, 130]}
+  - {name: table,         rgb: [0, 101, 68]}
+  - {name: boundary_wall, rgb: [0, 134, 5]}
+  - {name: maze_wall,     rgb: [0, 168, 199]}
+MapHandler/terrain_support_groups:
+  - {name: background_floor, rgb: [0, 0, 0]}
+  - {name: staircase,        rgb: [255, 165, 0]}
+MapHandler/dynamic_obstacle_groups:
+  - {name: dynamic_obstacle, rgb: [255, 0, 255]}
 # 把整个环境切成很多小格子,每个格子的边长就是 cell_length
 MapHandler/cell_length                  : 5.0     # Unit: meter
 MapHandler/map_grid_max_length          : 1000.0  # Unit: meter

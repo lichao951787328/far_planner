@@ -10,14 +10,6 @@
 #include "planner_visualizer.h"
 #include "scan_handler.h"
 #include "graph_msger.h"
-#include <boost/shared_ptr.hpp>
-
-namespace octomap_msgs {
-struct Octomap;
-using OctomapConstPtr = boost::shared_ptr<const Octomap>;
-}  // namespace octomap_msgs
-
-
 
 struct FARMasterParams {
     FARMasterParams() = default;
@@ -36,13 +28,15 @@ struct FARMasterParams {
     bool  is_pub_boundary;
     bool  is_debug_output;
     bool  is_attempt_autoswitch;
+    float odom_timeout;
+    float semantic_map_timeout;
     std::string world_frame;
     std::string semantic_map_topic;
 };
 
 class FARMaster {
 public:
-    FARMaster() = default;
+    FARMaster() : private_nh_("~") {}
     ~FARMaster() = default;
 
     void Init(); // ROS initialization
@@ -50,15 +44,20 @@ public:
 
 private:
     ros::NodeHandle nh;
+    ros::NodeHandle private_nh_;
     ros::Subscriber reset_graph_sub_, update_command_sub_;
     ros::Subscriber odom_sub_, waypoint_sub_;
     ros::Subscriber semantic_map_sub_;
     ros::Subscriber read_command_sub_, save_command_sub_; // only use for terminal formatting
     ros::Publisher  goal_pub_, boundary_pub_;
-    ros::Publisher  dynamic_obs_pub_, surround_free_debug_, surround_obs_debug_;
+    ros::Publisher  dynamic_obs_pub_, surround_obs_debug_;
+    ros::Publisher  local_planner_static_obs_pub_;
+    ros::Publisher  local_planner_dynamic_obs_pub_;
     ros::Publisher  surround_obs_before_dyremove_debug_, surround_obs_after_dyremove_debug_;
     ros::Publisher  scan_grid_debug_, new_PCL_pub_, terrain_height_pub_;
     ros::Publisher  runtime_pub_, planning_time_pub_, traverse_time_pub_, reach_goal_pub_;
+    ros::Publisher  semantic_snapshot_time_pub_, semantic_update_time_pub_;
+    ros::Publisher  semantic_callback_time_pub_, main_loop_time_pub_;
 
     ros::Timer planning_event_;
     std_msgs::Float32 runtimer_, plan_timer_;
@@ -71,6 +70,17 @@ private:
 
     bool is_cloud_init_, is_scan_init_, is_odom_init_, is_planner_running_;
     bool is_graph_init_;
+    // Keep the latest RViz/user goal received during graph startup.  The
+    // original message is applied once the first usable graph exists instead
+    // of being silently discarded.
+    bool has_pending_route_goal_ = false;
+    geometry_msgs::PointStamped pending_route_goal_;
+    // A semantic snapshot has changed the obstacle/terrain inputs but its
+    // contour and visibility-graph update has not completed yet.
+    bool semantic_graph_dirty_ = false;
+    bool timeout_stop_active_ = false;
+    ros::WallTime last_odom_receipt_;
+    ros::WallTime last_semantic_map_receipt_;
 
     PointCloudPtr new_vertices_ptr_;
     PointCloudPtr temp_obs_ptr_;
@@ -79,6 +89,12 @@ private:
     PointCloudPtr scan_grid_ptr_;
     PointCloudPtr terrain_height_ptr_;
     PointCloudPtr dyremove_before_obs_ptr_;
+    PointCloudPtr collision_obs_ptr_;
+    PointCloudPtr effective_dynamic_obs_ptr_;
+    PointCloudPtr dynamic_added_ptr_;
+    PointCloudPtr dynamic_removed_ptr_;
+    PointCloudPtr local_planner_static_obs_ptr_;
+    PointCloudPtr local_planner_dynamic_obs_ptr_;
 
     /* veiwpoint extension clouds */
     PointCloudPtr  viewpoint_around_ptr_;
@@ -132,6 +148,11 @@ private:
     /* Callback Functions */
     void OdomCallBack(const nav_msgs::OdometryConstPtr& msg);
     void SemanticMapCallBack(const octomap_msgs::OctomapConstPtr& msg);
+    void UpdatePlannerCloudsFromSemanticMap();
+
+    bool PreconditionCheck();
+    bool DataIsFresh(std::string* reason = nullptr) const;
+    void PublishStopCommand(const std::string& reason);
 
     Point3D ExtendViewpointOnObsCloud(const NavNodePtr& nav_node_ptr, const PointCloudPtr& obsCloudIn, float& free_dist);
 
@@ -197,12 +218,6 @@ private:
                                    const PointCloudPtr& dyObsCloudOut);
 
     /* define inline functions */
-    inline bool PreconditionCheck() {
-        if (is_cloud_init_ && is_odom_init_) {
-            return true;
-        }
-        return false;
-    }
     inline void ClearTempMemory() {
         new_vertices_ptr_->clear();
         new_nodes_.clear();
@@ -217,6 +232,7 @@ private:
         odom_node_ptr_ = NULL;
         is_planner_running_ = false;  
         is_graph_init_      = false; 
+        semantic_graph_dirty_ = false;
         ClearTempMemory();
     }
 };

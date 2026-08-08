@@ -93,7 +93,6 @@ private:
 
     bool ReEvaluateConnectUsingTerrian(const NavNodePtr& node_ptr1, const NavNodePtr node_ptr2);
 
-
     inline bool IsNodeInTerrainOccupy(const NavNodePtr& node_ptr) {
         if (!FARUtil::IsStaticEnv && terrain_planner_.IsPointOccupy(node_ptr->position)) return true;
         return false;
@@ -117,9 +116,11 @@ private:
         cur_internav_ptr_ = internav_node_ptr;
         if (last_internav_ptr_ == NULL) { // init inter navigation nodes
             terrain_planner_.UpdateCenterNode(cur_internav_ptr_);
+            terrain_planner_.SetLocalTerrainObsCloud(FARUtil::surround_obs_cloud_);
             last_internav_ptr_ = cur_internav_ptr_;
         } else if (last_internav_ptr_ != cur_internav_ptr_) {
             terrain_planner_.UpdateCenterNode(cur_internav_ptr_);
+            terrain_planner_.SetLocalTerrainObsCloud(FARUtil::surround_obs_cloud_);
             this->AddTrajectoryConnect(cur_internav_ptr_, last_internav_ptr_);
             last_internav_ptr_ = cur_internav_ptr_;
         } 
@@ -440,7 +441,7 @@ public:
      *  @param robot_pos current robot position in world frame
     */
     void UpdateRobotPosition(const Point3D& robot_pos);
-    
+
     /**
      * Extract Navigation Nodes from Vertices Detected -> Update [new_nodes_] internally.
      * @param new_ctnodes new contour vertices without matching global navigation node

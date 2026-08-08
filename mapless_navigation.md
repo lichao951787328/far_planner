@@ -2,12 +2,16 @@
  * @Author: error: error: git config user.name & please set dead value or install git && error: git config user.email & please set dead value or install git & please set dead value or install git
  * @Date: 2026-07-23 11:15:48
  * @LastEditors: lichao951787328 951787328@qq.com
- * @LastEditTime: 2026-08-03 09:13:58
+ * @LastEditTime: 2026-08-07 17:15:37
  * @FilePath: /far_planner/mapless_navigation.md
  * @Description: 这是默认设置,请设置`customMade`, 打开koroFileHeader查看配置 进行设置: https://github.com/OBKoro1/koro1FileHeader/wiki/%E9%85%8D%E7%BD%AE
 -->
 graph可以保留，全地图（自由、障碍、可通行）给我的高程图我还当作全局地图用吗？还是只当局部地图用，全局地图还是依旧保留这直接使用点云的方案，累积误差影响大吗？地图端会维护一个全局的点云和语义地图吗？除了全局地图需要维护几何信息之外，建议维护一个和高程相同维度的代价地图，这个代价地图统一把语义代价和可通行性代价揉在一起，注意代价的卡尔曼更新与动态物体的去除。waypoint可以结合之前的方案，然后根据布局代价来确定，这个确定可能会有一些工作量。
 在确定waypoint之后，使用带代价的地图进行规划路径，这里在规划时可以考虑梯度的方向及各种代价。可以先写一个保底的，后面可以使用自监督，我觉得这个来做自监督应该可以。
+
+
+后续直接通过局部地图来和维护动态障碍，全局地图依然保留
+通过局部障碍地图来graph是不是就可以，能区分动态障碍就行，现在有点像把全局地图当局部地图用了
 
 
 

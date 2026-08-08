@@ -21,7 +21,7 @@ void GraphPlanner::Init(const ros::NodeHandle& nh, const GraphPlannerParams& par
     is_goal_init_ = false;
     current_graph_.clear();
     // attemptable planning listener
-    attemptable_sub_ = nh_.subscribe("/planning_attemptable", 5, &GraphPlanner::AttemptStatusCallBack, this);
+    attemptable_sub_ = nh_.subscribe("planning_attemptable", 5, &GraphPlanner::AttemptStatusCallBack, this);
     // initialize terrian grid
     const int col_num = std::ceil(gp_params_.adjust_radius * 2.0f / FARUtil::kLeafSize);
     Eigen::Vector3i grid_size(col_num, col_num, 1);
@@ -53,7 +53,8 @@ void GraphPlanner::UpdateGraphTraverability(const NavNodePtr& odom_node_ptr, con
         close_set.insert(current->id);
         current->is_traversable = true; // reachable from current position
         for (const auto& neighbor : current->connect_nodes) {
-            if (close_set.count(neighbor->id) || this->IsInvalidBoundary(current, neighbor)) continue;
+            if (close_set.count(neighbor->id) ||
+                this->IsInvalidBoundary(current, neighbor)) continue;
             float edist = this->EulerCost(current, neighbor);
             if (neighbor == goal_ptr && edist > FARUtil::kEpsilon && !FARUtil::IsAtSameLayer(neighbor, current)) { // check for multi layer traverse cost
                 const Point3D diff_p = neighbor->position - current->position;
@@ -89,7 +90,8 @@ void GraphPlanner::UpdateGraphTraverability(const NavNodePtr& odom_node_ptr, con
         close_set.insert(current->id);
         current->is_free_traversable = true; // reachable from current position
         for (const auto& neighbor : current->connect_nodes) {
-            if (!neighbor->is_covered || close_set.count(neighbor->id) || this->IsInvalidBoundary(current, neighbor)) continue;
+            if (!neighbor->is_covered || close_set.count(neighbor->id) ||
+                this->IsInvalidBoundary(current, neighbor)) continue;
             const float e_dist = this->EulerCost(current, neighbor);
             if (neighbor == goal_ptr && (!is_goal_in_freespace_ || e_dist > FARUtil::kTerrainRange)) continue;
             const float temp_fgscore = current->fgscore + e_dist;
@@ -144,6 +146,8 @@ bool GraphPlanner::PathToGoal(const NavNodePtr& goal_ptr,
                               NavNodePtr& _nav_node_ptr,
                               Point3D& _goal_p,
                               bool& _is_fail,
+                              const bool& has_dynamic_obstacles,
+                              bool& _is_dynamic_wait,
                               bool& _is_succeed,
                               bool& _is_free_nav) 
 {
@@ -152,7 +156,7 @@ bool GraphPlanner::PathToGoal(const NavNodePtr& goal_ptr,
         ROS_ERROR("GP: Graph or Goal is not initialized correctly.");
         return false;
     }
-    _is_fail = false, _is_succeed = false;
+    _is_fail = false, _is_dynamic_wait = false, _is_succeed = false;
     global_path.clear();
     _goal_p = goal_ptr->position;
     if (current_graph_.size() == 1) {
@@ -163,15 +167,15 @@ bool GraphPlanner::PathToGoal(const NavNodePtr& goal_ptr,
         _is_free_nav = is_free_nav_goal_;
         return true;       
     }
-    if ((odom_node_ptr_->position - _goal_p).norm() < gp_params_.converge_dist || 
-        (odom_node_ptr_->position - origin_goal_pos_).norm() < gp_params_.converge_dist)
+    // A changing obstacle layout may change the Graph path and the selected
+    // waypoint, but it must never change the commanded destination.  Report
+    // success only at the original goal received from the user.
+    if ((odom_node_ptr_->position - origin_goal_pos_).norm() <
+        gp_params_.converge_dist)
     {
         if (FARUtil::IsDebug) ROS_INFO("GP: *********** Goal Reached! ***********");
         global_path.push_back(odom_node_ptr_);
-        if ((odom_node_ptr_->position - _goal_p).norm() > gp_params_.converge_dist) {
-            _goal_p = origin_goal_pos_;
-            goal_ptr->position = _goal_p;   
-        }
+        _goal_p = origin_goal_pos_;
         _is_succeed = true;
         global_path.push_back(goal_ptr);
         _nav_node_ptr = goal_ptr;
@@ -249,11 +253,30 @@ bool GraphPlanner::PathToGoal(const NavNodePtr& goal_ptr,
                 is_free_nav_goal_ = false;
                 return true;
             }
+            if (has_dynamic_obstacles) {
+                // Dynamic obstacles use the ordinary contour/Graph update.
+                // If that rebuilt Graph has no route, preserve the goal so a
+                // later snapshot can retry after the obstacle moves away.
+                _is_dynamic_wait = true;
+                if (FARUtil::IsDebug) {
+                    ROS_WARN_THROTTLE(1.0,
+                        "GP: goal temporarily unreachable while dynamic obstacles are active; retaining it for replanning.");
+                }
+                return false;
+            }
             if (FARUtil::IsDebug) ROS_ERROR("****************** FAIL TO REACH GOAL ******************");
             this->GoalReset();
             is_goal_init_ = false, _is_fail = true;
             return false;
         }
+    }
+    if (has_dynamic_obstacles) {
+        _is_dynamic_wait = true;
+        if (FARUtil::IsDebug) {
+            ROS_WARN_THROTTLE(1.0,
+                "GP: rebuilt Graph has no route while dynamic obstacles are active; retaining the goal.");
+        }
+        return false;
     }
     if (FARUtil::IsDebug) ROS_ERROR("GP: unexpected error happend within planning, navigation to goal fails.");
     this->GoalReset();
@@ -339,7 +362,10 @@ void GraphPlanner::UpdateGoal(const Point3D& goal) {
     is_goal_init_          = true;
     is_global_path_init_   = false;
     is_terrain_associated_ = false;
-    origin_goal_pos_       = goal_node_ptr_->position;
+    // Keep the user command independent from the graph node selected as the
+    // connection endpoint.  In particular, dynamic contours may change the
+    // latter's parents and the current waypoint, but not this destination.
+    origin_goal_pos_       = goal;
     is_free_nav_goal_      = command_is_free_nav_;
     next_waypoint_         = Point3D(0,0,0);
     last_waypoint_dist_    = 0.0f;
@@ -348,6 +374,9 @@ void GraphPlanner::UpdateGoal(const Point3D& goal) {
     recorded_path_.clear();
     if (!FARUtil::IsMultiLayer) {
         goal_node_ptr_->position.z = MapHandler::NearestTerrainHeightofNavPoint(origin_goal_pos_, is_terrain_associated_) + FARUtil::vehicle_height;
+        // Terrain association is the canonical 2.5D height of the same goal;
+        // its XY coordinates remain exactly those commanded by the user.
+        origin_goal_pos_.z = goal_node_ptr_->position.z;
     }
     this->ResetFreeTerrainGridOrigin(goal_node_ptr_->position);
 }
@@ -364,58 +393,16 @@ void GraphPlanner::ReEvaluateGoalPosition(const NavNodePtr& goal_ptr, const bool
         }
         
     }
-    const Eigen::Vector3i ori_sub = free_terrain_grid_->Pos2Sub(origin_goal_pos_.x, origin_goal_pos_.y, grid_center_.z);
-    const Point3D ori_pos_height(origin_goal_pos_.x, origin_goal_pos_.y, goal_ptr->position.z);
-    const bool is_origin_free = ContourGraph::IsPoint3DConnectFreePolygon(ori_pos_height, odom_node_ptr_->position) ? true : false;
-    if (is_origin_free) {
-        goal_ptr->position = ori_pos_height;
-    } else { // reproject to nearby free space
-        std::array<int, 4> dx = {-1, 0, 1, 0};
-        std::array<int, 4> dy = { 0, 1, 0,-1};
-        std::deque<int> q;
-        std::unordered_set<int> visited_set;
-        q.push_back(free_terrain_grid_->Sub2Ind(ori_sub));
-        visited_set.insert(free_terrain_grid_->Sub2Ind(ori_sub));
-        int valid_idx = -1;
-        while (!q.empty()) {
-            const int cur_id = q.front();
-            q.pop_front();
-            if (free_terrain_grid_->GetCell(cur_id) == FREE_BIT) {
-                valid_idx = cur_id;
-                break;
-            }
-            for (int i=0; i<4; i++) {
-                Eigen::Vector3i csub = free_terrain_grid_->Ind2Sub(cur_id);
-                csub.x() += dx[i], csub.y() += dy[i], csub.z() = 0;
-                if (!free_terrain_grid_->InRange(csub)) continue;
-                const int cidx = free_terrain_grid_->Sub2Ind(csub);
-                if (!visited_set.count(cidx)) {
-                    q.push_back(cidx);
-                    visited_set.insert(cidx);
-                }
-            }
-        }
-        if (valid_idx != -1 && free_terrain_grid_->InRange(valid_idx)) {
-            Point3D new_p = Point3D(free_terrain_grid_->Ind2Pos(valid_idx));
-            new_p.z = goal_ptr->position.z;
-            const float pred = (goal_ptr->position - ori_pos_height).norm();
-            const float curd = (new_p - ori_pos_height).norm();
-            if (abs(curd - pred) > FARUtil::kLeafSize && !ContourGraph::IsEdgeCollideBoundary(goal_ptr->position, new_p)) {
-                if (FARUtil::IsDebug) ROS_INFO_THROTTLE(1.0, "GP: adjusting goal into free space.");
-                goal_ptr->position = new_p;
-            }
-        } 
-        if (FARUtil::IsNodeInLocalRange(goal_ptr)) {
-            Point3D current_goal_pos = goal_ptr->position;
-            if (ContourGraph::ReprojectPointOutsidePolygons(current_goal_pos, FARUtil::kNearDist)) {
-                if (FARUtil::IsDebug) {
-                    const float reproject_dist = (current_goal_pos - origin_goal_pos_).norm_flat();
-                    ROS_WARN_THROTTLE(1.0, "GP: current goal is inside polygon, reproject goal position distance to origin goal: %f.", reproject_dist);
-                }
-                goal_ptr->position = current_goal_pos;
-            }
-        }
-    }
+    // Goals are assumed reachable in the current phase.  Obstacles (including
+    // dynamic semantic obstacles) may change contours, Graph connections and
+    // intermediate waypoints, but never the goal XY position itself.
+    goal_ptr->position.x = origin_goal_pos_.x;
+    goal_ptr->position.y = origin_goal_pos_.y;
+
+    // TODO: define a separate policy for an invalid user command that lies
+    // inside a permanent static obstacle.  The legacy FAR implementation
+    // reprojected such a goal to nearby free space; that behavior must not be
+    // reused for temporary dynamic occupancy without an explicit decision.
 }
 
 void GraphPlanner::AttemptStatusCallBack(const std_msgs::Bool& msg) {

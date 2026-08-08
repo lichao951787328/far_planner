@@ -15,12 +15,34 @@ is_pub_boundary                         : false
 is_debug_output                         : false
 is_attempt_autoswitch                   : true  # Auto switch to attemptable navigation
 world_frame                             : map
+semantic_map_topic                      : octomap_full
+odom_timeout                            : 0.5   # seconds; <= 0 disables the check
+semantic_map_timeout                    : 1.0   # seconds; <= 0 disables the check
 
 # Graph Messager
 GraphMsger/robot_id                     : 1  # graph from robot id "0" is extracted from files
 
 # Map Handler Params
 MapHandler/floor_height                 : 2.0    # Unit: meter
+MapHandler/semantic_local_window_radius : 15.0   # Local semantic query half-extent
+MapHandler/terrain_search_radius        : 0.8    # XY fallback for terrain height
+MapHandler/terrain_neighbor_radius      : 1.0    # XY terrain-support radius (2 m diameter)
+MapHandler/local_planner_radius         : 5.0
+MapHandler/local_planner_resolution     : 0.2
+MapHandler/local_planner_obstacle_intensity: 200.0
+MapHandler/semantic_top1_only           : true
+MapHandler/semantic_min_probability     : 0.55   # Reserved while binary top-1 mode is active
+MapHandler/obstacle_groups:
+  - {name: chair,         rgb: [0, 33, 193]}
+  - {name: television,    rgb: [0, 67, 130]}
+  - {name: table,         rgb: [0, 101, 68]}
+  - {name: boundary_wall, rgb: [0, 134, 5]}
+  - {name: maze_wall,     rgb: [0, 168, 199]}
+MapHandler/terrain_support_groups:
+  - {name: background_floor, rgb: [0, 0, 0]}
+  - {name: staircase,        rgb: [255, 165, 0]}
+MapHandler/dynamic_obstacle_groups:
+  - {name: dynamic_obstacle, rgb: [255, 0, 255]}
 MapHandler/cell_length                  : 2.5    # Unit: meter
 MapHandler/map_grid_max_length          : 200.0  # Unit: meter
 MapHandler/map_grad_max_height          : 10.0   # Unit: meter

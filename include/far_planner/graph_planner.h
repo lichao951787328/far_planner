@@ -164,8 +164,10 @@ void UpdateGraphTraverability(const NavNodePtr& odom_node_ptr, const NavNodePtr&
  * @param goal_ptr current goal node
  * @param global_path(return) return the global path from odom node position
  * @param _nav_node_ptr(return) current navigation waypoint
- * @param _goal_p(return) goal position after free space adjust 
+ * @param _goal_p(return) current goal position (fixed to the user command in XY)
  * @param _is_fail(return) whether the planner fails to find the path
+ * @param has_dynamic_obstacles whether a transient semantic obstacle is active
+ * @param _is_dynamic_wait(return) whether the goal is retained for a transient retry
  * @param _is_succeed(return) whether the vehicle has reached the goal
  * @param _is_free_nav(return) the attemptable navigation status (True)->Non-attempts
  * @return whether or not planning success -> publish a valid path for navigation
@@ -176,6 +178,8 @@ bool PathToGoal(const NavNodePtr& goal_ptr,
                 NavNodePtr&   _nav_node_ptr,
                 Point3D&      _goal_p,
                 bool&         _is_fails,
+                const bool&   has_dynamic_obstacles,
+                bool&         _is_dynamic_wait,
                 bool&         _is_succeed,
                 bool&         _is_free_nav);
 
@@ -195,7 +199,7 @@ void UpdateGoal(const Point3D& goal);
 
 
 /**
- * @brief Update free terrian grid for re-selecting goal position into free space
+ * @brief Update the free-terrain grid used to evaluate fixed-goal connectivity
  * @param center current center of grid
  * @param obsCloudIn Obstalce point cloud input
  * @param freeCloudIn Free point cloud input
@@ -205,7 +209,7 @@ void UpdateFreeTerrainGrid(const Point3D& center,
                            const PointCloudPtr& freeCloudIn);
 
 /**
- * @brief Adjust goal position based on terrain and polygons
+ * @brief Refresh the goal's terrain height while preserving the commanded XY
  * @param goal_ptr current goal node pointer
  * @param is_adjust_height whether or not adjust height of goal -> (False if multi layer planning)
  */

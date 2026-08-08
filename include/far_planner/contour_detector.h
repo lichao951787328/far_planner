@@ -34,7 +34,9 @@ private:
     float VOXEL_DIM_INV;
     
 
-    void UpdateImgMatWithCloud(const PointCloudPtr& pc, cv::Mat& img_mat);
+    void UpdateImgMatWithCloud(const PointCloudPtr& pc,
+                               cv::Mat& img_mat,
+                               const bool& is_verified_occupied);
 
     void ExtractContourFromImg(const cv::Mat& img,
                                std::vector<CVPointStack>& img_contours,
@@ -232,7 +234,8 @@ public:
     */
     void BuildTerrainImgAndExtractContour(const NavNodePtr& odom_node_ptr, 
                                           const PointCloudPtr& surround_cloud,
-                                          std::vector<PointStack>& realworl_contour);
+                                          std::vector<PointStack>& realworl_contour,
+                                          const bool& is_verified_occupied = false);
 
     /**
      * Show Corners on Pointcloud projection image

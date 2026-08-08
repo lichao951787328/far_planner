@@ -1,0 +1,47 @@
+<launch>
+  <!-- Start this monitor before publishing the one demo goal. It observes the
+       navigation chain and never publishes goals, stop commands, or velocity. -->
+  <arg name="goalTopic" default="/goal_point"/>
+  <arg name="odometryTopic" default="/odom_world"/>
+  <arg name="semanticMapTopic" default="/octomap_full"/>
+  <arg name="dynamicCloudTopic" default="/FAR_dynamic_obs_debug"/>
+  <arg name="waypointTopic" default="/way_point"/>
+  <arg name="pathTopic" default="/path"/>
+  <arg name="reachedTopic" default="/far_reach_goal_status"/>
+  <arg name="cmdVelTopic" default="/far_cmd_vel"/>
+
+  <arg name="outputCsv" default=""/>
+  <arg name="sampleRate" default="5.0"/>
+  <arg name="mapCheckPeriod" default="1.0"/>
+  <arg name="goalTolerance" default="0.5"/>
+  <arg name="dynamicCorridorDistance" default="0.6"/>
+  <arg name="minimumSafeDistance" default="0.6"/>
+  <arg name="maximumDuration" default="300.0"/>
+  <arg name="autoFinishOnReach" default="true"/>
+
+  <node pkg="far_planner" type="navigation_demo_monitor"
+        name="navigation_demo_monitor" output="screen" required="false">
+    <param name="goal_topic" value="$(arg goalTopic)"/>
+    <param name="odom_topic" value="$(arg odometryTopic)"/>
+    <param name="octomap_topic" value="$(arg semanticMapTopic)"/>
+    <param name="dynamic_cloud_topic" value="$(arg dynamicCloudTopic)"/>
+    <param name="waypoint_topic" value="$(arg waypointTopic)"/>
+    <param name="path_topic" value="$(arg pathTopic)"/>
+    <param name="reached_topic" value="$(arg reachedTopic)"/>
+    <param name="cmd_vel_topic" value="$(arg cmdVelTopic)"/>
+    <param name="output_csv" value="$(arg outputCsv)"/>
+    <param name="sample_rate" value="$(arg sampleRate)"/>
+    <param name="map_check_period" value="$(arg mapCheckPeriod)"/>
+    <param name="goal_tolerance" value="$(arg goalTolerance)"/>
+    <param name="dynamic_corridor_distance"
+           value="$(arg dynamicCorridorDistance)"/>
+    <param name="minimum_safe_distance" value="$(arg minimumSafeDistance)"/>
+    <param name="maximum_duration" value="$(arg maximumDuration)"/>
+    <!-- Ends only this recorder after reached=true; it never stops the robot. -->
+    <param name="auto_finish_on_reach" value="$(arg autoFinishOnReach)"/>
+    <param name="require_initial_unknown" value="true"/>
+    <param name="require_dynamic_interaction" value="true"/>
+    <param name="maximum_roll_pitch_deg" value="25.0"/>
+    <param name="minimum_robot_height" value="0.2"/>
+  </node>
+</launch>

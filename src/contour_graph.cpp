@@ -160,6 +160,39 @@ bool ContourGraph::IsCTMatchLineFreePolygon(const CTNodePtr& matched_ctnode, con
     return ContourGraph::IsPointsConnectFreePolygon(cedge, bd_cedge, h_pair, is_global_check);
 }
 
+bool ContourGraph::IsPillarConnectBlocked(const PolygonPtr& poly_ptr,
+                                          const ConnectPair& edge,
+                                          const HeightPair& edge_height) {
+    if (!poly_ptr || poly_ptr->vertices.empty()) return false;
+
+    float min_height = FARUtil::kINF;
+    float max_height = -FARUtil::kINF;
+    for (const auto& vertex : poly_ptr->vertices) {
+        min_height = std::min(min_height, vertex.z);
+        max_height = std::max(max_height, vertex.z);
+    }
+    if (!ContourGraph::IsEdgeOverlapInHeight(
+            edge_height, HeightPair(min_height, max_height))) {
+        return false;
+    }
+
+    const PointPair edge_line(
+        Point3D(edge.start_p.x, edge.start_p.y, 0.0f),
+        Point3D(edge.end_p.x, edge.end_p.y, 0.0f));
+    const Point3D center = FARUtil::AveragePoints(poly_ptr->vertices);
+    if (FARUtil::DistanceToLineSeg2D(center, edge_line) <=
+        FARUtil::kNavClearDist) {
+        return true;
+    }
+    for (const auto& vertex : poly_ptr->vertices) {
+        if (FARUtil::DistanceToLineSeg2D(vertex, edge_line) <=
+            FARUtil::kNavClearDist) {
+            return true;
+        }
+    }
+    return false;
+}
+
 bool ContourGraph::IsPointsConnectFreePolygon(const ConnectPair& cedge,
                                               const ConnectPair& bd_cedge,
                                               const HeightPair h_pair,
@@ -178,7 +211,11 @@ bool ContourGraph::IsPointsConnectFreePolygon(const ConnectPair& cedge,
                                          (cedge.start_p.y + cedge.end_p.y) / 2.0f,
                                          0.0f);
         for (const auto& poly_ptr : ContourGraph::contour_polygons_) {
-            if (poly_ptr->is_pillar) continue;
+            if (poly_ptr->is_pillar) {
+                if (ContourGraph::IsPillarConnectBlocked(
+                        poly_ptr, cedge, h_pair)) return false;
+                continue;
+            }
             if ((poly_ptr->is_robot_inside != FARUtil::PointInsideAPoly(poly_ptr->vertices, center_p)) || 
                 ContourGraph::IsEdgeCollidePoly(poly_ptr->vertices, cedge)) 
             {
@@ -205,7 +242,11 @@ bool ContourGraph::IsPointsConnectFreePolygon(const ConnectPair& cedge,
             }
         }
         for (const auto& poly_ptr : ContourGraph::contour_polygons_) {
-            if (poly_ptr->is_pillar) continue;
+            if (poly_ptr->is_pillar) {
+                if (ContourGraph::IsPillarConnectBlocked(
+                        poly_ptr, cedge, h_pair)) return false;
+                continue;
+            }
             if (ContourGraph::IsEdgeCollidePoly(poly_ptr->vertices, cedge)) {
                 return false;
             }
@@ -736,5 +777,4 @@ void ContourGraph::ResetCurrentContour() {
     odom_node_ptr_ = NULL;
     is_robot_inside_poly_ = false;
 }   
-
 

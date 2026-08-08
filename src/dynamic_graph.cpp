@@ -8,6 +8,8 @@
 
 #include "far_planner/dynamic_graph.h"
 
+#include <cmath>
+
 /***************************************************************************************/
 
 void DynamicGraph::Init(const ros::NodeHandle& nh, const DynamicGraphParams& params) {

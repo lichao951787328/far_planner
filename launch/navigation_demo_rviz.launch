@@ -1,0 +1,29 @@
+<launch>
+  <!-- Leadership/demo view for the Go2 semantic FAR pipeline.  The standard
+       RViz "2D Nav Goal" tool publishes /move_base_simple/goal; the adapter
+       started by semantic_far_planner.launch converts it to /goal_point. -->
+  <arg name="config" default="navigation_demo"/>
+  <arg name="launchRobotModel" default="true"/>
+  <arg name="jointStateTopic"
+       default="/world/semantic_segmentation_world/model/go2_semantic/joint_state"/>
+
+  <!-- The Fortress simulation publishes world -> base_link and raw Go2 joint
+       states, but does not load a URDF.  These nodes supply only the articulated
+       model frames needed by RViz. -->
+  <group if="$(arg launchRobotModel)">
+    <param name="robot_description"
+           textfile="$(find go2_description)/urdf/go2_description.urdf"/>
+    <node pkg="tf2_ros" type="static_transform_publisher"
+          name="demo_base_to_go2_model"
+          args="0 0 0 0 0 0 base_link base"/>
+    <node pkg="robot_state_publisher" type="robot_state_publisher"
+          name="demo_robot_state_publisher" output="screen">
+      <param name="publish_frequency" value="60.0"/>
+      <remap from="joint_states" to="$(arg jointStateTopic)"/>
+    </node>
+  </group>
+
+  <node pkg="rviz" type="rviz" name="far_navigation_demo_rviz"
+        output="screen"
+        args="-d $(find far_planner)/rviz/$(arg config).rviz"/>
+</launch>

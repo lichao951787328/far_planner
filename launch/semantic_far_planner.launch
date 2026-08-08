@@ -1,0 +1,59 @@
+<launch>
+  <!-- Runtime launch for the Gazebo semantic-octomap pipeline. It deliberately
+       excludes graph_decoder and pathFollower. -->
+  <arg name="config" default="default"/>
+  <arg name="poseTopic" default="/model/go2_semantic/pose"/>
+  <arg name="odometryTopic" default="/odom_world"/>
+  <arg name="semanticMapTopic" default="/octomap_full"/>
+  <arg name="rvizGoalTopic" default="/move_base_simple/goal"/>
+  <arg name="farGoalTopic" default="/goal_point"/>
+  <arg name="worldFrameId" default="world"/>
+  <arg name="childFrameId" default="base_link"/>
+  <arg name="publishTf" default="false"/>
+  <arg name="requireMatchingPoseFrame" default="false"/>
+  <!-- FAR processes its callback queue in the 2.5 Hz main loop. Keep the
+       odometry watchdog safely above two 0.4 s loop periods. -->
+  <arg name="odomTimeout" default="1.0"/>
+  <arg name="semanticMapTimeout" default="1.0"/>
+  <arg name="launchRviz" default="false"/>
+  <arg name="rvizConfig" default="navigation_demo"/>
+  <arg name="launchRobotModel" default="true"/>
+
+  <node pkg="far_planner" type="pose_stamped_to_odometry"
+        name="pose_stamped_to_odometry" output="screen" required="true">
+    <param name="input_pose_topic" value="$(arg poseTopic)"/>
+    <param name="output_odom_topic" value="$(arg odometryTopic)"/>
+    <param name="world_frame" value="$(arg worldFrameId)"/>
+    <param name="child_frame" value="$(arg childFrameId)"/>
+    <!-- The Go2 simulation already publishes world -> base_link TF. -->
+    <param name="publish_tf" value="$(arg publishTf)"/>
+    <param name="require_matching_input_frame"
+           value="$(arg requireMatchingPoseFrame)"/>
+    <param name="maximum_twist_interval" value="0.5"/>
+  </node>
+
+  <node pkg="far_planner" type="pose_stamped_to_point_stamped"
+        name="pose_stamped_to_point_stamped" output="screen" required="true">
+    <param name="input_goal_topic" value="$(arg rvizGoalTopic)"/>
+    <param name="output_goal_topic" value="$(arg farGoalTopic)"/>
+    <param name="default_frame" value="$(arg worldFrameId)"/>
+  </node>
+
+  <node pkg="far_planner" type="far_planner" name="far_planner"
+        output="screen" required="true">
+    <rosparam command="load"
+              file="$(find far_planner)/config/$(arg config).yaml"/>
+    <param name="world_frame" value="$(arg worldFrameId)"/>
+    <param name="semantic_map_topic" value="$(arg semanticMapTopic)"/>
+    <param name="odom_timeout" value="$(arg odomTimeout)"/>
+    <param name="semantic_map_timeout" value="$(arg semanticMapTimeout)"/>
+    <remap from="odom_world" to="$(arg odometryTopic)"/>
+    <remap from="goal_point" to="$(arg farGoalTopic)"/>
+  </node>
+
+  <include if="$(arg launchRviz)"
+           file="$(find far_planner)/launch/navigation_demo_rviz.launch">
+    <arg name="config" value="$(arg rvizConfig)"/>
+    <arg name="launchRobotModel" value="$(arg launchRobotModel)"/>
+  </include>
+</launch>

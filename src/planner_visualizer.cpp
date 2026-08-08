@@ -15,13 +15,13 @@ void DPVisualizer::Init(const ros::NodeHandle& nh) {
     nh_ = nh;
     point_cloud_ptr_ = PointCloudPtr(new pcl::PointCloud<PCLPoint>());
     // Rviz Publisher
-    viz_node_pub_    = nh_.advertise<Marker>("/viz_node_topic", 5);
-    viz_path_pub_    = nh_.advertise<Marker>("/viz_path_topic", 5);
-    viz_poly_pub_    = nh_.advertise<MarkerArray>("/viz_poly_topic", 5);
-    viz_graph_pub_   = nh_.advertise<MarkerArray>("/viz_graph_topic", 5);
-    viz_contour_pub_ = nh_.advertise<MarkerArray>("/viz_contour_topic", 5);
-    viz_map_pub_     = nh_.advertise<MarkerArray>("/viz_grid_map_topic", 5);
-    viz_view_extend  = nh_.advertise<MarkerArray>("/viz_viewpoint_extend_topic", 5);
+    viz_node_pub_    = nh_.advertise<Marker>("viz_node_topic", 5);
+    viz_path_pub_    = nh_.advertise<Marker>("viz_path_topic", 5);
+    viz_poly_pub_    = nh_.advertise<MarkerArray>("viz_poly_topic", 5);
+    viz_graph_pub_   = nh_.advertise<MarkerArray>("viz_graph_topic", 5);
+    viz_contour_pub_ = nh_.advertise<MarkerArray>("viz_contour_topic", 5);
+    viz_map_pub_     = nh_.advertise<MarkerArray>("viz_grid_map_topic", 5);
+    viz_view_extend  = nh_.advertise<MarkerArray>("viz_viewpoint_extend_topic", 5);
 }
 
 void DPVisualizer::VizNodes(const NodePtrStack& node_stack, 
@@ -480,4 +480,3 @@ void DPVisualizer::SetColor(const VizColor& color,
     }
     scan_marker.color = c;
 }
-

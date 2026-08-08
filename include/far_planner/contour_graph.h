@@ -230,6 +230,11 @@ private:
 
     static bool IsEdgeCollideSegment(const PointPair& line, const ConnectPair& edge);
 
+    /** Inflated 2.5D collision test for a small polygon represented as one pillar node. */
+    static bool IsPillarConnectBlocked(const PolygonPtr& poly_ptr,
+                                       const ConnectPair& edge,
+                                       const HeightPair& edge_height);
+
     static bool IsCTMatchLineFreePolygon(const CTNodePtr& matched_ctnode, const NavNodePtr& matched_navnode, const bool& is_global_check);
 
     static bool IsValidBoundary(const NavNodePtr& node_ptr1, const NavNodePtr& node_ptr2, bool& is_new);

@@ -39,16 +39,21 @@ void ContourDetector::Init(const ContourDetectParams& params) {
 // 然后做 threshold / blur / findContours / approxPolyDP，最后转回 realworld_contour。
 void ContourDetector::BuildTerrainImgAndExtractContour(const NavNodePtr& odom_node_ptr,
                                                        const PointCloudPtr& surround_cloud,
-                                                       std::vector<PointStack>& realworl_contour) {
+                                                       std::vector<PointStack>& realworl_contour,
+                                                       const bool& is_verified_occupied) {
     CVPointStack cv_corners;
     PointStack corner_vec;
     this->UpdateOdom(odom_node_ptr);
     this->ResetImgMat(img_mat_);
-    this->UpdateImgMatWithCloud(surround_cloud, img_mat_);
+    this->UpdateImgMatWithCloud(surround_cloud, img_mat_,
+                                is_verified_occupied);
     this->ExtractContourFromImg(img_mat_, refined_contours_, realworl_contour);
 }
 
-void ContourDetector::UpdateImgMatWithCloud(const PointCloudPtr& pc, cv::Mat& img_mat) {
+void ContourDetector::UpdateImgMatWithCloud(
+    const PointCloudPtr& pc,
+    cv::Mat& img_mat,
+    const bool& is_verified_occupied) {
     int row_idx, col_idx, inf_row, inf_col;
     const std::vector<int> inflate_vec{-1, 0, 1};
     for (const auto& pcl_p : pc->points) {
@@ -63,7 +68,14 @@ void ContourDetector::UpdateImgMatWithCloud(const PointCloudPtr& pc, cv::Mat& im
             }
         }
     }
-    if (!FARUtil::IsStaticEnv) {
+    if (is_verified_occupied) {
+        // Semantic-octomap points have already passed occupancy and class
+        // validation.  Requiring several points to hit the same projected
+        // pixel is an old raw-scan denoising rule; it erases sparse or
+        // single-height occupied voxels, especially small dynamic objects.
+        cv::threshold(img_mat, img_mat, 0.0, 1.0,
+                      cv::ThresholdTypes::THRESH_BINARY);
+    } else if (!FARUtil::IsStaticEnv) {
         cv::threshold(img_mat, img_mat, cd_params_.kThredValue, 1.0, cv::ThresholdTypes::THRESH_BINARY);
     }
     if (cd_params_.is_save_img) this->SaveCurrentImg(img_mat);
@@ -194,6 +206,5 @@ void ContourDetector::TopoFilterContours(std::vector<CVPointStack>& contoursInOu
         }
     }
 }
-
 
 
