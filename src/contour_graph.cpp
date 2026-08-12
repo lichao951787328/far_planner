@@ -8,11 +8,33 @@
 
 #include "far_planner/contour_graph.h"
 #include "far_planner/intersection.h"
+#include "far_planner/terminal_visibility_policy.h"
+
+PointCloudPtr ContourGraph::local_collision_cloud_(new PointCloud());
+PointKdTreePtr ContourGraph::local_collision_kdtree_(
+    new pcl::KdTreeFLANN<PCLPoint>());
+PointCloudPtr ContourGraph::local_static_collision_cloud_(new PointCloud());
+PointKdTreePtr ContourGraph::local_static_collision_kdtree_(
+    new pcl::KdTreeFLANN<PCLPoint>());
+PointCloudPtr ContourGraph::local_dynamic_collision_cloud_(new PointCloud());
+PointKdTreePtr ContourGraph::local_dynamic_collision_kdtree_(
+    new pcl::KdTreeFLANN<PCLPoint>());
+float ContourGraph::contour_projection_min_ = 0.15f;
+float ContourGraph::contour_projection_step_ = 0.075f;
+float ContourGraph::contour_projection_max_ = 0.60f;
+float ContourGraph::contour_boundary_guard_ = 0.40f;
 
 /***************************************************************************************/
 
 void ContourGraph::Init(const ContourGraphParams& params) {
     ctgraph_params_ = params;
+    contour_projection_min_ = std::max(0.0f, params.contour_projection_min);
+    contour_projection_step_ = std::max(
+        FARUtil::kEpsilon, params.contour_projection_step);
+    contour_projection_max_ = std::max(
+        contour_projection_min_, params.contour_projection_max);
+    contour_boundary_guard_ = std::max(
+        FARUtil::kLeafSize, params.contour_boundary_guard);
     ContourGraph::contour_graph_.clear();
     ContourGraph::contour_polygons_.clear();
     ALIGN_ANGLE_COS = cos(M_PI - FARUtil::kAcceptAlign / 2.0f);
@@ -23,13 +45,27 @@ void ContourGraph::Init(const ContourGraphParams& params) {
 
 void ContourGraph::UpdateContourGraph(const NavNodePtr& odom_node_ptr,
                                       const std::vector<std::vector<Point3D>>& filtered_contours) {
+    this->UpdateContourGraph(odom_node_ptr, filtered_contours,
+                             std::vector<std::vector<Point3D>>());
+}
+
+void ContourGraph::UpdateContourGraph(
+    const NavNodePtr& odom_node_ptr,
+    const std::vector<std::vector<Point3D>>& static_contours,
+    const std::vector<std::vector<Point3D>>& dynamic_contours) {
     odom_node_ptr_ = odom_node_ptr;
     this->ClearContourGraph();
-    for (const auto& poly : filtered_contours) {
+    const auto add_polygons = [this](
+        const std::vector<std::vector<Point3D>>& contours,
+        const GraphNodeSource source) {
+      for (const auto& poly : contours) {
         PolygonPtr new_poly_ptr = NULL;
-        this->CreatePolygon(poly, new_poly_ptr);
+        this->CreatePolygon(poly, new_poly_ptr, source);
         this->AddPolyToContourPolygon(new_poly_ptr);
-    }
+      }
+    };
+    add_polygons(static_contours, GraphNodeSource::STATIC_CANDIDATE);
+    add_polygons(dynamic_contours, GraphNodeSource::DYNAMIC_LOCAL);
     ContourGraph::UpdateOdomFreePosition(odom_node_ptr_, FARUtil::free_odom_p);
     for (const auto& poly_ptr : ContourGraph::contour_polygons_) {
         poly_ptr->is_robot_inside = FARUtil::PointInsideAPoly(poly_ptr->vertices, FARUtil::free_odom_p);
@@ -37,6 +73,8 @@ void ContourGraph::UpdateContourGraph(const NavNodePtr& odom_node_ptr,
         if (poly_ptr->is_pillar) {
             Point3D mean_p = FARUtil::AveragePoints(poly_ptr->vertices);
             this->CreateCTNode(mean_p, new_ctnode_ptr, poly_ptr, true);
+            new_ctnode_ptr->is_boundary_clipped =
+                poly_ptr->is_boundary_clipped;
             this->AddCTNodeToGraph(new_ctnode_ptr);
         } else {
             CTNodeStack ctnode_stack;
@@ -44,6 +82,9 @@ void ContourGraph::UpdateContourGraph(const NavNodePtr& odom_node_ptr,
             const int N = poly_ptr->vertices.size();
             for (std::size_t idx=0; idx<N; idx++) {
                 this->CreateCTNode(poly_ptr->vertices[idx], new_ctnode_ptr, poly_ptr, false);
+                new_ctnode_ptr->is_boundary_clipped =
+                    !IsPointInsideReliableContourWindow(
+                        poly_ptr->vertices[idx]);
                 ctnode_stack.push_back(new_ctnode_ptr);
             }
             // add connections to contour nodes
@@ -61,6 +102,39 @@ void ContourGraph::UpdateContourGraph(const NavNodePtr& odom_node_ptr,
     this->AnalysisSurfAngleAndConvexity(ContourGraph::contour_graph_);      
 }
 
+void ContourGraph::SetLocalCollisionCloud(
+    const PointCloudPtr& collision_cloud) {
+    SetLocalCollisionCloud(collision_cloud, PointCloudPtr(new PointCloud()));
+}
+
+void ContourGraph::SetLocalCollisionCloud(
+    const PointCloudPtr& static_cloud, const PointCloudPtr& dynamic_cloud) {
+    const auto rebuild = [](const PointCloudPtr& input,
+                            PointCloudPtr& output,
+                            PointKdTreePtr& tree) {
+        if (!output) output.reset(new PointCloud());
+        output->clear();
+        if (input) *output = *input;
+        tree.reset(new pcl::KdTreeFLANN<PCLPoint>());
+        tree->setSortedResults(false);
+        if (!output->empty()) tree->setInputCloud(output);
+    };
+    rebuild(static_cloud, local_static_collision_cloud_,
+            local_static_collision_kdtree_);
+    rebuild(dynamic_cloud, local_dynamic_collision_cloud_,
+            local_dynamic_collision_kdtree_);
+
+    if (!local_collision_cloud_) local_collision_cloud_.reset(new PointCloud());
+    local_collision_cloud_->clear();
+    *local_collision_cloud_ += *local_static_collision_cloud_;
+    *local_collision_cloud_ += *local_dynamic_collision_cloud_;
+    local_collision_kdtree_.reset(new pcl::KdTreeFLANN<PCLPoint>());
+    local_collision_kdtree_->setSortedResults(false);
+    if (!local_collision_cloud_->empty()) {
+        local_collision_kdtree_->setInputCloud(local_collision_cloud_);
+    }
+}
+
 /* Match current contour with global navigation nodes */
 // 已经拿到关键分支了：这套代码不是做“整轮轮廓刚性配准”，而是“局部匹配 + 未匹配保留 + 内外部可达性判断”。我现在把这三层逻辑串起来，直接对应到代码里的集合和条件。
 // 是的，这段代码不是在做“局部轮廓和全局轮廓强行重合”的刚性配准，而是做三层处理：
@@ -75,20 +149,141 @@ void ContourGraph::MatchContourWithNavGraph(const NodePtrStack& global_nodes, co
         node_ptr->is_contour_match = false;
         node_ptr->ctnode = NULL;
     }
-    for (const auto& ctnode_ptr : ContourGraph::contour_graph_) { // distance match
+    for (const auto& ctnode_ptr : ContourGraph::contour_graph_) {
         ctnode_ptr->is_global_match = false;
         ctnode_ptr->nav_node_id = 0;
-        if (ctnode_ptr->free_direct != NodeFreeDirect::UNKNOW) {
-            const NavNodePtr matched_node = this->NearestNavNodeForCTNode(ctnode_ptr, near_nodes);
-            if (matched_node != NULL && IsCTMatchLineFreePolygon(ctnode_ptr, matched_node, false)) {
-                this->MatchCTNodeWithNavNode(ctnode_ptr, matched_node);
-            }   
+    }
+
+    // Build all plausible pairs first and assign them globally in increasing
+    // score order.  The old CT-by-CT nearest loop allowed a later contour
+    // vertex to steal a NavNode from an earlier one without rematching the
+    // displaced vertex, so identities changed with findContours() iteration
+    // order.  This deterministic one-to-one assignment makes every accepted
+    // pair compete in the same frame.
+    struct MatchCandidate {
+        CTNodePtr contour_node;
+        NavNodePtr nav_node;
+        float score;
+        float distance;
+    };
+    std::vector<MatchCandidate> match_candidates;
+    const float direction_threshold = 0.5f;
+    for (const auto& ctnode_ptr : ContourGraph::contour_graph_) {
+        if (!ctnode_ptr ||
+            ctnode_ptr->free_direct == NodeFreeDirect::UNKNOW) {
+            continue;
         }
+        const bool static_contour =
+            ctnode_ptr->source == GraphNodeSource::STATIC_CANDIDATE ||
+            ctnode_ptr->source == GraphNodeSource::STATIC_GLOBAL;
+        const bool dynamic_contour =
+            ctnode_ptr->source == GraphNodeSource::DYNAMIC_LOCAL;
+        for (const auto& node_ptr : near_nodes) {
+            if (!node_ptr || node_ptr->is_odom || node_ptr->is_navpoint ||
+                FARUtil::IsOutsideGoal(node_ptr) ||
+                !IsInMatchHeight(ctnode_ptr, node_ptr)) {
+                continue;
+            }
+            const bool static_node =
+                node_ptr->source == GraphNodeSource::STATIC_CANDIDATE ||
+                node_ptr->source == GraphNodeSource::STATIC_GLOBAL;
+            const bool dynamic_node =
+                node_ptr->source == GraphNodeSource::DYNAMIC_LOCAL;
+            if ((static_contour && !static_node) ||
+                (dynamic_contour && !dynamic_node)) {
+                continue;
+            }
+            if (!IsContourEndpointLifetimeMatchCompatible(
+                    static_contour, ctnode_ptr->is_boundary_clipped,
+                    *node_ptr)) {
+                continue;
+            }
+            const bool contour_pillar =
+                ctnode_ptr->free_direct == NodeFreeDirect::PILLAR;
+            const bool node_pillar =
+                node_ptr->free_direct == NodeFreeDirect::PILLAR;
+            if (contour_pillar != node_pillar) continue;
+
+            float direction_score = 0.0f;
+            if (dynamic_contour && dynamic_node) {
+                direction_score = 1.0f;
+            } else if (!contour_pillar &&
+                       node_ptr->free_direct != NodeFreeDirect::UNKNOW &&
+                       ctnode_ptr->free_direct == node_ptr->free_direct) {
+                const Point3D nav_direction =
+                    FARUtil::SurfTopoDirect(node_ptr->surf_dirs);
+                const Point3D contour_direction =
+                    FARUtil::SurfTopoDirect(ctnode_ptr->surf_dirs);
+                direction_score =
+                    (nav_direction * contour_direction - direction_threshold) /
+                    (1.0f - direction_threshold);
+            } else if (contour_pillar && node_pillar) {
+                direction_score = 0.5f;
+            }
+            // Preserve FAR's source/type and surface-direction identity, but
+            // do not let a noisy semantic contour direction create another
+            // vertex at practically the same corner. A weak/misaligned
+            // direction gets only a tight grid-scale positional fallback;
+            // it can never merge two distinct nearby door-frame corners.
+            if (!dynamic_contour && !contour_pillar &&
+                node_ptr->free_direct != ctnode_ptr->free_direct) {
+                continue;
+            }
+            const float tight_position_radius = std::max(
+                FARUtil::kLeafSize * 2.0f,
+                FARUtil::robot_dim * 0.5f);
+            const float match_radius = direction_score > 0.0f
+                ? FARUtil::kMatchDist * std::max(0.5f, direction_score)
+                : tight_position_radius;
+            const float distance =
+                (node_ptr->position - ctnode_ptr->position).norm_flat();
+            if (distance >= match_radius ||
+                !IsCTMatchLineFreePolygon(ctnode_ptr, node_ptr, false)) {
+                continue;
+            }
+            // Position is primary; direction agreement acts as a small
+            // regularizer. Stable node id and contour coordinates below
+            // resolve exact voxel-grid ties.
+            const float score = distance /
+                std::max(match_radius, FARUtil::kEpsilon) +
+                (1.0f - std::max(0.0f, direction_score)) * 0.10f;
+            match_candidates.push_back(
+                {ctnode_ptr, node_ptr, score, distance});
+        }
+    }
+    std::sort(match_candidates.begin(), match_candidates.end(),
+              [](const MatchCandidate& first, const MatchCandidate& second) {
+        if (std::fabs(first.score - second.score) > FARUtil::kEpsilon) {
+            return first.score < second.score;
+        }
+        if (first.nav_node->id != second.nav_node->id) {
+            return first.nav_node->id < second.nav_node->id;
+        }
+        if (std::fabs(first.contour_node->position.x -
+                      second.contour_node->position.x) > FARUtil::kEpsilon) {
+            return first.contour_node->position.x <
+                   second.contour_node->position.x;
+        }
+        return first.contour_node->position.y <
+               second.contour_node->position.y;
+    });
+    std::unordered_set<std::size_t> assigned_nav_ids;
+    std::unordered_set<const CTNode*> assigned_contour_nodes;
+    for (const auto& candidate : match_candidates) {
+        if (assigned_nav_ids.count(candidate.nav_node->id) ||
+            assigned_contour_nodes.count(candidate.contour_node.get())) {
+            continue;
+        }
+        this->MatchCTNodeWithNavNode(candidate.contour_node,
+                                     candidate.nav_node);
+        assigned_nav_ids.insert(candidate.nav_node->id);
+        assigned_contour_nodes.insert(candidate.contour_node.get());
     }
     this->EnclosePolygonsCheck();
     new_convex_vertices.clear();
     for (const auto& ctnode_ptr : ContourGraph::contour_graph_) { // Get new vertices
-        if (!ctnode_ptr->is_global_match && ctnode_ptr->free_direct != NodeFreeDirect::UNKNOW) {
+        if (!ctnode_ptr->is_global_match &&
+            ctnode_ptr->free_direct != NodeFreeDirect::UNKNOW) {
             if (ctnode_ptr->free_direct != NodeFreeDirect::PILLAR) { // check wall contour
                 const float dot_value = ctnode_ptr->surf_dirs.first * ctnode_ptr->surf_dirs.second;
                 if (dot_value < ALIGN_ANGLE_COS) continue; // wall detected
@@ -99,11 +294,6 @@ void ContourGraph::MatchContourWithNavGraph(const NodePtrStack& global_nodes, co
 }
 
 bool ContourGraph::IsNavNodesConnectFreePolygon(const NavNodePtr& node_ptr1, const NavNodePtr& node_ptr2) {
-    if (node_ptr1->is_navpoint || node_ptr2->is_navpoint) {
-        if ((node_ptr1->position - node_ptr2->position).norm() < FARUtil::kNavClearDist) { // connect to internav node
-            return true;
-        }
-    }
     const bool is_global_check = ContourGraph::IsNeedGlobalCheck(node_ptr1->position, node_ptr2->position);
     ConnectPair cedge = ContourGraph::ReprojectEdge(node_ptr1, node_ptr2, FARUtil::kProjectDist, is_global_check);
     if (node_ptr1->is_odom) {
@@ -115,7 +305,709 @@ bool ContourGraph::IsNavNodesConnectFreePolygon(const NavNodePtr& node_ptr1, con
     const HeightPair h_pair(node_ptr1->position, node_ptr2->position);
     if (!node_ptr1->is_boundary) bd_cedge.start_p = cv::Point2f(node_ptr1->position.x, node_ptr1->position.y);
     if (!node_ptr2->is_boundary) bd_cedge.end_p = cv::Point2f(node_ptr2->position.x, node_ptr2->position.y);
-    return ContourGraph::IsPointsConnectFreePolygon(cedge, bd_cedge, h_pair, is_global_check);
+    const PolygonPtr endpoint_poly1 =
+        node_ptr1->ctnode ? node_ptr1->ctnode->poly_ptr : PolygonPtr();
+    const PolygonPtr endpoint_poly2 =
+        node_ptr2->ctnode ? node_ptr2->ctnode->poly_ptr : PolygonPtr();
+    return ContourGraph::IsPointsConnectFreePolygonForLayer(
+        cedge, bd_cedge, h_pair, is_global_check, CollisionLayer::COMBINED,
+        endpoint_poly1, endpoint_poly2);
+}
+
+bool ContourGraph::IsNavNodesConnectFreeStaticPolygon(
+    const NavNodePtr& node_ptr1, const NavNodePtr& node_ptr2) {
+    const bool is_global_check =
+        ContourGraph::IsNeedGlobalCheck(node_ptr1->position,
+                                        node_ptr2->position);
+    ConnectPair cedge = ContourGraph::ReprojectEdge(
+        node_ptr1, node_ptr2, FARUtil::kProjectDist, is_global_check);
+    if (node_ptr1->is_odom) {
+        cedge.start_p = cv::Point2f(FARUtil::free_odom_p.x,
+                                    FARUtil::free_odom_p.y);
+    } else if (node_ptr2->is_odom) {
+        cedge.end_p = cv::Point2f(FARUtil::free_odom_p.x,
+                                  FARUtil::free_odom_p.y);
+    }
+    ConnectPair bd_cedge = cedge;
+    const HeightPair h_pair(node_ptr1->position, node_ptr2->position);
+    if (!node_ptr1->is_boundary) {
+        bd_cedge.start_p = cv::Point2f(node_ptr1->position.x,
+                                       node_ptr1->position.y);
+    }
+    if (!node_ptr2->is_boundary) {
+        bd_cedge.end_p = cv::Point2f(node_ptr2->position.x,
+                                     node_ptr2->position.y);
+    }
+    const PolygonPtr endpoint_poly1 =
+        node_ptr1->ctnode ? node_ptr1->ctnode->poly_ptr : PolygonPtr();
+    const PolygonPtr endpoint_poly2 =
+        node_ptr2->ctnode ? node_ptr2->ctnode->poly_ptr : PolygonPtr();
+    return ContourGraph::IsPointsConnectFreePolygonForLayer(
+        cedge, bd_cedge, h_pair, is_global_check,
+        CollisionLayer::STATIC_ONLY, endpoint_poly1, endpoint_poly2);
+}
+
+bool ContourGraph::IsNavNodesConnectFreeDynamicLayer(
+    const NavNodePtr& node_ptr1, const NavNodePtr& node_ptr2) {
+    // Dynamic blocking tests the actual static edge. Endpoint margins in the
+    // raw-cloud check prevent the obstacle vertices themselves from falsely
+    // blocking an otherwise valid edge.
+    const ConnectPair edge(node_ptr1->position, node_ptr2->position);
+    const HeightPair height(node_ptr1->position, node_ptr2->position);
+    return ContourGraph::IsPointsConnectFreePolygonForLayer(
+        edge, edge, height, false, CollisionLayer::DYNAMIC_ONLY);
+}
+
+EdgeRejectReason ContourGraph::ValidateVisibilityEdgeGeometry(
+    const NavNodePtr& node_ptr1, const NavNodePtr& node_ptr2,
+    const bool include_dynamic) {
+    if (node_ptr1 && node_ptr2 &&
+        (node_ptr1->is_odom || node_ptr1->is_goal ||
+         node_ptr2->is_odom || node_ptr2->is_goal)) {
+        return ValidateVisibilityEdgeWithRoute(
+                   node_ptr1, node_ptr2, include_dynamic).reason;
+    }
+    if (!node_ptr1 || !node_ptr2) return EdgeRejectReason::UNREACHABLE;
+    const bool is_global_check = IsNeedGlobalCheck(node_ptr1->position,
+                                                   node_ptr2->position);
+    ConnectPair edge = ReprojectEdge(node_ptr1, node_ptr2,
+                                     FARUtil::kProjectDist,
+                                     is_global_check);
+    if (node_ptr1->is_odom) {
+        edge.start_p = cv::Point2f(FARUtil::free_odom_p.x,
+                                   FARUtil::free_odom_p.y);
+    } else if (node_ptr2->is_odom) {
+        edge.end_p = cv::Point2f(FARUtil::free_odom_p.x,
+                                 FARUtil::free_odom_p.y);
+    }
+    ConnectPair boundary_edge = edge;
+    if (!node_ptr1->is_boundary) {
+        boundary_edge.start_p = cv::Point2f(node_ptr1->position.x,
+                                            node_ptr1->position.y);
+    }
+    if (!node_ptr2->is_boundary) {
+        boundary_edge.end_p = cv::Point2f(node_ptr2->position.x,
+                                          node_ptr2->position.y);
+    }
+    const HeightPair height(node_ptr1->position, node_ptr2->position);
+    const PolygonPtr endpoint_poly1 =
+        node_ptr1->ctnode ? node_ptr1->ctnode->poly_ptr : PolygonPtr();
+    const PolygonPtr endpoint_poly2 =
+        node_ptr2->ctnode ? node_ptr2->ctnode->poly_ptr : PolygonPtr();
+    if (!IsEdgeCollisionFreeInCloud(
+            edge, height, local_static_collision_cloud_,
+            local_static_collision_kdtree_)) {
+        return EdgeRejectReason::STATIC_CLOUD_BLOCKED;
+    }
+    if (include_dynamic && !IsEdgeCollisionFreeInCloud(
+            edge, height, local_dynamic_collision_cloud_,
+            local_dynamic_collision_kdtree_)) {
+        return EdgeRejectReason::DYNAMIC_CLOUD_BLOCKED;
+    }
+    if (!IsPointsConnectFreePolygonForLayer(
+            edge, boundary_edge, height, is_global_check,
+            CollisionLayer::STATIC_ONLY, endpoint_poly1, endpoint_poly2,
+            false)) {
+        return EdgeRejectReason::POLYGON_BLOCKED;
+    }
+    if (!include_dynamic) return EdgeRejectReason::NONE;
+    if (!IsPointsConnectFreePolygonForLayer(
+            edge, boundary_edge, height, is_global_check,
+            CollisionLayer::DYNAMIC_ONLY, endpoint_poly1, endpoint_poly2,
+            false)) {
+        return EdgeRejectReason::DYNAMIC_CLOUD_BLOCKED;
+    }
+    return EdgeRejectReason::NONE;
+}
+
+EdgeValidationResult ContourGraph::ValidateVisibilityEdgeWithRoute(
+    const NavNodePtr& node_ptr1, const NavNodePtr& node_ptr2,
+    const bool include_dynamic) {
+    if (!node_ptr1 || !node_ptr2) {
+        EdgeValidationResult invalid;
+        invalid.reason = EdgeRejectReason::UNREACHABLE;
+        return invalid;
+    }
+    const bool first_is_terminal = node_ptr1->is_odom || node_ptr1->is_goal;
+    const bool second_is_terminal = node_ptr2->is_odom || node_ptr2->is_goal;
+    if (first_is_terminal != second_is_terminal) {
+        return first_is_terminal
+            ? ValidateTerminalVisibilityEdgeWithRoute(
+                  node_ptr2, node_ptr1, false, include_dynamic)
+            : ValidateTerminalVisibilityEdgeWithRoute(
+                  node_ptr1, node_ptr2, true, include_dynamic);
+    }
+
+    EdgeValidationResult result;
+    result.reason = ValidateVisibilityEdgeGeometry(
+        node_ptr1, node_ptr2, include_dynamic);
+    result.valid = result.reason == EdgeRejectReason::NONE;
+    result.dynamic_blocked =
+        result.reason == EdgeRejectReason::DYNAMIC_CLOUD_BLOCKED;
+    if (!node_ptr1 || !node_ptr2) return result;
+    const bool is_global_check =
+        IsNeedGlobalCheck(node_ptr1->position, node_ptr2->position);
+    ConnectPair edge = ReprojectEdge(node_ptr1, node_ptr2,
+                                     FARUtil::kProjectDist,
+                                     is_global_check);
+    if (node_ptr1->is_odom) {
+        edge.start_p = cv::Point2f(FARUtil::free_odom_p.x,
+                                   FARUtil::free_odom_p.y);
+    } else if (node_ptr2->is_odom) {
+        edge.end_p = cv::Point2f(FARUtil::free_odom_p.x,
+                                 FARUtil::free_odom_p.y);
+    }
+    result.route_start = Point3D(edge.start_p.x, edge.start_p.y,
+                                 node_ptr1->position.z);
+    result.route_end = Point3D(edge.end_p.x, edge.end_p.y,
+                               node_ptr2->position.z);
+    result.route_cost =
+        (node_ptr1->position - result.route_start).norm() +
+        (result.route_start - result.route_end).norm() +
+        (result.route_end - node_ptr2->position).norm();
+    result.projection_distance = FARUtil::kProjectDist;
+    return result;
+}
+
+EdgeValidationResult ContourGraph::ValidateTerminalVisibilityEdgeWithRoute(
+    const NavNodePtr& obstacle_node, const NavNodePtr& terminal_node,
+    const bool obstacle_is_start, const bool include_dynamic) {
+    EdgeValidationResult invalid;
+    invalid.reason = EdgeRejectReason::UNREACHABLE;
+    if (!obstacle_node || !terminal_node || obstacle_node == terminal_node) {
+        return invalid;
+    }
+
+    const float node_distance =
+        (obstacle_node->position - terminal_node->position).norm_flat();
+    if (node_distance < FARUtil::kEpsilon) {
+        invalid.valid = true;
+        invalid.reason = EdgeRejectReason::NONE;
+        invalid.route_start = obstacle_is_start
+            ? obstacle_node->position : terminal_node->position;
+        invalid.route_end = obstacle_is_start
+            ? terminal_node->position : obstacle_node->position;
+        return invalid;
+    }
+
+    const bool is_global_check = IsNeedGlobalCheck(
+        obstacle_node->position, terminal_node->position);
+    const PolygonPtr endpoint_poly = obstacle_node->ctnode
+        ? obstacle_node->ctnode->poly_ptr : PolygonPtr();
+    const cv::Point2f project_direction = NodeProjectDir(obstacle_node);
+    const bool can_project =
+        std::hypot(project_direction.x, project_direction.y) >
+        FARUtil::kEpsilon;
+    const HeightPair height(obstacle_node->position,
+                            terminal_node->position);
+    const float terminal_projection_max = std::max(
+        contour_projection_max_,
+        FARUtil::kNavClearDist + FARUtil::kLeafSize);
+
+    const TerminalProjectionSearchResult search =
+        FindNearestSafeTerminalProjection(
+            contour_projection_min_, terminal_projection_max,
+            contour_projection_step_, can_project,
+            [&](const float requested_projection) {
+                EdgeValidationResult attempt;
+                attempt.reason = EdgeRejectReason::OFFSET_FAILED;
+
+                const float projection = can_project
+                    ? std::min(node_distance * 0.4f,
+                               requested_projection)
+                    : 0.0f;
+                Point3D projected_corner = obstacle_node->position;
+                projected_corner.x += project_direction.x * projection;
+                projected_corner.y += project_direction.y * projection;
+
+                const Point3D route_start = obstacle_is_start
+                    ? projected_corner : terminal_node->position;
+                const Point3D route_end = obstacle_is_start
+                    ? terminal_node->position : projected_corner;
+                const ConnectPair route(route_start, route_end);
+                ConnectPair boundary_route = route;
+                if (!obstacle_node->is_boundary) {
+                    const cv::Point2f raw_corner(obstacle_node->position.x,
+                                                 obstacle_node->position.y);
+                    if (obstacle_is_start) {
+                        boundary_route.start_p = raw_corner;
+                    } else {
+                        boundary_route.end_p = raw_corner;
+                    }
+                }
+
+                // Once a corner has been projected, the stored route is a
+                // robot-centre trajectory.  Check it without endpoint
+                // exclusion so increasing the projection can genuinely move
+                // the route outside the obstacle clearance band.  Pillars
+                // have no reliable projection direction and retain the
+                // legacy endpoint exclusion.
+                const float endpoint_exclusion = can_project ? 0.0f : -1.0f;
+                if (!IsEdgeCollisionFreeInCloud(
+                        route, height, local_static_collision_cloud_,
+                        local_static_collision_kdtree_,
+                        endpoint_exclusion)) {
+                    attempt.reason = EdgeRejectReason::STATIC_CLOUD_BLOCKED;
+                    attempt.projection_distance = projection;
+                    return attempt;
+                }
+                if (include_dynamic && !IsEdgeCollisionFreeInCloud(
+                        route, height, local_dynamic_collision_cloud_,
+                        local_dynamic_collision_kdtree_,
+                        endpoint_exclusion)) {
+                    attempt.reason = EdgeRejectReason::DYNAMIC_CLOUD_BLOCKED;
+                    attempt.dynamic_blocked = true;
+                    attempt.projection_distance = projection;
+                    return attempt;
+                }
+                if (is_global_check &&
+                    !IsRouteClearOfGlobalContours(
+                        route, height, FARUtil::kNavClearDist)) {
+                    attempt.reason = EdgeRejectReason::POLYGON_BLOCKED;
+                    attempt.projection_distance = projection;
+                    return attempt;
+                }
+                if (!IsPointsConnectFreePolygonForLayer(
+                        route, boundary_route, height, is_global_check,
+                        CollisionLayer::STATIC_ONLY, endpoint_poly,
+                        PolygonPtr(), false)) {
+                    attempt.reason = EdgeRejectReason::POLYGON_BLOCKED;
+                    attempt.projection_distance = projection;
+                    return attempt;
+                }
+                if (include_dynamic &&
+                    !IsPointsConnectFreePolygonForLayer(
+                        route, boundary_route, height, is_global_check,
+                        CollisionLayer::DYNAMIC_ONLY, endpoint_poly,
+                        PolygonPtr(), false)) {
+                    attempt.reason = EdgeRejectReason::DYNAMIC_CLOUD_BLOCKED;
+                    attempt.dynamic_blocked = true;
+                    attempt.projection_distance = projection;
+                    return attempt;
+                }
+
+                attempt.valid = true;
+                attempt.reason = EdgeRejectReason::NONE;
+                attempt.route_start = route_start;
+                attempt.route_end = route_end;
+                attempt.projection_distance = projection;
+                attempt.route_cost =
+                    (obstacle_node->position - projected_corner).norm() +
+                    (route_start - route_end).norm();
+                return attempt;
+            });
+    return search.validation;
+}
+
+bool ContourGraph::IsRouteClearOfGlobalContours(
+    const ConnectPair& route, const HeightPair& height,
+    const float clearance) {
+    const float required_clearance = std::max(0.0f, clearance);
+    const Point3D route_start(route.start_p.x, route.start_p.y, 0.0f);
+    const Point3D route_end(route.end_p.x, route.end_p.y, 0.0f);
+    const PointPair route_line(route_start, route_end);
+    for (const PointPair& contour : global_contour_) {
+        if (!IsEdgeOverlapInHeight(
+                height, HeightPair(contour.first, contour.second))) {
+            continue;
+        }
+        if (IsEdgeCollideSegment(contour, route)) return false;
+        const float distance = std::min(
+            std::min(FARUtil::DistanceToLineSeg2D(
+                         route_start, contour),
+                     FARUtil::DistanceToLineSeg2D(route_end, contour)),
+            std::min(FARUtil::DistanceToLineSeg2D(
+                         contour.first, route_line),
+                     FARUtil::DistanceToLineSeg2D(
+                         contour.second, route_line)));
+        if (distance < required_clearance - FARUtil::kEpsilon) {
+            return false;
+        }
+    }
+    return true;
+}
+
+EdgeRejectReason ContourGraph::ValidateGoalEdgeGeometry(
+    const NavNodePtr& node_ptr, const NavNodePtr& goal_ptr) {
+    if (!node_ptr || !goal_ptr) return EdgeRejectReason::UNREACHABLE;
+    if (FARUtil::IsMultiLayer) {
+        if (!FARUtil::IsAtSameLayer(node_ptr, goal_ptr) &&
+            !node_ptr->is_frontier) {
+            return EdgeRejectReason::DIRECTION_REJECTED;
+        }
+    }
+    return ValidateTerminalVisibilityEdgeWithRoute(
+               node_ptr, goal_ptr, true, true).reason;
+}
+
+EdgeValidationResult ContourGraph::ValidateGoalEdgeWithRoute(
+    const NavNodePtr& node_ptr, const NavNodePtr& goal_ptr) {
+    if (!node_ptr || !goal_ptr) {
+        EdgeValidationResult invalid;
+        invalid.reason = EdgeRejectReason::UNREACHABLE;
+        return invalid;
+    }
+    if (FARUtil::IsMultiLayer &&
+        !FARUtil::IsAtSameLayer(node_ptr, goal_ptr) &&
+        !node_ptr->is_frontier) {
+        EdgeValidationResult invalid;
+        invalid.reason = EdgeRejectReason::DIRECTION_REJECTED;
+        return invalid;
+    }
+    return ValidateTerminalVisibilityEdgeWithRoute(
+        node_ptr, goal_ptr, true, true);
+}
+
+EdgeValidationResult ContourGraph::ValidateDirectOdomGoalEdgeWithRoute(
+    const NavNodePtr& odom_ptr, const NavNodePtr& goal_ptr,
+    const bool include_dynamic) {
+    EdgeValidationResult result;
+    result.reason = EdgeRejectReason::UNREACHABLE;
+    if (!odom_ptr || !goal_ptr || !odom_ptr->is_odom || !goal_ptr->is_goal) {
+        return result;
+    }
+
+    // Both endpoints describe the robot centre in free space.  In particular,
+    // odom must never be passed through the obstacle-corner projection path:
+    // its legacy endpoint exclusion can hide a nearby wall on a short direct
+    // edge.  A zero exclusion samples the complete segment, including both
+    // endpoint neighbourhoods.
+    const Point3D route_start = odom_ptr->position;
+    const Point3D route_end = goal_ptr->position;
+    const ConnectPair route(route_start, route_end);
+    const HeightPair height(route_start, route_end);
+    constexpr float kNoEndpointExclusion = 0.0f;
+
+    if (!IsEdgeCollisionFreeInCloud(
+            route, height, local_static_collision_cloud_,
+            local_static_collision_kdtree_, kNoEndpointExclusion)) {
+        result.reason = EdgeRejectReason::STATIC_CLOUD_BLOCKED;
+        return result;
+    }
+    if (include_dynamic && !IsEdgeCollisionFreeInCloud(
+            route, height, local_dynamic_collision_cloud_,
+            local_dynamic_collision_kdtree_, kNoEndpointExclusion)) {
+        result.reason = EdgeRejectReason::DYNAMIC_CLOUD_BLOCKED;
+        result.dynamic_blocked = true;
+        return result;
+    }
+
+    const bool is_global_check = IsNeedGlobalCheck(route_start, route_end);
+    if (is_global_check &&
+        !IsRouteClearOfGlobalContours(
+            route, height, FARUtil::kNavClearDist)) {
+        result.reason = EdgeRejectReason::POLYGON_BLOCKED;
+        return result;
+    }
+    if (!IsPointsConnectFreePolygonForLayer(
+            route, route, height, is_global_check,
+            CollisionLayer::STATIC_ONLY, PolygonPtr(), PolygonPtr(), false)) {
+        result.reason = EdgeRejectReason::POLYGON_BLOCKED;
+        return result;
+    }
+    if (include_dynamic && !IsPointsConnectFreePolygonForLayer(
+            route, route, height, is_global_check,
+            CollisionLayer::DYNAMIC_ONLY, PolygonPtr(), PolygonPtr(), false)) {
+        result.reason = EdgeRejectReason::DYNAMIC_CLOUD_BLOCKED;
+        result.dynamic_blocked = true;
+        return result;
+    }
+
+    result.valid = true;
+    result.reason = EdgeRejectReason::NONE;
+    result.route_start = route_start;
+    result.route_end = route_end;
+    result.route_cost = (route_end - route_start).norm();
+    result.projection_distance = 0.0f;
+    return result;
+}
+
+bool ContourGraph::IsRouteConnectFreeDynamicLayer(
+    const Point3D& route_start, const Point3D& route_end) {
+    const ConnectPair route(route_start, route_end);
+    const HeightPair height(route_start, route_end);
+    if (!IsEdgeCollisionFreeInCloud(
+            route, height, local_dynamic_collision_cloud_,
+            local_dynamic_collision_kdtree_, 0.0f)) {
+        return false;
+    }
+    return IsPointsConnectFreePolygonForLayer(
+        route, route, height, false, CollisionLayer::DYNAMIC_ONLY,
+        PolygonPtr(), PolygonPtr(), false);
+}
+
+bool ContourGraph::IsRouteConnectFreeStaticLayer(
+    const Point3D& route_start, const Point3D& route_end) {
+    const ConnectPair route(route_start, route_end);
+    const HeightPair height(route_start, route_end);
+    if (!IsEdgeCollisionFreeInCloud(
+            route, height, local_static_collision_cloud_,
+            local_static_collision_kdtree_, 0.0f)) {
+        return false;
+    }
+    return IsPointsConnectFreePolygonForLayer(
+        route, route, height, false, CollisionLayer::STATIC_ONLY,
+        PolygonPtr(), PolygonPtr(), false);
+}
+
+bool ContourGraph::IsPointInsideReliableContourWindow(
+    const Point3D& point) {
+    const float half_extent = std::max(
+        0.0f, FARUtil::kSensorRange - contour_boundary_guard_);
+    return std::abs(point.x - FARUtil::odom_pos.x) <= half_extent &&
+           std::abs(point.y - FARUtil::odom_pos.y) <= half_extent;
+}
+
+bool ContourGraph::DoesSegmentIntersectReliableContourWindow(
+    const Point3D& start, const Point3D& end) {
+    const float half_extent = std::max(
+        0.0f, FARUtil::kSensorRange - contour_boundary_guard_);
+    const float min_x = FARUtil::odom_pos.x - half_extent;
+    const float max_x = FARUtil::odom_pos.x + half_extent;
+    const float min_y = FARUtil::odom_pos.y - half_extent;
+    const float max_y = FARUtil::odom_pos.y + half_extent;
+    float lower = 0.0f;
+    float upper = 1.0f;
+    const float dx = end.x - start.x;
+    const float dy = end.y - start.y;
+    const auto clip_axis = [&lower, &upper](
+        const float origin, const float direction,
+        const float minimum, const float maximum) {
+        if (std::abs(direction) <= FARUtil::kEpsilon) {
+            return origin >= minimum && origin <= maximum;
+        }
+        float first = (minimum - origin) / direction;
+        float second = (maximum - origin) / direction;
+        if (first > second) std::swap(first, second);
+        lower = std::max(lower, first);
+        upper = std::min(upper, second);
+        return lower <= upper;
+    };
+    return clip_axis(start.x, dx, min_x, max_x) &&
+           clip_axis(start.y, dy, min_y, max_y);
+}
+
+bool ContourGraph::IsPointObservedOnCurrentStaticContour(
+    const Point3D& point, const float tolerance) {
+    const float distance_tolerance = std::max(FARUtil::kEpsilon, tolerance);
+    for (const auto& polygon : contour_polygons_) {
+        if (!polygon || polygon->source == GraphNodeSource::DYNAMIC_LOCAL ||
+            polygon->vertices.empty()) {
+            continue;
+        }
+        if (polygon->is_pillar) {
+            for (const auto& vertex : polygon->vertices) {
+                if ((vertex - point).norm_flat() <= distance_tolerance) {
+                    return true;
+                }
+            }
+            continue;
+        }
+        for (std::size_t index = 0; index < polygon->vertices.size(); ++index) {
+            const Point3D& first = polygon->vertices[index];
+            const Point3D& second = polygon->vertices[
+                (index + 1) % polygon->vertices.size()];
+            // Do not use a segment incident to a cropped raster vertex as
+            // proof that an old topology endpoint was observed.  In
+            // particular this excludes findContours()' artificial closing
+            // segment across the query-window boundary.
+            if (!IsPointInsideReliableContourWindow(first) ||
+                !IsPointInsideReliableContourWindow(second)) {
+                continue;
+            }
+            if (FARUtil::DistanceToLineSeg2D(
+                    point, PointPair(first, second)) <= distance_tolerance) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+bool ContourGraph::IsPointConfirmedOnCurrentStaticSegmentInterior(
+    const Point3D& point, const float tolerance, const float endpoint_guard,
+    PolygonPtr* matched_polygon) {
+    if (matched_polygon) *matched_polygon = PolygonPtr();
+    const float distance_tolerance = std::max(FARUtil::kEpsilon, tolerance);
+    const float endpoint_clearance = std::max(
+        distance_tolerance, endpoint_guard);
+    float best_distance = FARUtil::kINF;
+    PolygonPtr best_polygon;
+
+    for (const auto& polygon : contour_polygons_) {
+        if (!polygon || polygon->source == GraphNodeSource::DYNAMIC_LOCAL ||
+            polygon->is_pillar || polygon->is_boundary_clipped ||
+            polygon->vertices.size() < 2) {
+            continue;
+        }
+        for (std::size_t index = 0; index < polygon->vertices.size(); ++index) {
+            const Point3D& first = polygon->vertices[index];
+            const Point3D& second = polygon->vertices[
+                (index + 1) % polygon->vertices.size()];
+            if (!IsPointInsideReliableContourWindow(first) ||
+                !IsPointInsideReliableContourWindow(second)) {
+                continue;
+            }
+            const float dx = second.x - first.x;
+            const float dy = second.y - first.y;
+            const float length_sq = dx * dx + dy * dy;
+            const float segment_length = std::sqrt(length_sq);
+            if (segment_length <= endpoint_clearance * 2.0f ||
+                length_sq <= FARUtil::kEpsilon) {
+                continue;
+            }
+            const float projection = std::max(
+                0.0f, std::min(1.0f,
+                    ((point.x - first.x) * dx +
+                     (point.y - first.y) * dy) / length_sq));
+            const float along = projection * segment_length;
+            if (along <= endpoint_clearance ||
+                segment_length - along <= endpoint_clearance) {
+                continue;
+            }
+            const Point3D projected(first.x + projection * dx,
+                                    first.y + projection * dy, point.z);
+            const float distance = (projected - point).norm_flat();
+            if (distance <= distance_tolerance && distance < best_distance) {
+                best_distance = distance;
+                best_polygon = polygon;
+            }
+        }
+    }
+    if (!best_polygon) return false;
+
+    // A detected current corner close to the historical vertex is evidence
+    // for identity jitter, not evidence that the historical corner vanished.
+    const float corner_guard = std::max(endpoint_clearance,
+                                        FARUtil::kMatchDist * 0.5f);
+    for (const auto& contour_node : contour_graph_) {
+        if (!contour_node || contour_node->poly_ptr != best_polygon ||
+            contour_node->is_boundary_clipped ||
+            contour_node->free_direct == NodeFreeDirect::UNKNOW) {
+            continue;
+        }
+        if ((contour_node->position - point).norm_flat() <= corner_guard) {
+            return false;
+        }
+    }
+    if (matched_polygon) *matched_polygon = best_polygon;
+    return true;
+}
+
+EdgeValidationResult ContourGraph::ValidateContourFollowEdge(
+    const NavNodePtr& node_ptr1, const NavNodePtr& node_ptr2) {
+    EdgeValidationResult result;
+    result.reason = EdgeRejectReason::NOT_CURRENT_ADJACENT;
+    if (!node_ptr1 || !node_ptr2 || node_ptr1 == node_ptr2 ||
+        !node_ptr1->is_contour_match || !node_ptr2->is_contour_match ||
+        !node_ptr1->ctnode || !node_ptr2->ctnode ||
+        node_ptr1->ctnode->poly_ptr != node_ptr2->ctnode->poly_ptr ||
+        node_ptr1->ctnode->source != node_ptr2->ctnode->source) {
+        return result;
+    }
+
+    if (!ContourGraph::IsNavNodesConnectFromContour(node_ptr1, node_ptr2)) {
+        return result;
+    }
+
+    const CTNodePtr ct1 = node_ptr1->ctnode;
+    const CTNodePtr ct2 = node_ptr2->ctnode;
+    const PolygonPtr endpoint_poly = ct1->poly_ptr;
+    const bool static_structure =
+        ct1->source != GraphNodeSource::DYNAMIC_LOCAL;
+    EdgeRejectReason last_reason = EdgeRejectReason::OFFSET_FAILED;
+
+    for (float projection = contour_projection_min_;
+         projection <= contour_projection_max_ + FARUtil::kEpsilon;
+         projection += contour_projection_step_) {
+        Point3D route_start = ct1->position;
+        Point3D route_end = ct2->position;
+        const cv::Point2f projected_start = ProjectNode(ct1, projection);
+        const cv::Point2f projected_end = ProjectNode(ct2, projection);
+        route_start.x = projected_start.x;
+        route_start.y = projected_start.y;
+        route_end.x = projected_end.x;
+        route_end.y = projected_end.y;
+        const ConnectPair route(route_start, route_end);
+        const HeightPair route_height(route_start, route_end);
+
+        // ProjectNode() selects the CT vertex's free-space direction. Verify
+        // that the complete candidate segment still lies on the robot's side
+        // of its owning polygon before testing unrelated obstacles.
+        const Point3D route_center(
+            (route_start.x + route_end.x) * 0.5f,
+            (route_start.y + route_end.y) * 0.5f,
+            (route_start.z + route_end.z) * 0.5f);
+        // A boundary-clipped OpenCV polygon contains an artificial closing
+        // segment at the raster edge. Do not treat that synthetic cap as the
+        // endpoint obstacle itself. Persistent static voxels below remain
+        // authoritative, as do every other static/dynamic polygon.
+        if (endpoint_poly && !endpoint_poly->is_pillar &&
+            !endpoint_poly->is_boundary_clipped &&
+            (endpoint_poly->is_robot_inside !=
+                 FARUtil::PointInsideAPoly(endpoint_poly->vertices,
+                                           route_center) ||
+             IsEdgeCollidePoly(endpoint_poly->vertices, route))) {
+            last_reason = EdgeRejectReason::SELF_POLYGON_BLOCKED;
+            continue;
+        }
+
+        if (!IsEdgeCollisionFreeInCloud(
+                route, route_height, local_static_collision_cloud_,
+                local_static_collision_kdtree_, 0.0f)) {
+            last_reason = EdgeRejectReason::STATIC_CLOUD_BLOCKED;
+            continue;
+        }
+        if (!IsPointsConnectFreePolygonForLayer(
+                route, route, route_height, false,
+                CollisionLayer::STATIC_ONLY, endpoint_poly, endpoint_poly,
+                false)) {
+            last_reason = EdgeRejectReason::OTHER_STATIC_BLOCKED;
+            continue;
+        }
+
+        // A dynamic contour is structural in this snapshot, so its own
+        // free-side route must clear the complete current dynamic layer. A
+        // persistent static contour is instead retained and dynamically
+        // masked below without changing its static geometry.
+        if (!static_structure) {
+            if (!IsEdgeCollisionFreeInCloud(
+                    route, route_height, local_dynamic_collision_cloud_,
+                    local_dynamic_collision_kdtree_, 0.0f)) {
+                last_reason = EdgeRejectReason::DYNAMIC_CLOUD_BLOCKED;
+                continue;
+            }
+            if (!IsPointsConnectFreePolygonForLayer(
+                    route, route, route_height, false,
+                    CollisionLayer::DYNAMIC_ONLY, endpoint_poly,
+                    endpoint_poly, false)) {
+                last_reason = EdgeRejectReason::POLYGON_BLOCKED;
+                continue;
+            }
+        }
+
+        result.valid = true;
+        result.reason = EdgeRejectReason::NONE;
+        result.route_start = route_start;
+        result.route_end = route_end;
+        result.projection_distance = projection;
+        result.route_cost =
+            (node_ptr1->position - route_start).norm() +
+            (route_start - route_end).norm() +
+            (route_end - node_ptr2->position).norm();
+
+        if (static_structure) {
+            result.dynamic_blocked =
+                !IsRouteConnectFreeDynamicLayer(route_start, route_end);
+            if (result.dynamic_blocked) {
+                result.reason = EdgeRejectReason::DYNAMIC_CLOUD_BLOCKED;
+            }
+        }
+        return result;
+    }
+
+    result.reason = last_reason;
+    return result;
 }
 
 bool ContourGraph::IsPoint3DConnectFreePolygon(const Point3D& p1, const Point3D& p2) {
@@ -136,19 +1028,8 @@ bool ContourGraph::IsEdgeCollideBoundary(const Point3D& p1, const Point3D& p2) {
 }
 
 bool ContourGraph::IsNavToGoalConnectFreePolygon(const NavNodePtr& node_ptr, const NavNodePtr& goal_ptr) {
-    if ((node_ptr->position - goal_ptr->position).norm() < FARUtil::kNavClearDist) return true;
-    HeightPair h_pair(node_ptr->position, goal_ptr->position);
-    bool is_global_check = ContourGraph::IsNeedGlobalCheck(node_ptr->position, goal_ptr->position);
-    if (FARUtil::IsMultiLayer) {
-        if (!FARUtil::IsAtSameLayer(node_ptr, goal_ptr) && !node_ptr->is_frontier) return false;
-        h_pair = HeightPair(goal_ptr->position.z, goal_ptr->position.z);
-        is_global_check = true;
-    }
-    const ConnectPair cedge = ContourGraph::ReprojectEdge(node_ptr, goal_ptr, FARUtil::kProjectDist, is_global_check);
-    ConnectPair bd_cedge = cedge;
-    if (!node_ptr->is_boundary) bd_cedge.start_p = cv::Point2f(node_ptr->position.x, node_ptr->position.y);
-    if (!goal_ptr->is_boundary) bd_cedge.end_p = cv::Point2f(goal_ptr->position.x, goal_ptr->position.y);
-    return ContourGraph::IsPointsConnectFreePolygon(cedge, bd_cedge, h_pair, is_global_check);
+    return ValidateGoalEdgeGeometry(node_ptr, goal_ptr) ==
+        EdgeRejectReason::NONE;
 }
 
 
@@ -198,20 +1079,71 @@ bool ContourGraph::IsPointsConnectFreePolygon(const ConnectPair& cedge,
                                               const HeightPair h_pair,
                                               const bool& is_global_check)
 {
-    // check for boundaries edges 
-    for (const auto& contour : ContourGraph::boundary_contour_) {
-        if (!ContourGraph::IsEdgeOverlapInHeight(h_pair, HeightPair(contour.first, contour.second))) continue;
-        if (ContourGraph::IsEdgeCollideSegment(contour, bd_cedge)) {
+    return ContourGraph::IsPointsConnectFreePolygonForLayer(
+        cedge, bd_cedge, h_pair, is_global_check,
+        CollisionLayer::COMBINED);
+}
+
+bool ContourGraph::IsPointsConnectFreePolygonForLayer(
+    const ConnectPair& cedge, const ConnectPair& bd_cedge,
+    const HeightPair h_pair, const bool& is_global_check,
+    const CollisionLayer layer, const PolygonPtr& endpoint_poly1,
+    const PolygonPtr& endpoint_poly2, const bool check_raw_cloud) {
+    // Edge checks use only the latest already-cropped local layers.  The
+    // complete OctoMap is queried only by the node lifecycle evidence path,
+    // never once per candidate edge.
+    if (check_raw_cloud && layer == CollisionLayer::COMBINED) {
+        if (!ContourGraph::IsEdgeCollisionFreeInLocalCloud(cedge, h_pair)) {
             return false;
         }
+    } else if (check_raw_cloud && layer == CollisionLayer::STATIC_ONLY) {
+        if (!ContourGraph::IsEdgeCollisionFreeInCloud(
+                cedge, h_pair, local_static_collision_cloud_,
+                local_static_collision_kdtree_)) return false;
+    } else if (check_raw_cloud && !ContourGraph::IsEdgeCollisionFreeInCloud(
+                   cedge, h_pair, local_dynamic_collision_cloud_,
+                   local_dynamic_collision_kdtree_)) {
+        return false;
     }
+
+    const bool include_static = layer != CollisionLayer::DYNAMIC_ONLY;
+    const bool include_dynamic = layer != CollisionLayer::STATIC_ONLY;
+    // check for boundaries edges
+    if (include_static) {
+        for (const auto& contour : ContourGraph::boundary_contour_) {
+            if (!ContourGraph::IsEdgeOverlapInHeight(
+                    h_pair, HeightPair(contour.first, contour.second))) continue;
+            if (ContourGraph::IsEdgeCollideSegment(contour, bd_cedge)) {
+                return false;
+            }
+        }
+    }
+    const auto includes_polygon = [include_static, include_dynamic](
+        const PolygonPtr& poly_ptr) {
+        if (!poly_ptr) return false;
+        if (poly_ptr->source == GraphNodeSource::DYNAMIC_LOCAL) {
+            return include_dynamic;
+        }
+        return include_static;
+    };
     if (!is_global_check) {
         // check for local range polygons
         const Point3D center_p = Point3D((cedge.start_p.x + cedge.end_p.x) / 2.0f,
                                          (cedge.start_p.y + cedge.end_p.y) / 2.0f,
                                          0.0f);
         for (const auto& poly_ptr : ContourGraph::contour_polygons_) {
+            if (!includes_polygon(poly_ptr)) continue;
+            // A boundary-clipped contour is physically open even though
+            // OpenCV represents it as a closed polygon.  Its raw semantic
+            // voxels remain authoritative for collision; ignore the
+            // artificial polygon interior/closing segment.
+            if (poly_ptr->is_boundary_clipped) continue;
+            const bool is_endpoint_polygon =
+                poly_ptr == endpoint_poly1 || poly_ptr == endpoint_poly2;
             if (poly_ptr->is_pillar) {
+                // A pillar used as an edge endpoint is a routing landmark, not
+                // an obstacle in the interior of its own incident edge.
+                if (is_endpoint_polygon) continue;
                 if (ContourGraph::IsPillarConnectBlocked(
                         poly_ptr, cedge, h_pair)) return false;
                 continue;
@@ -223,26 +1155,36 @@ bool ContourGraph::IsPointsConnectFreePolygon(const ConnectPair& cedge,
             }
         }
         // check for unmatched local contours
-        for (const auto& contour : ContourGraph::unmatched_contour_) {
-            if (ContourGraph::IsEdgeCollideSegment(contour, cedge)) {
-                return false;
+        if (include_static) {
+            for (const auto& contour : ContourGraph::unmatched_contour_) {
+                if (ContourGraph::IsEdgeCollideSegment(contour, cedge)) {
+                    return false;
+                }
             }
-        }
-        // check for any inactive local contours
-        for (const auto& contour : ContourGraph::inactive_contour_) {
-            if (ContourGraph::IsEdgeCollideSegment(contour, cedge)) {
-                return false;
+            // check for any inactive local contours
+            for (const auto& contour : ContourGraph::inactive_contour_) {
+                if (ContourGraph::IsEdgeCollideSegment(contour, cedge)) {
+                    return false;
+                }
             }
         }
     } else {
-        for (const auto& contour : ContourGraph::global_contour_) {
-            if (!ContourGraph::IsEdgeOverlapInHeight(h_pair, HeightPair(contour.first, contour.second))) continue;
-            if (ContourGraph::IsEdgeCollideSegment(contour, cedge)) {
-                return false;
+        if (include_static) {
+            for (const auto& contour : ContourGraph::global_contour_) {
+                if (!ContourGraph::IsEdgeOverlapInHeight(
+                        h_pair, HeightPair(contour.first, contour.second))) continue;
+                if (ContourGraph::IsEdgeCollideSegment(contour, cedge)) {
+                    return false;
+                }
             }
         }
         for (const auto& poly_ptr : ContourGraph::contour_polygons_) {
+            if (!includes_polygon(poly_ptr)) continue;
+            if (poly_ptr->is_boundary_clipped) continue;
+            const bool is_endpoint_polygon =
+                poly_ptr == endpoint_poly1 || poly_ptr == endpoint_poly2;
             if (poly_ptr->is_pillar) {
+                if (is_endpoint_polygon) continue;
                 if (ContourGraph::IsPillarConnectBlocked(
                         poly_ptr, cedge, h_pair)) return false;
                 continue;
@@ -250,6 +1192,53 @@ bool ContourGraph::IsPointsConnectFreePolygon(const ConnectPair& cedge,
             if (ContourGraph::IsEdgeCollidePoly(poly_ptr->vertices, cedge)) {
                 return false;
             }
+        }
+    }
+    return true;
+}
+
+bool ContourGraph::IsEdgeCollisionFreeInLocalCloud(
+    const ConnectPair& edge, const HeightPair& edge_height) {
+    return ContourGraph::IsEdgeCollisionFreeInCloud(
+        edge, edge_height, local_collision_cloud_, local_collision_kdtree_);
+}
+
+bool ContourGraph::IsEdgeCollisionFreeInCloud(
+    const ConnectPair& edge, const HeightPair& edge_height,
+    const PointCloudPtr& cloud, const PointKdTreePtr& kdtree,
+    const float endpoint_exclusion) {
+    if (!cloud || cloud->empty() || !kdtree || !kdtree->getInputCloud()) {
+        return true;
+    }
+    const float dx = edge.end_p.x - edge.start_p.x;
+    const float dy = edge.end_p.y - edge.start_p.y;
+    const float length = std::hypot(dx, dy);
+    if (length < FARUtil::kEpsilon) return true;
+
+    const float step = std::max(FARUtil::kLeafSize * 0.75f, 0.05f);
+    const float radius = std::max(FARUtil::kLeafSize * 0.75f,
+                                  FARUtil::kNavClearDist);
+    // The search ball, not only its centre, must stay outside the endpoints.
+    // Otherwise points belonging to the target contour are reported as an
+    // obstacle of the edge that intentionally terminates at that contour.
+    const float endpoint_margin = endpoint_exclusion >= 0.0f
+        ? std::min(endpoint_exclusion, length * 0.45f)
+        : std::min(length * 0.45f,
+                   radius + std::max(FARUtil::kLeafSize, step));
+    const float mid_z = (edge_height.minH + edge_height.maxH) * 0.5f;
+    for (float distance = endpoint_margin; distance <= length - endpoint_margin;
+         distance += step) {
+        const float ratio = distance / length;
+        PCLPoint sample;
+        sample.x = edge.start_p.x + dx * ratio;
+        sample.y = edge.start_p.y + dy * ratio;
+        sample.z = mid_z;
+        sample.intensity = 0.0f;
+        std::vector<int> indices;
+        std::vector<float> squared_distances;
+        if (kdtree->radiusSearch(
+                sample, radius, indices, squared_distances, 1) > 0) {
+            return false;
         }
     }
     return true;
@@ -265,6 +1254,12 @@ bool ContourGraph::IsNavNodesConnectFromContour(const NavNodePtr& node_ptr1, con
 
 bool ContourGraph::IsCTNodesConnectFromContour(const CTNodePtr& ctnode1, const CTNodePtr& ctnode2) {
     if (ctnode1 == ctnode2 || ctnode1->poly_ptr != ctnode2->poly_ptr) return false;
+    // Preserve FAR's incremental exploration behaviour: the endpoint created
+    // where the current raster cuts a wall may temporarily close the OpenCV
+    // contour and provide a route around the currently visible wall end. The
+    // corresponding NavNode is explicitly transient, and every generated
+    // route still has to pass the full persistent-static and current-dynamic
+    // cloud corridor checks below.
     // check for boundary collision
     const ConnectPair cedge = ConnectPair(ctnode1->position, ctnode2->position);
     for (const auto& contour : ContourGraph::boundary_contour_) {
@@ -428,18 +1423,29 @@ void ContourGraph::CreateCTNode(const Point3D& pos, CTNodePtr& ctnode_ptr, const
     ctnode_ptr->is_ground_associate = false;
     ctnode_ptr->nav_node_id = 0;
     ctnode_ptr->poly_ptr = poly_ptr;
+    ctnode_ptr->source = poly_ptr ? poly_ptr->source : GraphNodeSource::UNKNOWN;
     ctnode_ptr->free_direct = is_pillar ? NodeFreeDirect::PILLAR : NodeFreeDirect::UNKNOW;
     ctnode_ptr->connect_nodes.clear();
 }
 
-void ContourGraph::CreatePolygon(const PointStack& poly_points, PolygonPtr& poly_ptr) {
+void ContourGraph::CreatePolygon(const PointStack& poly_points,
+                                 PolygonPtr& poly_ptr,
+                                 const GraphNodeSource source) {
     poly_ptr = std::make_shared<Polygon>();
     poly_ptr->N = poly_points.size();
     poly_ptr->vertices = poly_points;
     poly_ptr->is_robot_inside = FARUtil::PointInsideAPoly(poly_points, odom_node_ptr_->position);
     float perimeter = 0.0f;
     poly_ptr->is_pillar = this->IsAPillarPolygon(poly_points, perimeter);
+    poly_ptr->is_boundary_clipped = false;
+    for (const auto& point : poly_points) {
+        if (!IsPointInsideReliableContourWindow(point)) {
+            poly_ptr->is_boundary_clipped = true;
+            break;
+        }
+    }
     poly_ptr->perimeter = perimeter;
+    poly_ptr->source = source;
 }
 
 NavNodePtr ContourGraph::NearestNavNodeForCTNode(const CTNodePtr& ctnode_ptr, const NodePtrStack& near_nodes) {
@@ -449,6 +1455,18 @@ NavNodePtr ContourGraph::NearestNavNodeForCTNode(const CTNodePtr& ctnode_ptr, co
     const float dir_thred = 0.5f; //cos(pi/3);
     for (const auto& node_ptr : near_nodes) {
         if (node_ptr->is_odom || node_ptr->is_navpoint || FARUtil::IsOutsideGoal(node_ptr) || !IsInMatchHeight(ctnode_ptr, node_ptr)) continue;
+        const bool static_contour =
+            ctnode_ptr->source == GraphNodeSource::STATIC_CANDIDATE ||
+            ctnode_ptr->source == GraphNodeSource::STATIC_GLOBAL;
+        const bool static_node =
+            node_ptr->source == GraphNodeSource::STATIC_CANDIDATE ||
+            node_ptr->source == GraphNodeSource::STATIC_GLOBAL;
+        const bool dynamic_contour =
+            ctnode_ptr->source == GraphNodeSource::DYNAMIC_LOCAL;
+        const bool dynamic_node =
+            node_ptr->source == GraphNodeSource::DYNAMIC_LOCAL;
+        if ((static_contour && !static_node) ||
+            (dynamic_contour && !dynamic_node)) continue;
         // no match with pillar to non-pillar local vertices
         if ((node_ptr->free_direct == NodeFreeDirect::PILLAR && ctnode_ptr->free_direct != NodeFreeDirect::PILLAR) ||
             (ctnode_ptr->free_direct == NodeFreeDirect::PILLAR && node_ptr->free_direct != NodeFreeDirect::PILLAR)) 
@@ -457,7 +1475,12 @@ NavNodePtr ContourGraph::NearestNavNodeForCTNode(const CTNodePtr& ctnode_ptr, co
         }
         float dist_thred = FARUtil::kMatchDist;
         float dir_score = 0.0f;
-        if (ctnode_ptr->free_direct != NodeFreeDirect::PILLAR && node_ptr->free_direct != NodeFreeDirect::UNKNOW && node_ptr->free_direct != NodeFreeDirect::PILLAR) {
+        if (dynamic_contour && dynamic_node) {
+            // Current dynamic corners may move and change slightly with voxel
+            // quantisation. Source/type checks above plus nearest one-to-one
+            // assignment make the full match radius safe and stable.
+            dir_score = 1.0f;
+        } else if (ctnode_ptr->free_direct != NodeFreeDirect::PILLAR && node_ptr->free_direct != NodeFreeDirect::UNKNOW && node_ptr->free_direct != NodeFreeDirect::PILLAR) {
             if (ctnode_ptr->free_direct == node_ptr->free_direct) {
                 const Point3D topo_dir1 = FARUtil::SurfTopoDirect(node_ptr->surf_dirs);
                 const Point3D topo_dir2 = FARUtil::SurfTopoDirect(ctnode_ptr->surf_dirs);
@@ -777,4 +1800,3 @@ void ContourGraph::ResetCurrentContour() {
     odom_node_ptr_ = NULL;
     is_robot_inside_poly_ = false;
 }   
-

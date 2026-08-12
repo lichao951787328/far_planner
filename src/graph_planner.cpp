@@ -8,11 +8,37 @@
 
 #include "far_planner/graph_planner.h"
 
+#include <algorithm>
+#include <cmath>
+
 /***************************************************************************************/
 
 const char INIT_BIT = char(0); // 0000
 const char OBS_BIT  = char(1); // 0001
 const char FREE_BIT = char(2); // 0010
+
+namespace {
+
+const char* EdgeRejectReasonName(const EdgeRejectReason reason) {
+    switch (reason) {
+        case EdgeRejectReason::NONE: return "accepted";
+        case EdgeRejectReason::NOT_CURRENT_ADJACENT: return "not_adjacent";
+        case EdgeRejectReason::UNREACHABLE: return "unreachable";
+        case EdgeRejectReason::DIRECTION_REJECTED: return "direction";
+        case EdgeRejectReason::STATIC_CLOUD_BLOCKED: return "static_cloud";
+        case EdgeRejectReason::DYNAMIC_CLOUD_BLOCKED: return "dynamic_cloud";
+        case EdgeRejectReason::POLYGON_BLOCKED: return "polygon";
+        case EdgeRejectReason::TERRAIN_BLOCKED: return "terrain";
+        case EdgeRejectReason::OFFSET_FAILED: return "offset";
+        case EdgeRejectReason::SELF_POLYGON_BLOCKED: return "self_polygon";
+        case EdgeRejectReason::OTHER_STATIC_BLOCKED: return "other_static";
+        case EdgeRejectReason::CLIPPED_CONTOUR: return "clipped";
+        case EdgeRejectReason::VOTE_PENDING: return "vote";
+    }
+    return "unknown";
+}
+
+}  // namespace
 
 
 void GraphPlanner::Init(const ros::NodeHandle& nh, const GraphPlannerParams& params) {
@@ -20,6 +46,7 @@ void GraphPlanner::Init(const ros::NodeHandle& nh, const GraphPlannerParams& par
     gp_params_ = params;
     is_goal_init_ = false;
     current_graph_.clear();
+    evaluated_goal_candidates_.clear();
     // attemptable planning listener
     attemptable_sub_ = nh_.subscribe("planning_attemptable", 5, &GraphPlanner::AttemptStatusCallBack, this);
     // initialize terrian grid
@@ -30,6 +57,43 @@ void GraphPlanner::Init(const ros::NodeHandle& nh, const GraphPlannerParams& par
     free_terrain_grid_ = std::make_unique<grid_ns::Grid<char>>(grid_size, INIT_BIT, grid_origin, grid_resolution, 3);
 }
 
+void GraphPlanner::UpdaetVGraph(const NodePtrStack& vgraph) {
+    current_graph_ = vgraph;
+}
+
+NodePtrStack GraphPlanner::SelectGoalConnectionCandidates(
+    const NavNodePtr& goal_ptr) const {
+    NodePtrStack selected;
+    if (!goal_ptr) return selected;
+
+    // Match the original FAR planner: validate the goal against every node in
+    // the current graph snapshot.  Semantic source filtering replaces the
+    // legacy trajectory nodes, which are intentionally absent in this build.
+    selected.reserve(current_graph_.size());
+    for (const auto& node_ptr : current_graph_) {
+        if (!node_ptr || node_ptr == goal_ptr) continue;
+        if (node_ptr->is_odom || IsGoalConnectionCandidate(*node_ptr)) {
+            selected.push_back(node_ptr);
+        }
+    }
+    return selected;
+}
+
+void GraphPlanner::RemoveGoalConnection(const NavNodePtr& node_ptr,
+                                        const NavNodePtr& goal_ptr,
+                                        const bool clear_vote_history) {
+    if (!node_ptr || !goal_ptr || node_ptr == goal_ptr) return;
+    DynamicGraph::ErasePolyEdge(node_ptr, goal_ptr);
+    DynamicGraph::EraseEdge(node_ptr, goal_ptr);
+    node_ptr->is_block_to_goal = true;
+    if (!clear_vote_history) return;
+
+    node_ptr->edge_votes.erase(goal_ptr->id);
+    goal_ptr->edge_votes.erase(node_ptr->id);
+    FARUtil::EraseNodeFromStack(goal_ptr, node_ptr->potential_edges);
+    FARUtil::EraseNodeFromStack(node_ptr, goal_ptr->potential_edges);
+}
+
 void GraphPlanner::UpdateGraphTraverability(const NavNodePtr& odom_node_ptr, const NavNodePtr& goal_ptr) 
 {
     if (odom_node_ptr == NULL || current_graph_.empty()) {
@@ -38,22 +102,39 @@ void GraphPlanner::UpdateGraphTraverability(const NavNodePtr& odom_node_ptr, con
     }
     odom_node_ptr_ = odom_node_ptr;
     this->InitNodesStates(current_graph_);
+    // A newly commanded goal can be connected before the next ordinary Graph
+    // snapshot includes it. Reset it explicitly so removing the per-cycle
+    // whole-graph refresh cannot leave a parent/gscore from the prior search.
+    if (goal_ptr) {
+        goal_ptr->gscore = FARUtil::kINF;
+        goal_ptr->fgscore = FARUtil::kINF;
+        goal_ptr->is_traversable = false;
+        goal_ptr->is_free_traversable = false;
+        goal_ptr->parent = NULL;
+        goal_ptr->free_parent = NULL;
+    }
     // start expand the whole current_graph_
     odom_node_ptr_->gscore = 0.0;
-    IdxSet open_set;
-    std::priority_queue<NavNodePtr, NodePtrStack, nodeptr_gcomp> open_queue;
+    std::priority_queue<GraphSearchQueueEntry,
+                        std::vector<GraphSearchQueueEntry>,
+                        GraphSearchQueueEntryGreater> open_queue;
     IdxSet close_set;
     // Expansion from odom node to all reachable navigation node
-    open_queue.push(odom_node_ptr_);
-    open_set.insert(odom_node_ptr_->id);
-    while (!open_set.empty()) {
-        const NavNodePtr current = open_queue.top();
+    open_queue.push({0.0f, odom_node_ptr_->id, odom_node_ptr_});
+    while (!open_queue.empty()) {
+        const GraphSearchQueueEntry entry = open_queue.top();
         open_queue.pop();
-        open_set.erase(current->id);
+        const NavNodePtr current = entry.node;
+        if (!current || close_set.count(current->id) ||
+            IsStaleGraphSearchEntry(entry, current->gscore)) {
+            continue;
+        }
         close_set.insert(current->id);
         current->is_traversable = true; // reachable from current position
         for (const auto& neighbor : current->connect_nodes) {
-            if (close_set.count(neighbor->id) ||
+            if ((!goal_ptr && neighbor->is_goal) ||
+                !IsGraphEdgeSearchEligible(*current, *neighbor) ||
+                close_set.count(neighbor->id) ||
                 this->IsInvalidBoundary(current, neighbor)) continue;
             float edist = this->EulerCost(current, neighbor);
             if (neighbor == goal_ptr && edist > FARUtil::kEpsilon && !FARUtil::IsAtSameLayer(neighbor, current)) { // check for multi layer traverse cost
@@ -66,42 +147,47 @@ void GraphPlanner::UpdateGraphTraverability(const NavNodePtr& odom_node_ptr, con
                 }
             }
             const float temp_gscore = current->gscore + edist;
-            if (temp_gscore < neighbor->gscore) {
+            if (ShouldRelaxGraphSearchEdge(temp_gscore, neighbor->gscore,
+                                           current->id, neighbor->parent)) {
                 neighbor->parent = current;
                 neighbor->gscore = temp_gscore;
-                if (!open_set.count(neighbor->id)) {
-                    open_queue.push(neighbor);
-                    open_set.insert(neighbor->id);
-                }
+                // Always enqueue a new immutable snapshot.  An older entry
+                // for this node is harmless and is discarded at pop time.
+                open_queue.push({temp_gscore, neighbor->id, neighbor});
             }
         }
     }
-    std::priority_queue<NavNodePtr, NodePtrStack, nodeptr_fgcomp> fopen_queue;
-    IdxSet fopen_set;
+    std::priority_queue<GraphSearchQueueEntry,
+                        std::vector<GraphSearchQueueEntry>,
+                        GraphSearchQueueEntryGreater> fopen_queue;
     close_set.clear();
     // Expansion from odom node to all covered navigation node
     odom_node_ptr_->fgscore = 0.0;
-    fopen_queue.push(odom_node_ptr_);
-    fopen_set.insert(odom_node_ptr_->id);
-    while (!fopen_set.empty()) {
-        const NavNodePtr current = fopen_queue.top();
+    fopen_queue.push({0.0f, odom_node_ptr_->id, odom_node_ptr_});
+    while (!fopen_queue.empty()) {
+        const GraphSearchQueueEntry entry = fopen_queue.top();
         fopen_queue.pop();
-        fopen_set.erase(current->id);
+        const NavNodePtr current = entry.node;
+        if (!current || close_set.count(current->id) ||
+            IsStaleGraphSearchEntry(entry, current->fgscore)) {
+            continue;
+        }
         close_set.insert(current->id);
         current->is_free_traversable = true; // reachable from current position
         for (const auto& neighbor : current->connect_nodes) {
-            if (!neighbor->is_covered || close_set.count(neighbor->id) ||
+            if ((!goal_ptr && neighbor->is_goal) ||
+                !IsGraphEdgeSearchEligible(*current, *neighbor) ||
+                !neighbor->is_covered || close_set.count(neighbor->id) ||
                 this->IsInvalidBoundary(current, neighbor)) continue;
             const float e_dist = this->EulerCost(current, neighbor);
             if (neighbor == goal_ptr && (!is_goal_in_freespace_ || e_dist > FARUtil::kTerrainRange)) continue;
             const float temp_fgscore = current->fgscore + e_dist;
-            if (temp_fgscore < neighbor->fgscore) {
+            if (ShouldRelaxGraphSearchEdge(temp_fgscore, neighbor->fgscore,
+                                           current->id,
+                                           neighbor->free_parent)) {
                 neighbor->free_parent = current;
                 neighbor->fgscore = temp_fgscore;
-                if (!fopen_set.count(neighbor->id)) {
-                    fopen_queue.push(neighbor);
-                    fopen_set.insert(neighbor->id);
-                } 
+                fopen_queue.push({temp_fgscore, neighbor->id, neighbor});
             }
         }
     }
@@ -110,35 +196,131 @@ void GraphPlanner::UpdateGraphTraverability(const NavNodePtr& odom_node_ptr, con
 void GraphPlanner::UpdateGoalNavNodeConnects(const NavNodePtr& goal_ptr)
 {
     if (goal_ptr == NULL || is_use_internav_goal_) return;
-    for (const auto& node_ptr : current_graph_) {
-        if (node_ptr == goal_ptr) continue;
-        if (this->IsValidConnectToGoal(node_ptr, goal_ptr)) {
-            const bool is_directly_connect = node_ptr->is_odom ? true : false;
-            DynamicGraph::RecordPolygonVote(node_ptr, goal_ptr, gp_params_.votes_size, is_directly_connect);
-        } else {
-            DynamicGraph::DeletePolygonVote(node_ptr, goal_ptr, gp_params_.votes_size);
+
+    // Goal connections are a transient query layer. Rebuild them directly
+    // from this graph snapshot instead of advancing historical votes on every
+    // planning timer tick. Identical inputs now produce identical edges.
+    const NodePtrStack previous_candidates = evaluated_goal_candidates_;
+    for (const auto& node_ptr : previous_candidates) {
+        this->RemoveGoalConnection(node_ptr, goal_ptr, true);
+        if (node_ptr) node_ptr->is_block_to_goal = false;
+    }
+    evaluated_goal_candidates_.clear();
+
+    NodePtrStack candidates = this->SelectGoalConnectionCandidates(goal_ptr);
+    std::size_t accepted_goal_connections = 0;
+    float farthest_goal_candidate = 0.0f;
+    float farthest_goal_connection = 0.0f;
+    bool has_odom_candidate = false;
+    bool has_odom_connection = false;
+    EdgeRejectReason odom_goal_result = EdgeRejectReason::UNREACHABLE;
+    float odom_goal_distance = 0.0f;
+    EdgeRejectionStats goal_rejections;
+
+    for (const auto& node_ptr : candidates) {
+        if (!node_ptr) continue;
+        evaluated_goal_candidates_.push_back(node_ptr);
+    }
+
+    for (const auto& node_ptr : candidates) {
+        if (!node_ptr || node_ptr == goal_ptr) continue;
+        const float candidate_distance =
+            (node_ptr->position - goal_ptr->position).norm_flat();
+        farthest_goal_candidate = std::max(farthest_goal_candidate,
+                                          candidate_distance);
+        has_odom_candidate = has_odom_candidate || node_ptr->is_odom;
+        EdgeValidationResult validation =
+            this->ValidateConnectToGoal(node_ptr, goal_ptr);
+        if (node_ptr->is_odom) {
+            odom_goal_result = validation.reason;
+            odom_goal_distance = candidate_distance;
         }
-        const auto it = goal_ptr->edge_votes.find(node_ptr->id);
-        if (it != goal_ptr->edge_votes.end() && FARUtil::IsVoteTrue(it->second, false)) {
-            DynamicGraph::AddPolyEdge(node_ptr, goal_ptr), DynamicGraph::AddEdge(node_ptr, goal_ptr);
+        if (validation.valid) {
+            DynamicGraph::AddPolyEdge(node_ptr, goal_ptr);
+            DynamicGraph::AddEdge(node_ptr, goal_ptr);
+            GraphEdgeState& forward = node_ptr->edge_states[goal_ptr->id];
+            GraphEdgeState& reverse = goal_ptr->edge_states[node_ptr->id];
+            forward.source = reverse.source = GraphEdgeSource::GOAL_CONNECT;
+            forward.validation_mode = reverse.validation_mode =
+                EdgeValidationMode::VISIBILITY;
+            forward.has_clearance_geometry =
+                reverse.has_clearance_geometry = true;
+            forward.route_start = validation.route_start;
+            forward.route_end = validation.route_end;
+            reverse.route_start = validation.route_end;
+            reverse.route_end = validation.route_start;
+            forward.route_cost = reverse.route_cost = validation.route_cost;
+            forward.static_valid = reverse.static_valid = true;
+            forward.dynamic_blocked = reverse.dynamic_blocked = false;
+            forward.topology_blocked = reverse.topology_blocked = false;
+            forward.active = reverse.active = true;
             node_ptr->is_block_to_goal = false;
+            ++accepted_goal_connections;
+            farthest_goal_connection = std::max(farthest_goal_connection,
+                                                candidate_distance);
+            has_odom_connection = has_odom_connection || node_ptr->is_odom;
         } else {
-            DynamicGraph::ErasePolyEdge(node_ptr, goal_ptr), DynamicGraph::EraseEdge(node_ptr, goal_ptr);
-            node_ptr->is_block_to_goal = true;
+            this->RemoveGoalConnection(node_ptr, goal_ptr, true);
+            // This bit is diagnostic only. It must never gate a later
+            // snapshot because the obstacle layer can change immediately.
+            node_ptr->is_block_to_goal = false;
+            goal_rejections.Count(validation.reason);
         }
+    }
+
+    ROS_INFO_THROTTLE(
+        5.0,
+        "GP goal connections: candidates=%zu accepted=%zu odom_candidate=%s odom_edge=%s odom_result=%s odom_goal_distance=%.2fm farthest_candidate=%.2fm farthest_edge=%.2fm reject[unreachable=%zu direction=%zu static_cloud=%zu dynamic_cloud=%zu polygon=%zu terrain=%zu vote=%zu]",
+        candidates.size(), accepted_goal_connections,
+        has_odom_candidate ? "yes" : "no",
+        has_odom_connection ? "yes" : "no",
+        has_odom_candidate ? EdgeRejectReasonName(odom_goal_result)
+                           : "not_candidate",
+        odom_goal_distance,
+        farthest_goal_candidate, farthest_goal_connection,
+        goal_rejections.unreachable,
+        goal_rejections.direction_rejected,
+        goal_rejections.static_cloud_blocked,
+        goal_rejections.dynamic_cloud_blocked,
+        goal_rejections.polygon_blocked,
+        goal_rejections.terrain_blocked,
+        goal_rejections.vote_pending);
+
+    if (FARUtil::IsDebug) {
+        ROS_INFO_THROTTLE(1.0,
+            "GP: validating %zu FAR-style full-graph goal candidates.",
+            candidates.size());
     }
 }
 
-bool GraphPlanner::IsValidConnectToGoal(const NavNodePtr& node_ptr, const NavNodePtr& goal_node_ptr) {
-    if (node_ptr->is_traversable && (!node_ptr->is_block_to_goal || IsResetBlockStatus(node_ptr, goal_node_ptr))) {
-        const Point3D diff_p = goal_node_ptr->position - node_ptr->position;
-        if (DynamicGraph::IsConvexConnect(node_ptr, goal_node_ptr) && (!FARUtil::IsAtSameLayer(node_ptr, goal_node_ptr) || FARUtil::IsOutReducedDirs(diff_p, node_ptr)) && 
-            ContourGraph::IsNavToGoalConnectFreePolygon(node_ptr, goal_node_ptr)) 
-        {
-            return true;
-        }
+EdgeValidationResult GraphPlanner::ValidateConnectToGoal(
+    const NavNodePtr& node_ptr, const NavNodePtr& goal_node_ptr) {
+    EdgeValidationResult result;
+    if (!node_ptr || !goal_node_ptr || !node_ptr->is_traversable) {
+        result.reason = EdgeRejectReason::UNREACHABLE;
+        return result;
     }
-    return false;
+    if (node_ptr->is_odom) {
+        // Odom and goal are robot-centre points, not obstacle anchors.  A
+        // direct edge must cover the complete line and must not inherit the
+        // contour-corner endpoint collision exclusion.
+        result = ContourGraph::ValidateDirectOdomGoalEdgeWithRoute(
+            node_ptr, goal_node_ptr, true);
+    } else {
+        // Surface direction proposes the corner projection inside
+        // ContourGraph, but it is not an acceptance gate. Persistent and
+        // multi-contour junctions can have a stale or incomplete direction
+        // pair; checked static/dynamic geometry remains authoritative.
+        result = ContourGraph::ValidateGoalEdgeWithRoute(
+            node_ptr, goal_node_ptr);
+    }
+    if (result.valid &&
+        !DynamicGraph::IsOnTerrainRoute(result.route_start,
+                                        result.route_end)) {
+        result.valid = false;
+        result.reason = EdgeRejectReason::TERRAIN_BLOCKED;
+    }
+    return result;
 }
 
 bool GraphPlanner::PathToGoal(const NavNodePtr& goal_ptr,
@@ -147,7 +329,7 @@ bool GraphPlanner::PathToGoal(const NavNodePtr& goal_ptr,
                               Point3D& _goal_p,
                               bool& _is_fail,
                               const bool& has_dynamic_obstacles,
-                              bool& _is_dynamic_wait,
+                              bool& _is_retry_wait,
                               bool& _is_succeed,
                               bool& _is_free_nav) 
 {
@@ -156,17 +338,9 @@ bool GraphPlanner::PathToGoal(const NavNodePtr& goal_ptr,
         ROS_ERROR("GP: Graph or Goal is not initialized correctly.");
         return false;
     }
-    _is_fail = false, _is_dynamic_wait = false, _is_succeed = false;
+    _is_fail = false, _is_retry_wait = false, _is_succeed = false;
     global_path.clear();
     _goal_p = goal_ptr->position;
-    if (current_graph_.size() == 1) {
-        // update global path
-        global_path.push_back(odom_node_ptr_);
-        global_path.push_back(goal_ptr);
-        _nav_node_ptr = this->NextNavWaypointFromPath(global_path, goal_ptr);
-        _is_free_nav = is_free_nav_goal_;
-        return true;       
-    }
     // A changing obstacle layout may change the Graph path and the selected
     // waypoint, but it must never change the commanded destination.  Report
     // success only at the original goal received from the user.
@@ -190,97 +364,55 @@ bool GraphPlanner::PathToGoal(const NavNodePtr& goal_ptr,
     else if (goal_ptr->is_free_traversable) is_free_nav_goal_ = true;
     // auto-switch model based on command and navigation status
     if (gp_params_.is_autoswitch && command_is_free_nav_) {
-        if (goal_ptr->is_free_traversable || (is_free_nav_goal_ && is_global_path_init_ && path_momentum_counter_ < gp_params_.momentum_thred)) {
-            is_free_nav_goal_ = true;
-        } else {
-            is_free_nav_goal_ = false;
-        }
-    }   
+        is_free_nav_goal_ = goal_ptr->is_free_traversable;
+    }
     _is_free_nav = is_free_nav_goal_;
     const NavNodePtr reach_nav_node = is_free_nav_goal_ ? goal_ptr->free_parent : goal_ptr->parent;
     if (reach_nav_node != NULL) { // valid path found
-        if (is_global_path_init_ && path_momentum_counter_ < gp_params_.momentum_thred && 
-            last_waypoint_dist_ > gp_params_.adjust_radius && reach_nav_node != odom_node_ptr_) // momentum navigation
-        {   // check for momentum path
-            const float cur_waypoint_dist = (odom_node_ptr_->position - next_waypoint_).norm();
-            if (cur_waypoint_dist > gp_params_.adjust_radius) {
-                if ((odom_node_ptr_->position - last_planning_odom_).norm() < gp_params_.momentum_dist) { // movement momentum
-                    global_path = recorded_path_;
-                    _nav_node_ptr = this->NextNavWaypointFromPath(global_path, goal_ptr);
-                    path_momentum_counter_ ++;
-                    if (FARUtil::IsDebug) ROS_INFO_STREAM("Momentum path counter: " << path_momentum_counter_ << " Over max: "<< gp_params_.momentum_thred);
-                    return true;
-                }
-            }
-        }
         NodePtrStack cur_path;
         if (this->ReconstructPath(goal_ptr, is_free_nav_goal_, cur_path)) {
             _nav_node_ptr = this->NextNavWaypointFromPath(cur_path, goal_ptr);
-            if (is_global_path_init_ && path_momentum_counter_ < gp_params_.momentum_thred) { // momentum navigation
-                const float cur_waypoint_dist = (odom_node_ptr_->position - _nav_node_ptr->position).norm();
-                if (last_waypoint_dist_ > gp_params_.adjust_radius && cur_waypoint_dist > gp_params_.adjust_radius) {
-                    const float heading_dot = (next_waypoint_ - last_planning_odom_).norm_dot(_nav_node_ptr->position - odom_node_ptr_->position);
-                    if (heading_dot < 0.0f) { // consistant heading momentum
-                        global_path = recorded_path_;
-                        _nav_node_ptr = this->NextNavWaypointFromPath(global_path, goal_ptr);
-                        path_momentum_counter_ ++;
-                        if (FARUtil::IsDebug) ROS_INFO_STREAM("Momentum path counter: " << path_momentum_counter_ << "; Over max: "<< gp_params_.momentum_thred);
-                        return true;
-                    }
-                }
-            } 
-            // plan new path to goal
             global_path = cur_path;
-            this->RecordPathInfo(global_path);
             return true;
         }
     } else { // no valid path found
-        if (is_global_path_init_ && path_momentum_counter_ < gp_params_.momentum_thred) { // momentum go forward
-            global_path = recorded_path_;
-            _nav_node_ptr = this->NextNavWaypointFromPath(global_path, goal_ptr);
-            path_momentum_counter_ ++;
-            if (FARUtil::IsDebug) ROS_INFO_STREAM("Momentum path counter: " << path_momentum_counter_ << "; Over max: "<< gp_params_.momentum_thred);
-            return true;
-        } else {
-            if (gp_params_.is_autoswitch && is_free_nav_goal_) { // autoswitch to attemptable navigation
-                if (FARUtil::IsDebug) ROS_WARN("GP: free navigation fails, auto swiching to attemptable navigation...");
-                if (is_global_path_init_) {
-                    global_path = recorded_path_;
-                    _nav_node_ptr = this->NextNavWaypointFromPath(global_path, goal_ptr);
-                } else {
-                    _nav_node_ptr = goal_ptr;
-                }
-                is_free_nav_goal_ = false;
+        if (gp_params_.is_autoswitch && is_free_nav_goal_ &&
+            goal_ptr->parent != NULL) {
+            is_free_nav_goal_ = false;
+            NodePtrStack attemptable_path;
+            if (this->ReconstructPath(goal_ptr, false, attemptable_path)) {
+                global_path = attemptable_path;
+                _nav_node_ptr = this->NextNavWaypointFromPath(global_path, goal_ptr);
+                _is_free_nav = false;
                 return true;
             }
-            if (has_dynamic_obstacles) {
-                // Dynamic obstacles use the ordinary contour/Graph update.
-                // If that rebuilt Graph has no route, preserve the goal so a
-                // later snapshot can retry after the obstacle moves away.
-                _is_dynamic_wait = true;
-                if (FARUtil::IsDebug) {
+        }
+            // A distant goal can initially lie beyond all mapped contour
+            // vertices, and a temporary static-graph stitch can also be
+            // absent for one snapshot. Stop safely but retain the command;
+            // the next semantic/Graph update gets another chance to connect.
+            _is_retry_wait = true;
+            _is_fail = true;
+            if (FARUtil::IsDebug) {
+                if (has_dynamic_obstacles) {
                     ROS_WARN_THROTTLE(1.0,
                         "GP: goal temporarily unreachable while dynamic obstacles are active; retaining it for replanning.");
+                } else {
+                    ROS_WARN_THROTTLE(1.0,
+                        "GP: goal currently has no reachable Graph connection; retaining it for replanning.");
                 }
-                return false;
             }
-            if (FARUtil::IsDebug) ROS_ERROR("****************** FAIL TO REACH GOAL ******************");
-            this->GoalReset();
-            is_goal_init_ = false, _is_fail = true;
             return false;
-        }
     }
-    if (has_dynamic_obstacles) {
-        _is_dynamic_wait = true;
-        if (FARUtil::IsDebug) {
-            ROS_WARN_THROTTLE(1.0,
-                "GP: rebuilt Graph has no route while dynamic obstacles are active; retaining the goal.");
-        }
-        return false;
+    // ReconstructPath can fail transiently while graph connectivity changes
+    // between semantic snapshots. Keep the destination but never reuse the
+    // previous path.
+    _is_retry_wait = true;
+    _is_fail = true;
+    if (FARUtil::IsDebug) {
+        ROS_WARN_THROTTLE(1.0,
+            "GP: current Graph path reconstruction failed; retaining goal for replanning.");
     }
-    if (FARUtil::IsDebug) ROS_ERROR("GP: unexpected error happend within planning, navigation to goal fails.");
-    this->GoalReset();
-    is_goal_init_ = false, _is_fail = true;
     return false;
 }
 
@@ -338,40 +470,48 @@ NavNodePtr GraphPlanner::NextNavWaypointFromPath(const NodePtrStack& global_path
     return nav_point_ptr;
 }
 
+bool GraphPlanner::NextContourRouteWaypoint(
+    const NodePtrStack& global_path, const Point3D& robot_position,
+    Point3D& waypoint) const {
+    if (global_path.size() < 2) return false;
+    for (std::size_t index = 1; index < global_path.size(); ++index) {
+        const NavNodePtr& previous = global_path[index - 1];
+        const NavNodePtr& next = global_path[index];
+        if (!previous || !next) continue;
+        if ((next->position - robot_position).norm() <
+            gp_params_.converge_dist) {
+            continue;
+        }
+        const auto state = previous->edge_states.find(next->id);
+        if (state == previous->edge_states.end() ||
+            !state->second.IsActive() ||
+            !state->second.has_clearance_geometry) {
+            return false;
+        }
+        const float route_point_converge = std::max(
+            0.15f, gp_params_.converge_dist * 0.4f);
+        waypoint = state->second.route_start;
+        if ((waypoint - robot_position).norm() < route_point_converge) {
+            waypoint = state->second.route_end;
+        }
+        return true;
+    }
+    return false;
+}
+
 void GraphPlanner::UpdateGoal(const Point3D& goal) {
     this->GoalReset();
     is_use_internav_goal_ = false;
-    float min_dist = FARUtil::kNearDist;
-    for (const auto& node_ptr : current_graph_) {
-        node_ptr->is_block_to_goal = false;
-        if (node_ptr->is_navpoint) { // check if goal is near internav node
-            const float cur_dist = (node_ptr->position - goal).norm();
-            if (cur_dist < min_dist) {
-                is_use_internav_goal_   = true;
-                goal_node_ptr_          = node_ptr;
-                min_dist                = cur_dist;
-                goal_node_ptr_->is_goal = true;
-            }
-        }
-    }
-    if (!is_use_internav_goal_) {
-        DynamicGraph::CreateNavNodeFromPoint(goal, goal_node_ptr_, false, false, true);
-        DynamicGraph::AddNodeToGraph(goal_node_ptr_);
-    }
+    DynamicGraph::CreateNavNodeFromPoint(goal, goal_node_ptr_, false, false, true);
+    DynamicGraph::AddNodeToGraph(goal_node_ptr_);
     if (FARUtil::IsDebug) ROS_INFO("GP: *********** new goal updated ***********");
     is_goal_init_          = true;
-    is_global_path_init_   = false;
     is_terrain_associated_ = false;
     // Keep the user command independent from the graph node selected as the
     // connection endpoint.  In particular, dynamic contours may change the
     // latter's parents and the current waypoint, but not this destination.
     origin_goal_pos_       = goal;
     is_free_nav_goal_      = command_is_free_nav_;
-    next_waypoint_         = Point3D(0,0,0);
-    last_waypoint_dist_    = 0.0f;
-    last_planning_odom_    = Point3D(0,0,0);
-    path_momentum_counter_ = 0;
-    recorded_path_.clear();
     if (!FARUtil::IsMultiLayer) {
         goal_node_ptr_->position.z = MapHandler::NearestTerrainHeightofNavPoint(origin_goal_pos_, is_terrain_associated_) + FARUtil::vehicle_height;
         // Terrain association is the canonical 2.5D height of the same goal;
@@ -384,14 +524,14 @@ void GraphPlanner::UpdateGoal(const Point3D& goal) {
 void GraphPlanner::ReEvaluateGoalPosition(const NavNodePtr& goal_ptr, const bool& is_adjust_height)
 {
     if (is_use_internav_goal_) return; // return if using an exsiting internav node as goal
-    if (is_adjust_height && is_global_path_init_ && recorded_path_.size() > 1) { // use path to adjust goal height
-        const auto it = recorded_path_.end() - 2;
-        if (!is_terrain_associated_) {
-            goal_ptr->position.z = (*it)->position.z;
-        } else if ((*it)->is_odom) {
-            goal_ptr->position.z = (*it)->position.z;
+    if (is_adjust_height) {
+        bool terrain_matched = false;
+        const float terrain_height = MapHandler::NearestTerrainHeightofNavPoint(
+            origin_goal_pos_, terrain_matched);
+        if (terrain_matched) {
+            goal_ptr->position.z = terrain_height + FARUtil::vehicle_height;
+            is_terrain_associated_ = true;
         }
-        
     }
     // Goals are assumed reachable in the current phase.  Obstacles (including
     // dynamic semantic obstacles) may change contours, Graph connections and
@@ -409,12 +549,10 @@ void GraphPlanner::AttemptStatusCallBack(const std_msgs::Bool& msg) {
     if (command_is_free_nav_ && msg.data) { // current goal is not attemptable
         if (FARUtil::IsDebug) ROS_WARN("GP: switch to attemptable planning mode.");
         command_is_free_nav_ = false;
-        path_momentum_counter_ = gp_params_.momentum_thred;
     } 
     if (!command_is_free_nav_ && !msg.data) { // current attemptable planning
         if (FARUtil::IsDebug) ROS_WARN("GP: planning without attempting.");
         command_is_free_nav_ = true; 
-        path_momentum_counter_ = gp_params_.momentum_thred;
     }
 }
 

@@ -38,6 +38,12 @@ struct HeightPair
 struct ContourGraphParams {
     ContourGraphParams() = default;
     float kPillarPerimeter;
+    float contour_projection_min = 0.15f;
+    float contour_projection_step = 0.075f;
+    float contour_projection_max = 0.60f;
+    // Vertices this close to the square contour raster boundary are treated
+    // as cropped observations, not as physical obstacle endpoints.
+    float contour_boundary_guard = 0.40f;
 };
 
 class ContourGraph {
@@ -57,6 +63,19 @@ public:
     // static functions
     void UpdateContourGraph(const NavNodePtr& odom_node_ptr,
                             const std::vector<std::vector<Point3D>>& filtered_contours);
+
+    /** Build one local collision/contour view while preserving semantic source. */
+    void UpdateContourGraph(
+        const NavNodePtr& odom_node_ptr,
+        const std::vector<std::vector<Point3D>>& static_contours,
+        const std::vector<std::vector<Point3D>>& dynamic_contours);
+
+    /** Legacy single-layer setter; treats the supplied cloud as static. */
+    static void SetLocalCollisionCloud(const PointCloudPtr& collision_cloud);
+
+    /** Latest cropped static/dynamic layers used for local edge checks. */
+    static void SetLocalCollisionCloud(const PointCloudPtr& static_cloud,
+                                       const PointCloudPtr& dynamic_cloud);
 
     /* Match current contour with global navigation nodes */
     void MatchContourWithNavGraph(const NodePtrStack& global_nodes,
@@ -78,6 +97,75 @@ public:
     static bool IsNavNodesConnectFreePolygon(const NavNodePtr& node_ptr1,
                                              const NavNodePtr& node_ptr2);
 
+    static bool IsNavNodesConnectFreeStaticPolygon(
+        const NavNodePtr& node_ptr1, const NavNodePtr& node_ptr2);
+
+    static bool IsNavNodesConnectFreeDynamicLayer(
+        const NavNodePtr& node_ptr1, const NavNodePtr& node_ptr2);
+
+    /** Pure geometry classification for an ordinary visibility edge. */
+    static EdgeRejectReason ValidateVisibilityEdgeGeometry(
+        const NavNodePtr& node_ptr1, const NavNodePtr& node_ptr2,
+        bool include_dynamic = true);
+
+    /** Validate and return the exact projected robot-centre geometry used by
+     * a transient start/query visibility edge. */
+    static EdgeValidationResult ValidateVisibilityEdgeWithRoute(
+        const NavNodePtr& node_ptr1, const NavNodePtr& node_ptr2,
+        bool include_dynamic = true);
+
+    /** Pure geometry classification for a node-to-goal visibility edge. */
+    static EdgeRejectReason ValidateGoalEdgeGeometry(
+        const NavNodePtr& node_ptr, const NavNodePtr& goal_ptr);
+
+    /** Goal counterpart of ValidateVisibilityEdgeWithRoute(). */
+    static EdgeValidationResult ValidateGoalEdgeWithRoute(
+        const NavNodePtr& node_ptr, const NavNodePtr& goal_ptr);
+
+    /** Strict robot-centre line-of-sight check for odom directly to goal.
+     * Unlike a contour-corner terminal edge, this route has no obstacle
+     * endpoint and therefore receives neither corner projection nor endpoint
+     * collision exclusion. */
+    static EdgeValidationResult ValidateDirectOdomGoalEdgeWithRoute(
+        const NavNodePtr& odom_ptr, const NavNodePtr& goal_ptr,
+        bool include_dynamic = true);
+
+    /** Check the current dynamic layer against the exact robot-centre route
+     * geometry stored for a contour-follow edge. Unlike obstacle-anchor
+     * visibility checks, no endpoint exclusion is applied because both route
+     * endpoints have already been projected into free space. */
+    static bool IsRouteConnectFreeDynamicLayer(const Point3D& route_start,
+                                               const Point3D& route_end);
+
+    /** Recheck stored free-side geometry against the latest local static
+     * cloud and polygons.  This never queries the complete OctoMap. */
+    static bool IsRouteConnectFreeStaticLayer(const Point3D& route_start,
+                                              const Point3D& route_end);
+
+    /** Whether a historical point is covered by a currently extracted
+     * static contour.  Used to distinguish a real local contradiction from a
+     * frame in which the area was not observed. */
+    static bool IsPointObservedOnCurrentStaticContour(
+        const Point3D& point, float tolerance);
+
+    /** Strong evidence that an old corner now lies in the interior of a
+     * reliable current static contour segment.  Merely being close to any
+     * contour is intentionally insufficient: intersections, current corners,
+     * short segments and cropped raster boundaries are excluded. */
+    static bool IsPointConfirmedOnCurrentStaticSegmentInterior(
+        const Point3D& point, float tolerance, float endpoint_guard,
+        PolygonPtr* matched_polygon = nullptr);
+
+    static bool IsPointInsideReliableContourWindow(const Point3D& point);
+    static bool DoesSegmentIntersectReliableContourWindow(
+        const Point3D& start, const Point3D& end);
+
+    /** Validate a current same-polygon contour edge using an adaptive,
+     * robot-clear free-side segment. Static contour geometry is retained when
+     * a current dynamic obstacle blocks the validated segment. */
+    static EdgeValidationResult ValidateContourFollowEdge(
+        const NavNodePtr& node_ptr1, const NavNodePtr& node_ptr2);
+
     static bool IsNavToGoalConnectFreePolygon(const NavNodePtr& node_ptr,
                                               const NavNodePtr& goal_ptr);
 
@@ -89,6 +177,9 @@ public:
                                            const ConnectPair& bd_cedge,
                                            const HeightPair h_pair,
                                            const bool& is_global_check);
+
+    static bool IsEdgeCollisionFreeInLocalCloud(const ConnectPair& edge,
+                                                const HeightPair& edge_height);
     
     static inline void MatchCTNodeWithNavNode(const CTNodePtr& ctnode_ptr, const NavNodePtr& node_ptr) {
         if (ctnode_ptr == NULL || node_ptr == NULL) return;
@@ -96,6 +187,21 @@ public:
         ctnode_ptr->nav_node_id = node_ptr->id;
         node_ptr->ctnode = ctnode_ptr;
         node_ptr->is_contour_match = true;
+        // A transient cropped endpoint can become an ordinary static
+        // candidate if a later, larger observation reveals a real corner at
+        // the same place. Never demote an already confirmed/ordinary node
+        // merely because it lies close to this frame's raster boundary.
+        if (node_ptr->source == GraphNodeSource::STATIC_CANDIDATE &&
+            node_ptr->is_transient_contour_endpoint &&
+            !ctnode_ptr->is_boundary_clipped) {
+            node_ptr->is_transient_contour_endpoint = false;
+            node_ptr->static_seen_count = 0;
+        }
+        if (ctnode_ptr->source == GraphNodeSource::STATIC_CANDIDATE ||
+            ctnode_ptr->source == GraphNodeSource::STATIC_GLOBAL ||
+            ctnode_ptr->source == GraphNodeSource::DYNAMIC_LOCAL) {
+            node_ptr->observed_in_semantic_snapshot = true;
+        }
     }
 
     static bool ReprojectPointOutsidePolygons(Point3D& point, const float& free_radius);
@@ -112,6 +218,16 @@ private:
 
     static CTNodeStack polys_ctnodes_;
     static PolygonStack contour_polygons_;
+    static PointCloudPtr local_collision_cloud_;
+    static PointKdTreePtr local_collision_kdtree_;
+    static PointCloudPtr local_static_collision_cloud_;
+    static PointKdTreePtr local_static_collision_kdtree_;
+    static PointCloudPtr local_dynamic_collision_cloud_;
+    static PointKdTreePtr local_dynamic_collision_kdtree_;
+    static float contour_projection_min_;
+    static float contour_projection_step_;
+    static float contour_projection_max_;
+    static float contour_boundary_guard_;
     ContourGraphParams ctgraph_params_;
     float ALIGN_ANGLE_COS;
     NavNodePtr odom_node_ptr_ = NULL;
@@ -120,6 +236,34 @@ private:
     // global contour set
     static std::unordered_set<NavEdge, navedge_hash> global_contour_set_;
     static std::unordered_set<NavEdge, navedge_hash> boundary_contour_set_;
+
+    enum class CollisionLayer { COMBINED, STATIC_ONLY, DYNAMIC_ONLY };
+
+    static bool IsPointsConnectFreePolygonForLayer(
+        const ConnectPair& cedge, const ConnectPair& bd_cedge,
+        const HeightPair h_pair, const bool& is_global_check,
+        CollisionLayer layer,
+        const PolygonPtr& endpoint_poly1 = PolygonPtr(),
+        const PolygonPtr& endpoint_poly2 = PolygonPtr(),
+        bool check_raw_cloud = true);
+
+    static bool IsEdgeCollisionFreeInCloud(
+        const ConnectPair& edge, const HeightPair& edge_height,
+        const PointCloudPtr& cloud, const PointKdTreePtr& kdtree,
+        float endpoint_exclusion = -1.0f);
+
+    /** Validate a query edge with exactly one obstacle-corner endpoint.  The
+     * corner's direction proposes progressively farther projections, while
+     * static/dynamic geometry remains the sole acceptance authority. */
+    static EdgeValidationResult ValidateTerminalVisibilityEdgeWithRoute(
+        const NavNodePtr& obstacle_node, const NavNodePtr& terminal_node,
+        bool obstacle_is_start, bool include_dynamic);
+
+    /** Robot-centre clearance against the persistent static contour layer.
+     * This is a segment-distance test, not only a line intersection test. */
+    static bool IsRouteClearOfGlobalContours(
+        const ConnectPair& route, const HeightPair& height,
+        float clearance);
 
     
     /* static private functions */
@@ -263,7 +407,8 @@ private:
 
     void CreateCTNode(const Point3D& pos, CTNodePtr& ctnode_ptr, const PolygonPtr& poly_ptr, const bool& is_pillar);
 
-    void CreatePolygon(const PointStack& poly_points, PolygonPtr& poly_ptr);
+    void CreatePolygon(const PointStack& poly_points, PolygonPtr& poly_ptr,
+                       const GraphNodeSource source = GraphNodeSource::UNKNOWN);
 
     NavNodePtr NearestNavNodeForCTNode(const CTNodePtr& ctnode_ptr, const NodePtrStack& near_nodes);
 

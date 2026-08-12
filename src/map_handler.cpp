@@ -38,6 +38,31 @@ inline bool MatchRgbKey(const GroupContainer& groups, uint32_t rgb_key) {
     return false;
 }
 
+// Three signed 21-bit grid coordinates. At 0.2 m resolution this remains
+// unique for roughly +/-209 km, far beyond the intended mapping workspace.
+inline uint64_t PersistentStaticKey(const PCLPoint& point,
+                                    const float resolution) {
+    const double inverse = 1.0 / std::max(1e-3f, resolution);
+    const int64_t ix = static_cast<int64_t>(std::floor(point.x * inverse));
+    const int64_t iy = static_cast<int64_t>(std::floor(point.y * inverse));
+    const int64_t iz = static_cast<int64_t>(std::floor(point.z * inverse));
+    constexpr uint64_t mask = (1ULL << 21) - 1ULL;
+    return ((static_cast<uint64_t>(ix) & mask) << 42) |
+           ((static_cast<uint64_t>(iy) & mask) << 21) |
+           (static_cast<uint64_t>(iz) & mask);
+}
+
+inline PCLPoint PersistentStaticCellCenter(const PCLPoint& point,
+                                           const float resolution) {
+    const float safe_resolution = std::max(1e-3f, resolution);
+    PCLPoint center = point;
+    center.x = (std::floor(point.x / safe_resolution) + 0.5f) * safe_resolution;
+    center.y = (std::floor(point.y / safe_resolution) + 0.5f) * safe_resolution;
+    center.z = (std::floor(point.z / safe_resolution) + 0.5f) * safe_resolution;
+    center.intensity = 0.0f;
+    return center;
+}
+
 struct QueryBox {
     point3d min;
     point3d max;
@@ -170,6 +195,7 @@ void MapHandler::Init(const MapHandlerParams& params) {
     terrain_neighbor_radius_ = semantic_params_.terrain_neighbor_radius > 0.0f
         ? semantic_params_.terrain_neighbor_radius : 1.0f;
     semantic_obs_cloud_.reset(new pcl::PointCloud<PCLPoint>());
+    persistent_static_obs_cloud_.reset(new pcl::PointCloud<PCLPoint>());
     semantic_terrain_support_cloud_.reset(new pcl::PointCloud<PCLPoint>());
     current_dynamic_obs_cloud_.reset(new pcl::PointCloud<PCLPoint>());
     effective_dynamic_obs_cloud_.reset(new pcl::PointCloud<PCLPoint>());
@@ -179,6 +205,7 @@ void MapHandler::Init(const MapHandlerParams& params) {
     changed_obs_cloud_.reset(new pcl::PointCloud<PCLPoint>());
     previous_local_obs_voxels_.clear();
     previous_local_dynamic_voxels_.clear();
+    persistent_static_obs_voxels_.clear();
     flat_terrain_cloud_.reset(new pcl::PointCloud<PCLPoint>());
     if (!local_terrain_support_octree_) {
         local_terrain_support_octree_.reset(new octomap::OcTree(FARUtil::kLeafSize));
@@ -201,6 +228,9 @@ void MapHandler::RefreshLocalTerrainSupportOctomap() {
     if (!semantic_tree && !color_tree) {
         if (local_terrain_support_octree_) local_terrain_support_octree_->clear();
         if (semantic_obs_cloud_) semantic_obs_cloud_->clear();
+        // Do not erase persistent static collision memory merely because one
+        // message cannot be decoded. Only Reset or explicit-free evidence is
+        // authorised to remove it.
         if (semantic_terrain_support_cloud_) semantic_terrain_support_cloud_->clear();
         if (current_dynamic_obs_cloud_) current_dynamic_obs_cloud_->clear();
         if (effective_dynamic_obs_cloud_) effective_dynamic_obs_cloud_->clear();
@@ -266,6 +296,12 @@ void MapHandler::RefreshLocalTerrainSupportOctomap() {
         BuildDenseVoxelMap(*color_tree, current_dynamic_obs_cloud_,
                            current_dynamic_voxels);
     }
+
+    // Navigation-corner matching may simplify, merge or retire a vertex, but
+    // it must never delete the physical wall used by later visibility checks.
+    // Maintain that static collision authority once per accepted semantic
+    // snapshot, independently of the Graph topology.
+    this->UpdatePersistentStaticObstacleLayer();
 
     dynamic_added_cloud_->clear();
     dynamic_removed_cloud_->clear();
@@ -371,6 +407,7 @@ void MapHandler::ResetGripMapCloud() {
     semantic_stamp_ = ros::Time();
     semantic_frame_id_.clear();
     if (semantic_obs_cloud_) semantic_obs_cloud_->clear();
+    if (persistent_static_obs_cloud_) persistent_static_obs_cloud_->clear();
     if (semantic_terrain_support_cloud_) semantic_terrain_support_cloud_->clear();
     if (current_dynamic_obs_cloud_) current_dynamic_obs_cloud_->clear();
     if (effective_dynamic_obs_cloud_) effective_dynamic_obs_cloud_->clear();
@@ -380,6 +417,7 @@ void MapHandler::ResetGripMapCloud() {
     if (changed_obs_cloud_) changed_obs_cloud_->clear();
     previous_local_obs_voxels_.clear();
     previous_local_dynamic_voxels_.clear();
+    persistent_static_obs_voxels_.clear();
     if (!flat_terrain_cloud_) {
         flat_terrain_cloud_.reset(new pcl::PointCloud<PCLPoint>());
     } else {
@@ -477,6 +515,167 @@ void MapHandler::GetSurroundObsCloud(const PointCloudPtr& obsCloudOut) {
         return;
     }
     *obsCloudOut = *collision_obs_cloud_;
+}
+
+void MapHandler::GetCurrentStaticObsCloud(
+    const PointCloudPtr& obsCloudOut) const {
+    if (!obsCloudOut) return;
+    if (!semantic_obs_cloud_) {
+        obsCloudOut->clear();
+        return;
+    }
+    *obsCloudOut = *semantic_obs_cloud_;
+}
+
+void MapHandler::GetPersistentStaticObsCloud(
+    const PointCloudPtr& obsCloudOut) const {
+    if (!obsCloudOut) return;
+    if (!persistent_static_obs_cloud_) {
+        obsCloudOut->clear();
+        return;
+    }
+    *obsCloudOut = *persistent_static_obs_cloud_;
+}
+
+StaticNodeEvidence MapHandler::QueryStaticTreeEvidence(
+    const Point3D& point) const {
+    if (!semantic_tree_snapshot_) return StaticNodeEvidence::UNKNOWN;
+    const auto* semantic_tree =
+        dynamic_cast<const SemanticOctree*>(semantic_tree_snapshot_.get());
+    const auto* color_tree = dynamic_cast<const octomap::ColorOcTree*>(
+        semantic_tree_snapshot_.get());
+    if (!semantic_tree && !color_tree) return StaticNodeEvidence::UNKNOWN;
+
+    const float resolution = static_cast<float>(
+        semantic_tree_snapshot_->getResolution());
+    int known_free_samples = 0;
+    const float z_samples[] = {
+        point.z,
+        point.z - FARUtil::vehicle_height * 0.5f,
+        point.z + resolution * 0.5f};
+    for (const float z : z_samples) {
+        const point3d query(point.x, point.y, z);
+        if (semantic_tree) {
+            const SemanticOcTreeNode* node = semantic_tree->search(query);
+            if (!node) continue;
+            if (!semantic_tree->isNodeOccupied(node)) {
+                ++known_free_samples;
+                continue;
+            }
+            const ColorOcTreeNode::Color color = node->isSemanticsSet()
+                ? node->getSemantics().getSemanticColor()
+                : node->getColor();
+            const uint32_t rgb = MakeRgbKey(color.r, color.g, color.b);
+            if (MatchRgbKey(obstacle_groups_, rgb)) {
+                return StaticNodeEvidence::STATIC_OCCUPIED;
+            }
+            if (MatchRgbKey(dynamic_obstacle_groups_, rgb)) {
+                return StaticNodeEvidence::UNKNOWN;
+            }
+        } else {
+            const octomap::ColorOcTreeNode* node = color_tree->search(query);
+            if (!node) continue;
+            if (!color_tree->isNodeOccupied(node)) {
+                ++known_free_samples;
+                continue;
+            }
+            const auto color = node->getColor();
+            const uint32_t rgb = MakeRgbKey(color.r, color.g, color.b);
+            if (MatchRgbKey(obstacle_groups_, rgb)) {
+                return StaticNodeEvidence::STATIC_OCCUPIED;
+            }
+            if (MatchRgbKey(dynamic_obstacle_groups_, rgb)) {
+                return StaticNodeEvidence::UNKNOWN;
+            }
+        }
+    }
+    return known_free_samples >= 2
+        ? StaticNodeEvidence::EXPLICIT_FREE
+        : StaticNodeEvidence::UNKNOWN;
+}
+
+void MapHandler::UpdatePersistentStaticObstacleLayer() {
+    if (!persistent_static_obs_cloud_) {
+        persistent_static_obs_cloud_.reset(new pcl::PointCloud<PCLPoint>());
+    }
+    const float resolution = std::max(1e-3f, FARUtil::kLeafSize);
+    std::unordered_set<uint64_t> current_keys;
+    if (semantic_obs_cloud_) {
+        current_keys.reserve(semantic_obs_cloud_->size());
+        for (const auto& point : semantic_obs_cloud_->points) {
+            const uint64_t key = PersistentStaticKey(point, resolution);
+            current_keys.insert(key);
+            persistent_static_obs_voxels_[key] =
+                PersistentStaticCellCenter(point, resolution);
+        }
+    }
+
+    std::size_t explicit_free_removed = 0;
+    for (auto it = persistent_static_obs_voxels_.begin();
+         it != persistent_static_obs_voxels_.end();) {
+        const PCLPoint& point = it->second;
+        const bool in_current_square =
+            std::abs(point.x - robot_pos_cache_.x) <=
+                semantic_params_.local_window_radius &&
+            std::abs(point.y - robot_pos_cache_.y) <=
+                semantic_params_.local_window_radius;
+        if (in_current_square && current_keys.count(it->first) == 0) {
+            const Point3D query(point.x, point.y, point.z);
+            if (QueryStaticTreeEvidence(query) ==
+                StaticNodeEvidence::EXPLICIT_FREE) {
+                it = persistent_static_obs_voxels_.erase(it);
+                ++explicit_free_removed;
+                continue;
+            }
+        }
+        ++it;
+    }
+
+    persistent_static_obs_cloud_->clear();
+    persistent_static_obs_cloud_->reserve(
+        persistent_static_obs_voxels_.size());
+    for (const auto& entry : persistent_static_obs_voxels_) {
+        persistent_static_obs_cloud_->points.push_back(entry.second);
+    }
+    FinalizeCloud(persistent_static_obs_cloud_);
+    ROS_INFO_THROTTLE(
+        5.0,
+        "MH persistent static collision layer: cells=%zu current=%zu explicit_free_removed=%zu resolution=%.2fm",
+        persistent_static_obs_voxels_.size(), current_keys.size(),
+        explicit_free_removed, resolution);
+}
+
+StaticNodeEvidence MapHandler::QueryStaticNodeEvidence(
+    const Point3D& point) const {
+    if (!has_semantic_map_ || !semantic_tree_snapshot_ || !is_init_) {
+        return StaticNodeEvidence::UNKNOWN;
+    }
+    const float dx = point.x - robot_pos_cache_.x;
+    const float dy = point.y - robot_pos_cache_.y;
+    // SetSemanticOctomap extracts an axis-aligned square BBX. Evidence must
+    // use the same footprint; a radial test incorrectly labelled the square's
+    // visible corner regions as UNKNOWN.
+    if (std::abs(dx) > semantic_params_.local_window_radius ||
+        std::abs(dy) > semantic_params_.local_window_radius) {
+        return StaticNodeEvidence::UNKNOWN;
+    }
+
+    const float resolution = static_cast<float>(
+        semantic_tree_snapshot_->getResolution());
+    const float horizontal_radius = std::max(
+        resolution * 1.25f, FARUtil::kLeafSize);
+    const float vertical_radius = FARUtil::vehicle_height + resolution;
+    if (semantic_obs_cloud_) {
+        for (const auto& sample : semantic_obs_cloud_->points) {
+            if (std::hypot(sample.x - point.x, sample.y - point.y) <=
+                    horizontal_radius &&
+                std::abs(sample.z - point.z) <= vertical_radius) {
+                return StaticNodeEvidence::STATIC_OCCUPIED;
+            }
+        }
+    }
+
+    return QueryStaticTreeEvidence(point);
 }
 
 void MapHandler::GetCollisionObsCloud(const PointCloudPtr& obsCloudOut) const {
@@ -726,7 +925,14 @@ void MapHandler::AdjustNodesHeight(const NodePtrStack& nodes) {
     if (nodes.empty()) return;
     for (const auto& node_ptr : nodes) {
         if (!node_ptr) continue;
-        if (!node_ptr->is_active || node_ptr->is_boundary || FARUtil::IsFreeNavNode(node_ptr) || FARUtil::IsOutsideGoal(node_ptr) || !FARUtil::IsPointInLocalRange(node_ptr->position, true)) {
+        const float dx = node_ptr->position.x - robot_pos_cache_.x;
+        const float dy = node_ptr->position.y - robot_pos_cache_.y;
+        const bool in_semantic_square =
+            std::abs(dx) <= semantic_params_.local_window_radius &&
+            std::abs(dy) <= semantic_params_.local_window_radius &&
+            FARUtil::IsPointInToleratedHeight(
+                node_ptr->position, FARUtil::kTolerZ + FARUtil::kHeightVoxel);
+        if (!node_ptr->is_active || node_ptr->is_boundary || FARUtil::IsFreeNavNode(node_ptr) || FARUtil::IsOutsideGoal(node_ptr) || !in_semantic_square) {
             continue;
         } 
         bool is_match = false;

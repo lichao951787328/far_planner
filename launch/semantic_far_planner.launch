@@ -11,10 +11,10 @@
   <arg name="childFrameId" default="base_link"/>
   <arg name="publishTf" default="false"/>
   <arg name="requireMatchingPoseFrame" default="false"/>
-  <!-- FAR processes its callback queue in the 2.5 Hz main loop. Keep the
-       odometry watchdog safely above two 0.4 s loop periods. -->
-  <arg name="odomTimeout" default="1.0"/>
-  <arg name="semanticMapTimeout" default="1.0"/>
+  <!-- Freshness is checked only by the main loop after spinOnce().  Three
+       seconds also tolerates the currently observed slow graph-update cycle. -->
+  <arg name="odomTimeout" default="3.0"/>
+  <arg name="semanticMapTimeout" default="3.0"/>
   <arg name="launchRviz" default="false"/>
   <arg name="rvizConfig" default="navigation_demo"/>
   <arg name="launchRobotModel" default="true"/>

@@ -14,7 +14,10 @@ void GraphMsger::Init(const ros::NodeHandle& nh, const GraphMsgerParams& params)
     nh_ = nh;
     gm_params_ = params;
     graph_pub_ = nh_.advertise<visibility_graph_msg::Graph>("robot_vgraph", 5);
-    graph_sub_ = nh_.subscribe("decoded_vgraph", 5, &GraphMsger::GraphCallBack, this);
+    // The semantic planner always rebuilds its graph from the current semantic
+    // map.  Importing a decoded legacy graph would reintroduce nodes with no
+    // static/dynamic provenance, so this runtime intentionally has no
+    // /decoded_vgraph subscription.
 
     global_graph_.clear();
     nodes_cloud_ptr_    = PointCloudPtr(new pcl::PointCloud<PCLPoint>());

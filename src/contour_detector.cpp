@@ -15,7 +15,8 @@ void ContourDetector::Init(const ContourDetectParams& params) {
     /* Allocate Pointcloud pointer memory */
     new_corners_cloud_   = PointCloudPtr(new pcl::PointCloud<PCLPoint>());
     // Init projection cv Mat
-    MAT_SIZE = std::ceil(cd_params_.sensor_range * 2.0f / cd_params_.voxel_dim);
+    MAT_SIZE = std::ceil(cd_params_.sensor_range * 2.0f /
+                         cd_params_.contour_grid_resolution);
     if (MAT_SIZE % 2 == 0) MAT_SIZE ++;
     MAT_RESIZE = MAT_SIZE * (int)cd_params_.kRatio;
     CMAT = MAT_SIZE / 2, CMAT_RESIZE = MAT_RESIZE / 2;
@@ -24,8 +25,10 @@ void ContourDetector::Init(const ContourDetectParams& params) {
     odom_node_ptr_ = NULL;
     refined_contours_.clear(), refined_hierarchy_.clear();
     DIST_LIMIT = cd_params_.kRatio * 1.5f;
-    ALIGN_ANGLE_COS = cos(FARUtil::kAcceptAlign / 2.0f);
-    VOXEL_DIM_INV = 1.0f / cd_params_.voxel_dim;
+    ALIGN_ANGLE_COS = std::cos(
+        std::max(0.0f, cd_params_.collinear_angle_deg) *
+        static_cast<float>(M_PI) / 180.0f);
+    VOXEL_DIM_INV = 1.0f / cd_params_.contour_grid_resolution;
 }
 
 // 用 odom_node_ptr 更新当前参考中心
@@ -40,14 +43,16 @@ void ContourDetector::Init(const ContourDetectParams& params) {
 void ContourDetector::BuildTerrainImgAndExtractContour(const NavNodePtr& odom_node_ptr,
                                                        const PointCloudPtr& surround_cloud,
                                                        std::vector<PointStack>& realworl_contour,
-                                                       const bool& is_verified_occupied) {
+                                                       const bool& is_verified_occupied,
+                                                       const float simplify_ratio) {
     CVPointStack cv_corners;
     PointStack corner_vec;
     this->UpdateOdom(odom_node_ptr);
     this->ResetImgMat(img_mat_);
     this->UpdateImgMatWithCloud(surround_cloud, img_mat_,
                                 is_verified_occupied);
-    this->ExtractContourFromImg(img_mat_, refined_contours_, realworl_contour);
+    this->ExtractContourFromImg(img_mat_, refined_contours_, realworl_contour,
+                                std::max(1.0f, simplify_ratio));
 }
 
 void ContourDetector::UpdateImgMatWithCloud(
@@ -92,11 +97,13 @@ void ContourDetector::ResizeAndBlurImg(const cv::Mat& img, cv::Mat& Rimg) {
 
 void ContourDetector::ExtractContourFromImg(const cv::Mat& img,
                                             std::vector<CVPointStack>& img_contours, 
-                                            std::vector<PointStack>& realworld_contour)
+                                            std::vector<PointStack>& realworld_contour,
+                                            const float simplify_ratio)
 {
     cv::Mat Rimg;
     this->ResizeAndBlurImg(img, Rimg);
-    this->ExtractRefinedContours(Rimg, img_contours);
+    this->ExtractRefinedContours(Rimg, img_contours,
+                                 DIST_LIMIT * simplify_ratio);
     this->ConvertContoursToRealWorld(img_contours, realworld_contour);
 }
 
@@ -108,6 +115,9 @@ void ContourDetector::ConvertContoursToRealWorld(const std::vector<CVPointStack>
     for (std::size_t i=0; i<C_N; i++) {
         const CVPointStack cv_contour = ori_contours[i];
         this->ConvertCVToPoint3DVector(cv_contour, realWorld_contours[i], true);
+        SimplifyClosedContourCollinearVertices(
+            realWorld_contours[i], cd_params_.collinear_tolerance,
+            cd_params_.collinear_angle_deg);
     }
 }
 
@@ -134,7 +144,8 @@ void ContourDetector::ShowCornerImage(const cv::Mat& img_mat,
 }
 
 void ContourDetector::ExtractRefinedContours(const cv::Mat& imgIn,
-                                            std::vector<CVPointStack>& refined_contours) 
+                                            std::vector<CVPointStack>& refined_contours,
+                                            const float distance_limit)
 { 
 
     std::vector<std::vector<cv::Point2i>> raw_contours;
@@ -146,13 +157,16 @@ void ContourDetector::ExtractRefinedContours(const cv::Mat& imgIn,
     refined_contours.resize(raw_contours.size());
     for (std::size_t i=0; i<raw_contours.size(); i++) {
         // using Ramer–Douglas–Peucker algorithm url: https://en.wikipedia.org/wiki/Ramer%E2%80%93Douglas%E2%80%93Peucker_algorithm
-        cv::approxPolyDP(raw_contours[i], refined_contours[i], DIST_LIMIT, true);
+        cv::approxPolyDP(raw_contours[i], refined_contours[i],
+                         distance_limit, true);
     }
     this->TopoFilterContours(refined_contours); 
-    this->AdjecentDistanceFilter(refined_contours);
+    this->AdjecentDistanceFilter(refined_contours, distance_limit);
 }
 
-void ContourDetector::AdjecentDistanceFilter(std::vector<CVPointStack>& contoursInOut) {
+void ContourDetector::AdjecentDistanceFilter(
+    std::vector<CVPointStack>& contoursInOut,
+    const float distance_limit) {
     /* filter out vertices that are overlapped with neighbor */
     std::unordered_set<int> remove_idxs;
     for (std::size_t i=0; i<contoursInOut.size(); i++) { 
@@ -161,7 +175,9 @@ void ContourDetector::AdjecentDistanceFilter(std::vector<CVPointStack>& contours
         std::size_t refined_idx = 0;
         for (std::size_t j=0; j<c_size; j++) {
             cv::Point2f p = c[j]; 
-            if (refined_idx < 1 || FARUtil::PixelDistance(contoursInOut[i][refined_idx-1], p) > DIST_LIMIT) {
+            if (refined_idx < 1 ||
+                FARUtil::PixelDistance(contoursInOut[i][refined_idx-1], p) >
+                    distance_limit) {
                 /** Reduce wall nodes */
                 RemoveWallConnection(contoursInOut[i], p, refined_idx);
                 contoursInOut[i][refined_idx] = p;
@@ -171,7 +187,9 @@ void ContourDetector::AdjecentDistanceFilter(std::vector<CVPointStack>& contours
         /** Reduce wall nodes */
         RemoveWallConnection(contoursInOut[i], contoursInOut[i][0], refined_idx);
         contoursInOut[i].resize(refined_idx);
-        if (refined_idx > 1 && FARUtil::PixelDistance(contoursInOut[i].front(), contoursInOut[i].back()) < DIST_LIMIT) {
+        if (refined_idx > 1 &&
+            FARUtil::PixelDistance(contoursInOut[i].front(),
+                                   contoursInOut[i].back()) < distance_limit) {
             contoursInOut[i].pop_back();
         }
         if (contoursInOut[i].size() < 3) remove_idxs.insert(i);
@@ -206,5 +224,3 @@ void ContourDetector::TopoFilterContours(std::vector<CVPointStack>& contoursInOu
         }
     }
 }
-
-

@@ -36,10 +36,8 @@ private:
     void CreateDecodedNavNode(const visibility_graph_msg::Node& vnode, NavNodePtr& node_ptr);
 
     inline bool IsEncodeType(const NavNodePtr& node_ptr) {
-        if (node_ptr->is_odom || !node_ptr->is_finalized || FARUtil::IsOutsideGoal(node_ptr)) {
-            return false;
-        }
-        return true;
+        return node_ptr && node_ptr->source == GraphNodeSource::STATIC_GLOBAL &&
+               node_ptr->is_finalized && !FARUtil::IsOutsideGoal(node_ptr);
     }
 
     inline bool IsMismatchFreeNode(const NavNodePtr& nearest_ptr, const visibility_graph_msg::Node& vnode) {

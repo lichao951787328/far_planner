@@ -67,6 +67,10 @@
         <param name="source_map_topic" value="$(arg source_map_topic)"/>
         <param name="odom_topic" value="/far_test/odom_world"/>
         <param name="world_frame" value="world"/>
+        <!-- Production odom/map watchdogs are 3.0 s.  Give the harness one
+             extra second so it observes the stop publication instead of
+             racing the watchdog at the same deadline. -->
+        <param name="stream_idle_timeout" value="4.0"/>
         <param name="enable_goal_test" value="true"/>
         <param name="goal_x" value="$(arg goal_x)"/>
         <param name="goal_y" value="$(arg goal_y)"/>

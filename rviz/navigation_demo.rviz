@@ -295,8 +295,17 @@ Visualization Manager:
           Value: true
         - Class: rviz/MarkerArray
           Enabled: true
+          Marker Topic: /viz_static_global_graph
+          Name: Persistent Global Static Graph
+          Namespaces:
+            static_global_edges: true
+            static_global_nodes: true
+          Queue Size: 20
+          Value: true
+        - Class: rviz/MarkerArray
+          Enabled: true
           Marker Topic: /viz_graph_topic
-          Name: Visibility Graph
+          Name: Current Merged Graph
           Namespaces:
             angle_direct: false
             freespace_vertex: false
@@ -305,7 +314,7 @@ Visualization Manager:
             global_vertex: true
             global_vgraph: true
             localrange_vertex: false
-            odom_edge: false
+            odom_edge: true
             polygon_edge: true
             trajectory_vertex: true
             updating_vertex: false

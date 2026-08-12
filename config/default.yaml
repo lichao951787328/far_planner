@@ -1,7 +1,9 @@
 # Dynamic Planner Default Params
 main_run_freq                           : 2.5
-# 表示体素大小，也就是点云降采样/体素滤波时的网格尺寸。
-voxel_dim                               : 0.15  # Unit: meter
+# FAR轮廓投影画布的基础栅格分辨率；不等同于上游OctoMap分辨率。
+contour_grid_resolution                 : 0.4   # Unit: meter; independent semantic contour grid
+enable_goal_recording                   : true
+goal_record_file                        : ""    # Empty: <far_planner package>/logs/goal_selections.csv
 # 表示机器人的几何尺寸/半径（这里更接近机器人占用半径或安全半径）。
 robot_dim                               : 0.6   # Unit: meter
 # 计算哪些点被认为是可通行/可碰撞的高度范围
@@ -9,7 +11,7 @@ robot_dim                               : 0.6   # Unit: meter
 # Go2 base_link (about 0.291 m) minus the occupied floor-voxel center
 # (about -0.2 m) is 0.491 m. A rounded 0.5 m also covers its body/sensor height.
 vehicle_height                          : 0.5   # Unit: meter
-sensor_range                            : 30.0  # Unit: meter
+sensor_range                            : 20.0  # Contour canvas half-extent: 20 m in +/-X and +/-Y
 # 主要用于局部地形/周围环境分析的范围
 terrain_range                           : 15.0  # Unit: meter
 # 局部规划器关注的范围。这个值越大，局部规划会更“看远一点”。
@@ -32,8 +34,10 @@ world_frame                             : map
 semantic_map_topic                      : octomap_full
 # Safety watchdogs use message receipt wall-time, so they remain effective
 # even when simulated ROS time is paused.
-odom_timeout                            : 1.0   # seconds; > 2x the 0.4 s FAR main-loop period
-semantic_map_timeout                    : 1.0   # seconds; <= 0 disables the check
+odom_timeout                            : 3.0   # seconds; tolerates a slow graph-update cycle
+semantic_map_timeout                    : 3.0   # seconds; <= 0 disables the check
+# Rebuild only the transient robot/start edges after this much planar motion.
+odom_connection_update_distance         : 0.2   # Unit: meter
 
 # Graph Messager
 GraphMsger/robot_id                     : 1  # graph from robot id "0" is extracted from files
@@ -41,10 +45,10 @@ GraphMsger/robot_id                     : 1  # graph from robot id "0" is extrac
 # Map Handler Params
 # 表示地面/楼层的高度基准。这个值会影响点云被怎么划分到地面层和障碍层。地面应该空出多高来处理环境.
 MapHandler/floor_height                 : 3.0     # Unit: meter
-MapHandler/semantic_local_window_radius : 15.0    # Local semantic query half-extent
+MapHandler/semantic_local_window_radius : 20.0    # 40 m x 40 m robot-centred semantic query window
 MapHandler/terrain_search_radius        : 0.8     # XY fallback for terrain height
 MapHandler/terrain_neighbor_radius      : 1.0     # XY terrain-support radius (2 m diameter)
-MapHandler/local_planner_radius         : 5.0     # Radius of the local trajectory-planner collision map
+MapHandler/local_planner_radius         : 10.0    # 10 m radius: about 20 m x 20 m local collision-map coverage
 MapHandler/local_planner_resolution     : 0.2     # Dense XY sampling resolution for occupied octree voxels
 MapHandler/local_planner_obstacle_intensity: 200.0 # Hard-obstacle value for static and dynamic layers
 # The current planner intentionally uses binary top-1 semantics. The probability
@@ -76,6 +80,8 @@ Util/angle_noise                        : 15.0 # Unit: degree
 # 也就是“只有当夹角小于这个值时，才认为这两个几何方向是匹配的”。
 # 这里设成 4°，说明对齐要求比较严格。
 Util/accept_max_align_angle             : 4.0  # Unit: degree
+Util/robot_collision_clearance          : 0.45 # Unit: meter; independent of contour raster resolution
+Util/visibility_edge_projection         : 0.15 # Unit: meter; ordinary visibility-edge endpoint offset
 # 作用：对障碍区域做膨胀/扩张。
 # 例如设成 1，表示把检测到的障碍边缘稍微外扩一圈，避免机器人把障碍边缘附近当成可通行。
 # 数值越大，越保守。
@@ -120,6 +126,19 @@ Graph/clear_dumper_thred                : 4
 Graph/node_finalize_thred               : 6
 # 节点位置和表面方向滤波缓存池大小（滑动窗口长度），RANSAC 从这批样本里做稳健估计。值大更平滑更抗噪，但对突变反应慢；值小更跟手，但易抖动。
 Graph/filter_pool_size                  : 12
+Graph/static_update_radius              : 28.5    # Covers the corners of the +/-20 m square semantic window
+Graph/static_stitch_radius              : 28.5    # Keep/reconnect visible static corners across the complete local square
+Graph/dynamic_position_alpha            : 0.65    # Current-frame weight for matched dynamic routing vertices
+Graph/static_confirm_frames             : 3       # Positive semantic observations before persistence
+Graph/static_remove_frames              : 3       # Consecutive local misses before true static deletion
+Graph/static_topology_remove_frames     : 5       # FAR-style recoverable contradictions; replacement also requires RANSAC-stable successors, a validated contour route and no static cut
+
+# Same-current-contour edges search outward for the first fully collision-free
+# robot-centre segment. These values do not alter ordinary visibility edges.
+ContourGraph/projection_min             : 0.15
+ContourGraph/projection_step            : 0.075
+ContourGraph/projection_max             : 0.60
+ContourGraph/boundary_guard             : 0.40 # 2 contour cells; cropped raster vertices cannot become wall ends
 
 # Corner Detector Params  控制“把障碍点云投影成图像后怎么提轮廓”。
 # 图像放大倍数（轮廓提取前先 resize）。
@@ -130,6 +149,9 @@ CDetector/resize_ratio                  : 3.0
 # 大一些：更保守，弱噪声会被滤掉，但细小障碍可能消失；
 # 小一些：更敏感，小障碍更容易保留，但噪声也更容易进来
 CDetector/filter_count_value            : 3
+CDetector/dynamic_simplify_ratio         : 2.0     # Stronger RDP/min-spacing filter for unstable dynamic contours
+CDetector/collinear_tolerance            : 0.20    # World-space max deviation for removing a straight-wall middle vertex
+CDetector/collinear_angle_deg            : 8.0     # Preserve real corners; collapse only near-180-degree wall samples
 # 是否把中间生成的障碍图保存到磁盘
 # true：便于调试（能回看每帧图像），但会有 I/O 开销；
 # false：不落盘，运行更轻。
@@ -152,7 +174,9 @@ GPlanner/free_counter_thred             : 7
 # 表示要确认“已经到达目标”，需要多少次投票或判断满足。
 # 越大，越不容易因为一次偶然判断就误判为到达。
 GPlanner/reach_goal_vote_size           : 3
+# Goal 与原 FAR Planner 一致：对当前可搜索图中的全部障碍轮廓节点逐一验证连边。
+# 本版本不会把历史路径点加入搜索图，因此这些点也不会成为 Goal 候选。
 # 路径惯性/持续性阈值。
 # 用来控制“是否继续沿着之前的路径方向走”，避免因为短暂抖动而频繁改变方向。
 # 越大，越倾向保持原来的路径方向，路径更平滑；越小，越容易快速切换。
-GPlanner/path_momentum_thred            : 3
+GPlanner/path_momentum_thred            : 0       # Always search the current graph; never reuse an old path

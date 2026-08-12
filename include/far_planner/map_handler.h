@@ -122,6 +122,10 @@ public:
                 avgH += temp;
             }
             avgH /= (float)pIdxK.size();
+            // Floating-point accumulation can place the mean a few ULPs
+            // outside the sampled extrema when all terrain heights are equal.
+            // Preserve the public min <= average <= max invariant exactly.
+            avgH = std::max(minH, std::min(avgH, maxH));
             is_matched = true;
             return avgH;
         }
@@ -139,6 +143,22 @@ public:
      *  incremental changed-obstacle pipeline.
      */
     void GetSurroundObsCloud(const PointCloudPtr& obsCloudOut);
+    /** Static obstacle voxels in the current semantic local window. */
+    void GetCurrentStaticObsCloud(const PointCloudPtr& obsCloudOut) const;
+    /**
+     * Static obstacle collision memory accumulated from accepted semantic
+     * snapshots. Cells are quantised with FAR's contour grid resolution and
+     * are removed only when the newest snapshot supplies explicit-free
+     * evidence at that cell. This is the static geometry authority for Graph
+     * edge validation; it is deliberately independent of navigation corners.
+     */
+    void GetPersistentStaticObsCloud(const PointCloudPtr& obsCloudOut) const;
+    /**
+     * Evidence used for persistent static-node deletion. UNKNOWN includes
+     * unobserved and occluded space; only EXPLICIT_FREE may accumulate a
+     * deletion vote.
+     */
+    StaticNodeEvidence QueryStaticNodeEvidence(const Point3D& point) const;
     /** Current static obstacles plus dynamic obstacles in the latest local snapshot. */
     void GetCollisionObsCloud(const PointCloudPtr& obsCloudOut) const;
     /** Dynamic obstacles currently reported occupied by the semantic octree. */
@@ -190,6 +210,8 @@ public:
 
 private:
     void RefreshLocalTerrainSupportOctomap();
+    void UpdatePersistentStaticObstacleLayer();
+    StaticNodeEvidence QueryStaticTreeEvidence(const Point3D& point) const;
     void BuildLocalPlannerObstacleCloud(const PointCloudPtr& source,
                                         const PointCloudPtr& cloudOut) const;
 
@@ -203,6 +225,7 @@ private:
     std::vector<SemanticClassGroup> dynamic_obstacle_groups_;
     static std::shared_ptr<octomap::OcTree> local_terrain_support_octree_;
     PointCloudPtr semantic_obs_cloud_;
+    PointCloudPtr persistent_static_obs_cloud_;
     PointCloudPtr semantic_terrain_support_cloud_;
     PointCloudPtr current_dynamic_obs_cloud_;
     PointCloudPtr effective_dynamic_obs_cloud_;
@@ -212,6 +235,7 @@ private:
     PointCloudPtr changed_obs_cloud_;
     std::unordered_map<uint64_t, PCLPoint> previous_local_obs_voxels_;
     std::unordered_map<uint64_t, PCLPoint> previous_local_dynamic_voxels_;
+    std::unordered_map<uint64_t, PCLPoint> persistent_static_obs_voxels_;
     bool has_semantic_map_ = false;
 
 

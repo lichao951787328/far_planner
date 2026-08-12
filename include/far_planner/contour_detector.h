@@ -7,13 +7,69 @@
 struct ContourDetectParams {
     ContourDetectParams() = default;
     float sensor_range;
-    float voxel_dim;
+    float contour_grid_resolution;
     float kRatio;
     int   kThredValue;
     int   kBlurSize;
+    float dynamic_simplify_ratio = 2.0f;
+    float collinear_tolerance = 0.20f;
+    float collinear_angle_deg = 8.0f;
     bool  is_save_img;
     std::string img_path;
 };
+
+/** Remove B only when its closed-contour neighbours A-B-C describe the same
+ * straight wall in world coordinates. This is independent of image resize
+ * and prevents voxel stair-steps from becoming persistent graph corners. */
+inline void SimplifyClosedContourCollinearVertices(
+    PointStack& contour, const float distance_tolerance,
+    const float angle_tolerance_deg) {
+    if (contour.size() <= 3) return;
+    const float tolerance = std::max(0.0f, distance_tolerance);
+    const float angle_rad = std::max(0.0f, angle_tolerance_deg) *
+                            static_cast<float>(M_PI) / 180.0f;
+    const float min_straight_cos = std::cos(angle_rad);
+    bool changed = true;
+    while (changed && contour.size() > 3) {
+        changed = false;
+        const std::size_t count = contour.size();
+        for (std::size_t index = 0; index < count; ++index) {
+            const Point3D& previous = contour[(index + count - 1) % count];
+            const Point3D& current = contour[index];
+            const Point3D& next = contour[(index + 1) % count];
+            const Point3D first = previous - current;
+            const Point3D second = next - current;
+            const float first_length = first.norm_flat();
+            const float second_length = second.norm_flat();
+            if (first_length <= 1e-6f || second_length <= 1e-6f) {
+                contour.erase(contour.begin() + index);
+                changed = true;
+                break;
+            }
+            const float straight_cos =
+                -(first.x * second.x + first.y * second.y) /
+                (first_length * second_length);
+            const float chord_x = next.x - previous.x;
+            const float chord_y = next.y - previous.y;
+            const float chord_squared =
+                chord_x * chord_x + chord_y * chord_y;
+            float ratio = chord_squared <= 1e-12f ? 0.0f :
+                ((current.x - previous.x) * chord_x +
+                 (current.y - previous.y) * chord_y) / chord_squared;
+            ratio = std::max(0.0f, std::min(1.0f, ratio));
+            const float projection_x = previous.x + ratio * chord_x;
+            const float projection_y = previous.y + ratio * chord_y;
+            const float chord_distance = std::hypot(
+                current.x - projection_x, current.y - projection_y);
+            if (straight_cos >= min_straight_cos &&
+                chord_distance <= tolerance) {
+                contour.erase(contour.begin() + index);
+                changed = true;
+                break;
+            }
+        }
+    }
+}
 
 class ContourDetector {
 private:
@@ -40,10 +96,12 @@ private:
 
     void ExtractContourFromImg(const cv::Mat& img,
                                std::vector<CVPointStack>& img_contours,
-                               std::vector<PointStack>& realworld_contour);
+                               std::vector<PointStack>& realworld_contour,
+                               float simplify_ratio);
 
     void ExtractRefinedContours(const cv::Mat& imgIn,
-                                std::vector<CVPointStack>& refined_contours);
+                                std::vector<CVPointStack>& refined_contours,
+                                float distance_limit);
 
     void ResizeAndBlurImg(const cv::Mat& img, cv::Mat& Rimg);
 
@@ -52,7 +110,8 @@ private:
 
     void TopoFilterContours(std::vector<CVPointStack>& contoursInOut);
 
-    void AdjecentDistanceFilter(std::vector<CVPointStack>& contoursInOut);
+    void AdjecentDistanceFilter(std::vector<CVPointStack>& contoursInOut,
+                                float distance_limit);
 
     /* inline functions */
     inline void UpdateOdom(const NavNodePtr& odom_node_ptr) {
@@ -160,8 +219,8 @@ private:
         Point3D p;
         const int c_idx = is_resized_img ? CMAT_RESIZE : CMAT;
         const float ratio = is_resized_img ? cd_params_.kRatio : 1.0f;
-        p.x = (cv_p.y - c_idx) * cd_params_.voxel_dim / ratio + c_pos.x;
-        p.y = (cv_p.x - c_idx) * cd_params_.voxel_dim / ratio + c_pos.y;
+        p.x = (cv_p.y - c_idx) * cd_params_.contour_grid_resolution / ratio + c_pos.x;
+        p.y = (cv_p.x - c_idx) * cd_params_.contour_grid_resolution / ratio + c_pos.y;
         p.z = odom_pos_.z;
         return p;
     }
@@ -235,7 +294,8 @@ public:
     void BuildTerrainImgAndExtractContour(const NavNodePtr& odom_node_ptr, 
                                           const PointCloudPtr& surround_cloud,
                                           std::vector<PointStack>& realworl_contour,
-                                          const bool& is_verified_occupied = false);
+                                          const bool& is_verified_occupied = false,
+                                          float simplify_ratio = 1.0f);
 
     /**
      * Show Corners on Pointcloud projection image

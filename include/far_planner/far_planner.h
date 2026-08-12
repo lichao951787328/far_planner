@@ -10,12 +10,16 @@
 #include "planner_visualizer.h"
 #include "scan_handler.h"
 #include "graph_msger.h"
+#include "waypoint_projection_policy.h"
+
+#include <cstdint>
+#include <fstream>
 
 struct FARMasterParams {
     FARMasterParams() = default;
     float robot_dim; 
     float vehicle_height;
-    float voxel_dim;
+    float contour_grid_resolution;
     float sensor_range;
     float terrain_range;
     float local_planner_range;
@@ -30,6 +34,9 @@ struct FARMasterParams {
     bool  is_attempt_autoswitch;
     float odom_timeout;
     float semantic_map_timeout;
+    float odom_connection_update_distance;
+    bool enable_goal_recording;
+    std::string goal_record_file;
     std::string world_frame;
     std::string semantic_map_topic;
 };
@@ -78,9 +85,25 @@ private:
     // A semantic snapshot has changed the obstacle/terrain inputs but its
     // contour and visibility-graph update has not completed yet.
     bool semantic_graph_dirty_ = false;
+    // The ROS timer only records demand.  Planning, freshness checks and stop
+    // publication are serialized by Loop() after spinOnce() has drained the
+    // subscription callbacks for that iteration.
+    bool planning_requested_ = false;
+    // Odom/start visibility edges are a query layer, not obstacle topology.
+    // They can therefore be refreshed without rebuilding contours and all
+    // obstacle-obstacle edges.
+    bool odom_connections_dirty_ = true;
+    bool has_odom_connection_position_ = false;
+    Point3D last_odom_connection_position_;
     bool timeout_stop_active_ = false;
     ros::WallTime last_odom_receipt_;
     ros::WallTime last_semantic_map_receipt_;
+    ros::Time last_odom_stamp_;
+    ros::Time last_semantic_map_stamp_;
+    std::ofstream goal_record_stream_;
+    std::uint64_t goal_record_sequence_ = 0;
+    std::uint64_t goal_record_session_sequence_ = 0;
+    std::string goal_record_session_id_;
 
     PointCloudPtr new_vertices_ptr_;
     PointCloudPtr temp_obs_ptr_;
@@ -90,6 +113,8 @@ private:
     PointCloudPtr terrain_height_ptr_;
     PointCloudPtr dyremove_before_obs_ptr_;
     PointCloudPtr collision_obs_ptr_;
+    PointCloudPtr current_static_obs_ptr_;
+    PointCloudPtr persistent_static_obs_ptr_;
     PointCloudPtr effective_dynamic_obs_ptr_;
     PointCloudPtr dynamic_added_ptr_;
     PointCloudPtr dynamic_removed_ptr_;
@@ -108,7 +133,8 @@ private:
     NodePtrStack clear_nodes_;
 
     CTNodeStack new_ctnodes_;
-    std::vector<PointStack> realworld_contour_;
+    std::vector<PointStack> static_contours_;
+    std::vector<PointStack> dynamic_contours_;
 
     tf::TransformListener* tf_listener_;
 
@@ -139,11 +165,24 @@ private:
     void LocalBoundaryHandler(const std::vector<PointPair>& local_boundary);
 
     void PlanningCallBack(const ros::TimerEvent& event);
+    void ExecutePlanningCycle();
+    void InitializeGoalRecorder();
+    void RecordGoalSelection(const geometry_msgs::PointStamped& route_goal,
+                             const Point3D& world_goal);
+    void ApplyWorldGoal(const Point3D& goal);
     
     void PrcocessCloud(const sensor_msgs::PointCloud2ConstPtr& pc,
                        const PointCloudPtr& cloudOut);
 
     Point3D ProjectNavWaypoint(const NavNodePtr& nav_node_ptr, const NavNodePtr& last_point_ptr);
+
+    // Restore FAR's free-side contour waypoint extension while validating
+    // every candidate from near to far against the current semantic layers.
+    Point3D ProjectContourWaypointProgressively(
+        const NavNodePtr& nav_node_ptr, const Point3D& safe_fallback);
+
+    EdgeRejectReason ValidateProjectedWaypoint(
+        const Point3D& candidate) const;
 
     /* Callback Functions */
     void OdomCallBack(const nav_msgs::OdometryConstPtr& msg);
@@ -185,7 +224,9 @@ private:
             std::cout<< "\033[1;33m **************** DYNAMIC ENV PLANNING **************** \033[0m\n" << std::endl;
         }
         std::cout<<"\n"<<std::endl;
-        if (!PreconditionCheck()) return;
+        // This callback is display-only. Freshness and stop ownership remain
+        // exclusively in Loop() after spinOnce().
+        if (!is_cloud_init_ || !is_odom_init_) return;
         printf("\033[A"), printf("\033[A"), printf("\033[2K");
         if (is_graph_init_) {
             std::cout<< "\033[1;32m V-Graph Initialized \033[0m\n" << std::endl;
@@ -225,7 +266,8 @@ private:
         clear_nodes_.clear();
         new_ctnodes_.clear();
         near_nav_graph_.clear();
-        realworld_contour_.clear();
+        static_contours_.clear();
+        dynamic_contours_.clear();
     }
 
     inline void ResetInternalValues() {
@@ -233,6 +275,9 @@ private:
         is_planner_running_ = false;  
         is_graph_init_      = false; 
         semantic_graph_dirty_ = false;
+        planning_requested_ = false;
+        odom_connections_dirty_ = true;
+        has_odom_connection_position_ = false;
         ClearTempMemory();
     }
 };

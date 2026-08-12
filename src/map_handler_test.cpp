@@ -223,7 +223,7 @@ private:
         params_.semantic_params.local_planner_radius = 5.0f;
         params_.semantic_params.local_planner_resolution = 0.2f;
         params_.semantic_params.local_planner_obstacle_intensity = 200.0f;
-        FARUtil::kLeafSize = 0.5f;
+        FARUtil::kLeafSize = 0.2f;
         FARUtil::vehicle_height = 0.5f;
         FARUtil::kMatchDist = 1.0f;
         FARUtil::kTolerZ = params_.floor_height;
@@ -275,6 +275,286 @@ private:
 
         RunPillarConnectivityTests();
         RunVerifiedSemanticContourTests();
+        RunContourFollowEdgeTests();
+    }
+
+    void RunContourFollowEdgeTests() {
+        const float original_leaf = FARUtil::kLeafSize;
+        const float original_clearance = FARUtil::kNavClearDist;
+        const float original_sensor_range = FARUtil::kSensorRange;
+        const Point3D original_odom = FARUtil::odom_pos;
+        const Point3D original_free_odom = FARUtil::free_odom_p;
+        FARUtil::kLeafSize = 0.2f;
+        FARUtil::kNavClearDist = 0.45f;
+        FARUtil::kSensorRange = 20.0f;
+        FARUtil::odom_pos = Point3D(1.0f, 2.0f, 0.5f);
+        FARUtil::free_odom_p = FARUtil::odom_pos;
+
+        ContourGraph graph;
+        ContourGraphParams params;
+        params.kPillarPerimeter = 0.4f;
+        params.contour_projection_min = 0.15f;
+        params.contour_projection_step = 0.075f;
+        params.contour_projection_max = 0.60f;
+        graph.Init(params);
+
+        // Regression for goal selection 16 captured at 20:10:26 on
+        // 2026-08-11. The 1.432 m odom-to-goal edge used to inherit the
+        // obstacle-corner endpoint exclusion, leaving only one sampled centre
+        // and allowing a wall close to the goal to be missed.
+        NavNodePtr captured_start(new NavNode());
+        captured_start->id = 9001;
+        captured_start->is_odom = true;
+        captured_start->position = Point3D(
+            36.5611f, -45.4854f, 0.2710f);
+        NavNodePtr captured_goal(new NavNode());
+        captured_goal->id = 9002;
+        captured_goal->is_goal = true;
+        captured_goal->position = Point3D(
+            37.7938f, -46.2144f, 0.0f);
+        FARUtil::odom_pos = captured_start->position;
+        FARUtil::free_odom_p = captured_start->position;
+
+        const Point3D captured_delta =
+            captured_goal->position - captured_start->position;
+        const float captured_length = captured_delta.norm_flat();
+        const Point3D captured_direction = captured_delta / captured_length;
+        const Point3D captured_normal(
+            -captured_direction.y, captured_direction.x, 0.0f);
+        PointCloudPtr captured_endpoint_wall(new PointCloud());
+        for (int index = -3; index <= 3; ++index) {
+            const Point3D wall_point =
+                captured_start->position + captured_direction * 1.30f +
+                captured_normal * (0.10f * static_cast<float>(index));
+            PCLPoint point;
+            point.x = wall_point.x;
+            point.y = wall_point.y;
+            point.z = (captured_start->position.z +
+                       captured_goal->position.z) * 0.5f;
+            point.intensity = 1.0f;
+            captured_endpoint_wall->push_back(point);
+        }
+        captured_endpoint_wall->width = captured_endpoint_wall->size();
+        captured_endpoint_wall->height = 1;
+        captured_endpoint_wall->is_dense = true;
+        PointCloudPtr empty_terminal_cloud(new PointCloud());
+        ContourGraph::SetLocalCollisionCloud(
+            captured_endpoint_wall, empty_terminal_cloud);
+        const EdgeValidationResult captured_static_block =
+            ContourGraph::ValidateDirectOdomGoalEdgeWithRoute(
+                captured_start, captured_goal, true);
+        reporter_.Check(
+            !captured_static_block.valid &&
+                captured_static_block.reason ==
+                    EdgeRejectReason::STATIC_CLOUD_BLOCKED,
+            "Strict odom-goal validation detects a wall in the old short-edge endpoint blind zone");
+
+        ContourGraph::SetLocalCollisionCloud(
+            empty_terminal_cloud, captured_endpoint_wall);
+        const EdgeValidationResult captured_dynamic_block =
+            ContourGraph::ValidateDirectOdomGoalEdgeWithRoute(
+                captured_start, captured_goal, true);
+        reporter_.Check(
+            !captured_dynamic_block.valid &&
+                captured_dynamic_block.dynamic_blocked &&
+                captured_dynamic_block.reason ==
+                    EdgeRejectReason::DYNAMIC_CLOUD_BLOCKED,
+            "Strict odom-goal validation immediately rejects a dynamic endpoint blocker");
+
+        ContourGraph::SetLocalCollisionCloud(
+            empty_terminal_cloud, empty_terminal_cloud);
+        const EdgeValidationResult captured_clear =
+            ContourGraph::ValidateDirectOdomGoalEdgeWithRoute(
+                captured_start, captured_goal, true);
+        reporter_.Check(
+            captured_clear.valid &&
+                captured_clear.projection_distance == 0.0f &&
+                (captured_clear.route_start - captured_start->position)
+                        .norm_flat() < 1e-5f &&
+                (captured_clear.route_end - captured_goal->position)
+                        .norm_flat() < 1e-5f,
+            "A clear odom-goal edge keeps its exact robot-centre geometry without corner projection");
+
+        FARUtil::odom_pos = Point3D(1.0f, 2.0f, 0.5f);
+        FARUtil::free_odom_p = FARUtil::odom_pos;
+
+        PolygonPtr wall(new Polygon());
+        wall->N = 4;
+        wall->vertices = {
+            Point3D(0.0f, -0.20f, 0.5f),
+            Point3D(2.0f, -0.20f, 0.5f),
+            Point3D(2.0f,  0.25f, 0.5f),
+            Point3D(0.0f,  0.25f, 0.5f)};
+        wall->is_robot_inside = false;
+        wall->is_pillar = false;
+        wall->source = GraphNodeSource::STATIC_CANDIDATE;
+
+        const auto make_ct = [&wall](const Point3D& position) {
+            CTNodePtr ct(new CTNode());
+            ct->position = position;
+            ct->poly_ptr = wall;
+            ct->source = GraphNodeSource::STATIC_CANDIDATE;
+            ct->free_direct = NodeFreeDirect::CONVEX;
+            // Sum points into the obstacle (-Y); a CONVEX node therefore
+            // projects toward the robot/free side (+Y).
+            ct->surf_dirs = PointPair(Point3D(1.0f, -1.0f, 0.0f),
+                                      Point3D(-1.0f, -1.0f, 0.0f));
+            return ct;
+        };
+        CTNodePtr first_ct = make_ct(Point3D(0.0f, 0.25f, 0.5f));
+        CTNodePtr second_ct = make_ct(Point3D(2.0f, 0.25f, 0.5f));
+        first_ct->front = second_ct;
+        first_ct->back = second_ct;
+        second_ct->front = first_ct;
+        second_ct->back = first_ct;
+
+        const auto make_nav = [](const std::size_t id,
+                                 const CTNodePtr& ct) {
+            NavNodePtr node(new NavNode());
+            node->id = id;
+            node->position = ct->position;
+            node->surf_dirs = ct->surf_dirs;
+            node->free_direct = ct->free_direct;
+            node->source = GraphNodeSource::STATIC_GLOBAL;
+            node->is_odom = false;
+            node->is_goal = false;
+            node->is_boundary = false;
+            node->is_navpoint = false;
+            node->is_merged = false;
+            node->is_active = true;
+            node->ctnode = ct;
+            node->is_contour_match = true;
+            ct->is_global_match = true;
+            ct->nav_node_id = id;
+            return node;
+        };
+        NavNodePtr first = make_nav(1001, first_ct);
+        NavNodePtr second = make_nav(1002, second_ct);
+
+        const auto make_row = [](const float y) {
+            PointCloudPtr cloud(new PointCloud());
+            for (int index = 0; index <= 20; ++index) {
+                PCLPoint point;
+                point.x = index * 0.1f;
+                point.y = y;
+                point.z = 0.5f;
+                point.intensity = 1.0f;
+                cloud->push_back(point);
+            }
+            cloud->width = cloud->size();
+            cloud->height = 1;
+            cloud->is_dense = true;
+            return cloud;
+        };
+
+        PointCloudPtr static_wall = make_row(0.0f);
+        PointCloudPtr empty_dynamic(new PointCloud());
+        ContourGraph::SetLocalCollisionCloud(static_wall, empty_dynamic);
+        const EdgeValidationResult clear =
+            ContourGraph::ValidateContourFollowEdge(first, second);
+        reporter_.Check(
+            clear.valid &&
+                (clear.route_end - clear.route_start).norm_flat() > 1.9f,
+            "Adaptive contour validation accepts a free-side wall route");
+        reporter_.Check(
+            clear.valid && clear.projection_distance > 0.15f &&
+                clear.projection_distance <= 0.60f + 1e-4f &&
+                clear.route_start.y > first->position.y,
+            "A fixed 0.15 m offset grows until the 0.45 m corridor is clear");
+        reporter_.Check(
+            !ContourGraph::IsPoint3DConnectFreePolygon(
+                Point3D(1.0f, 1.0f, 0.5f),
+                Point3D(1.0f, -1.0f, 0.5f)),
+            "A strict ordinary visibility segment through the wall is rejected");
+
+        PointCloudPtr dynamic_block(new PointCloud());
+        PCLPoint blocker;
+        blocker.x = (clear.route_start.x + clear.route_end.x) * 0.5f;
+        blocker.y = (clear.route_start.y + clear.route_end.y) * 0.5f;
+        blocker.z = 0.5f;
+        blocker.intensity = 1.0f;
+        dynamic_block->push_back(blocker);
+        dynamic_block->width = 1;
+        dynamic_block->height = 1;
+        dynamic_block->is_dense = true;
+        ContourGraph::SetLocalCollisionCloud(static_wall, dynamic_block);
+        const EdgeValidationResult blocked =
+            ContourGraph::ValidateContourFollowEdge(first, second);
+        reporter_.Check(
+            blocked.valid && blocked.dynamic_blocked &&
+                blocked.reason == EdgeRejectReason::DYNAMIC_CLOUD_BLOCKED,
+            "A current dynamic point immediately masks but does not erase the static contour route");
+
+        ContourGraph::SetLocalCollisionCloud(static_wall, empty_dynamic);
+        const EdgeValidationResult restored =
+            ContourGraph::ValidateContourFollowEdge(first, second);
+        reporter_.Check(
+            restored.valid && !restored.dynamic_blocked &&
+                SameFloat(restored.projection_distance,
+                          clear.projection_distance),
+            "Removing the dynamic point restores the same static route geometry");
+
+        PointCloudPtr extended_static_wall(new PointCloud(*static_wall));
+        PCLPoint newly_observed_wall = blocker;
+        extended_static_wall->push_back(newly_observed_wall);
+        extended_static_wall->width = extended_static_wall->size();
+        ContourGraph::SetLocalCollisionCloud(extended_static_wall,
+                                             empty_dynamic);
+        reporter_.Check(
+            !ContourGraph::IsRouteConnectFreeStaticLayer(
+                clear.route_start, clear.route_end),
+            "A newly observed static wall immediately blocks stored contour-route geometry");
+
+        first_ct->is_boundary_clipped = true;
+        wall->is_boundary_clipped = true;
+        ContourGraph::SetLocalCollisionCloud(static_wall, empty_dynamic);
+        const EdgeValidationResult clipped =
+            ContourGraph::ValidateContourFollowEdge(first, second);
+        reporter_.Check(
+            clipped.valid && !clipped.dynamic_blocked,
+            "An actually clipped polygon may provide a temporary FAR-style wall-end route when the persistent static corridor is free");
+        first_ct->is_boundary_clipped = false;
+        wall->is_boundary_clipped = false;
+
+        reporter_.Check(
+            ContourGraph::IsPointInsideReliableContourWindow(
+                Point3D(20.5f, 2.0f, 0.5f)) &&
+                !ContourGraph::IsPointInsideReliableContourWindow(
+                    Point3D(20.7f, 2.0f, 0.5f)) &&
+                ContourGraph::DoesSegmentIntersectReliableContourWindow(
+                    Point3D(-30.0f, 2.0f, 0.5f),
+                    Point3D(30.0f, 2.0f, 0.5f)),
+            "The square contour guard rejects cropped endpoints while detecting crossing stored routes");
+
+        PointCloudPtr narrow_channel = make_row(0.0f);
+        *narrow_channel += *make_row(0.85f);
+        narrow_channel->width = narrow_channel->size();
+        ContourGraph::SetLocalCollisionCloud(narrow_channel, empty_dynamic);
+        const EdgeValidationResult narrow =
+            ContourGraph::ValidateContourFollowEdge(first, second);
+        reporter_.Check(
+            !narrow.valid &&
+                narrow.reason == EdgeRejectReason::STATIC_CLOUD_BLOCKED,
+            "A narrow channel with no 0.45 m-clear offset is rejected");
+
+        PolygonPtr other_wall(new Polygon(*wall));
+        second_ct->poly_ptr = other_wall;
+        const EdgeValidationResult accidental_neighbor =
+            ContourGraph::ValidateContourFollowEdge(first, second);
+        reporter_.Check(
+            !accidental_neighbor.valid &&
+                accidental_neighbor.reason ==
+                    EdgeRejectReason::NOT_CURRENT_ADJACENT,
+            "Nearby vertices from different obstacles cannot become a contour-follow edge");
+        second_ct->poly_ptr = wall;
+
+        ContourGraph::SetLocalCollisionCloud(PointCloudPtr(new PointCloud()),
+                                             PointCloudPtr(new PointCloud()));
+        FARUtil::kLeafSize = original_leaf;
+        FARUtil::kNavClearDist = original_clearance;
+        FARUtil::kSensorRange = original_sensor_range;
+        FARUtil::odom_pos = original_odom;
+        FARUtil::free_odom_p = original_free_odom;
     }
 
     void RunVerifiedSemanticContourTests() {
@@ -285,7 +565,7 @@ private:
 
         ContourDetectParams params;
         params.sensor_range = 5.0f;
-        params.voxel_dim = 0.15f;
+        params.contour_grid_resolution = 0.2f;
         params.kRatio = 3.0f;
         params.kThredValue = 3;
         params.kBlurSize = 3;
@@ -328,10 +608,12 @@ private:
         const float original_tolerance = FARUtil::kTolerZ;
         const float original_sensor_range = FARUtil::kSensorRange;
         const Point3D original_odom = FARUtil::odom_pos;
+        const Point3D original_free_odom = FARUtil::free_odom_p;
         FARUtil::kNavClearDist = 0.45f;
         FARUtil::kTolerZ = 0.2f;
         FARUtil::kSensorRange = 15.0f;
         FARUtil::odom_pos = Point3D(0.0f, 0.0f, 0.5f);
+        FARUtil::free_odom_p = FARUtil::odom_pos;
 
         ContourGraph graph;
         ContourGraphParams graph_params;
@@ -369,19 +651,121 @@ private:
                 Point3D(4.0f, 0.0f, 2.0f)),
             "A pillar on another height layer does not block the edge");
 
+        // A visibility node represents the free-space route around its owning
+        // obstacle.  The owning pillar must not reject its own incident edge,
+        // while the same pillar must still reject an edge passing through it.
+        ContourGraph::SetLocalCollisionCloud(PointCloudPtr(new PointCloud()));
+        const bool has_pillar_vertex = !ContourGraph::contour_graph_.empty();
+        reporter_.Check(has_pillar_vertex,
+                        "A pillar contour creates a routing vertex");
+        if (has_pillar_vertex) {
+            const CTNodePtr pillar_vertex = ContourGraph::contour_graph_.front();
+            NavNodePtr pillar_node(new NavNode());
+            pillar_node->id = 1000;
+            pillar_node->position = pillar_vertex->position;
+            pillar_node->source = GraphNodeSource::STATIC_CANDIDATE;
+            pillar_node->free_direct = NodeFreeDirect::PILLAR;
+            pillar_node->is_odom = false;
+            pillar_node->is_goal = false;
+            pillar_node->is_boundary = false;
+            pillar_node->is_contour_match = false;
+            ContourGraph::MatchCTNodeWithNavNode(pillar_vertex, pillar_node);
+            odom_node->source = GraphNodeSource::ODOM;
+            odom_node->free_direct = NodeFreeDirect::PILLAR;
+            odom_node->is_goal = false;
+            odom_node->is_boundary = false;
+            odom_node->is_contour_match = false;
+            reporter_.Check(
+                ContourGraph::IsNavNodesConnectFreePolygon(
+                    odom_node, pillar_node),
+                "An obstacle endpoint does not collide with its own incident edge");
+
+            PointCloudPtr endpoint_occupancy(new PointCloud());
+            PCLPoint endpoint_point;
+            endpoint_point.x = pillar_node->position.x;
+            endpoint_point.y = pillar_node->position.y;
+            endpoint_point.z = pillar_node->position.z;
+            endpoint_point.intensity = 0.0f;
+            endpoint_occupancy->push_back(endpoint_point);
+            ContourGraph::SetLocalCollisionCloud(endpoint_occupancy);
+            reporter_.Check(
+                ContourGraph::IsNavNodesConnectFreePolygon(
+                    odom_node, pillar_node),
+                "Raw occupancy at a graph endpoint is excluded from the edge interior");
+        }
+
         graph.UpdateContourGraph(
             odom_node, std::vector<std::vector<Point3D>>());
+        ContourGraph::SetLocalCollisionCloud(PointCloudPtr(new PointCloud()));
         reporter_.Check(
             ContourGraph::IsPoint3DConnectFreePolygon(
                 Point3D(0.0f, 0.0f, 0.5f),
                 Point3D(4.0f, 0.0f, 0.5f)),
             "Removing a pillar restores the ordinary connection check");
+
+        PointCloudPtr raw_collision(new PointCloud());
+        PCLPoint raw_obstacle;
+        raw_obstacle.x = 2.0f;
+        raw_obstacle.y = 0.0f;
+        raw_obstacle.z = 0.5f;
+        raw_obstacle.intensity = 0.0f;
+        raw_collision->push_back(raw_obstacle);
+        ContourGraph::SetLocalCollisionCloud(raw_collision);
+        reporter_.Check(
+            !ContourGraph::IsPoint3DConnectFreePolygon(
+                Point3D(0.0f, 0.0f, 0.5f),
+                Point3D(4.0f, 0.0f, 0.5f)),
+            "Raw local semantic occupancy blocks an edge even without a contour segment");
+        reporter_.Check(
+            ContourGraph::IsPoint3DConnectFreePolygon(
+                Point3D(0.0f, 1.0f, 0.5f),
+                Point3D(4.0f, 1.0f, 0.5f)),
+            "Raw local collision validation keeps a geometrically clear edge");
+
+        NavNodePtr edge_start(new NavNode());
+        NavNodePtr edge_end(new NavNode());
+        edge_start->id = 1001;
+        edge_end->id = 1002;
+        edge_start->position = Point3D(0.0f, 0.0f, 0.5f);
+        edge_end->position = Point3D(4.0f, 0.0f, 0.5f);
+        edge_start->source = GraphNodeSource::STATIC_GLOBAL;
+        edge_end->source = GraphNodeSource::STATIC_GLOBAL;
+        edge_start->free_direct = NodeFreeDirect::PILLAR;
+        edge_end->free_direct = NodeFreeDirect::PILLAR;
+        edge_start->is_contour_match = false;
+        edge_end->is_contour_match = false;
+        edge_start->is_boundary = false;
+        edge_end->is_boundary = false;
+
+        ContourGraph::SetLocalCollisionCloud(
+            PointCloudPtr(new PointCloud()), raw_collision);
+        reporter_.Check(
+            ContourGraph::IsNavNodesConnectFreeStaticPolygon(
+                edge_start, edge_end),
+            "A dynamic point does not invalidate persistent static geometry");
+        reporter_.Check(
+            !ContourGraph::IsNavNodesConnectFreeDynamicLayer(
+                edge_start, edge_end),
+            "The same dynamic point temporarily blocks the static edge");
+
+        ContourGraph::SetLocalCollisionCloud(
+            raw_collision, PointCloudPtr(new PointCloud()));
+        reporter_.Check(
+            !ContourGraph::IsNavNodesConnectFreeStaticPolygon(
+                edge_start, edge_end),
+            "A static point invalidates the static edge itself");
+        reporter_.Check(
+            ContourGraph::IsNavNodesConnectFreeDynamicLayer(
+                edge_start, edge_end),
+            "An empty dynamic layer does not block a valid search edge");
+        ContourGraph::SetLocalCollisionCloud(PointCloudPtr(new PointCloud()));
         graph.ResetCurrentContour();
 
         FARUtil::kNavClearDist = original_clearance;
         FARUtil::kTolerZ = original_tolerance;
         FARUtil::kSensorRange = original_sensor_range;
         FARUtil::odom_pos = original_odom;
+        FARUtil::free_odom_p = original_free_odom;
     }
 
     void RunCompatibilityNoOpTests() {
@@ -622,6 +1006,46 @@ private:
         handler_.GetCloudOfPoint(robot_position_, large_obstacles, OBS_CLOUD, true);
         handler_.GetCloudOfPoint(robot_position_, small_terrain, FREE_CLOUD, false);
         handler_.GetCloudOfPoint(robot_position_, large_terrain, FREE_CLOUD, true);
+        PointCloudPtr current_static_obstacles(new PointCloud());
+        handler_.GetCurrentStaticObsCloud(current_static_obstacles);
+        if (!current_static_obstacles->empty()) {
+            const auto nearest_static = std::min_element(
+                current_static_obstacles->begin(),
+                current_static_obstacles->end(),
+                [this](const PCLPoint& first, const PCLPoint& second) {
+                    const float first_distance = std::hypot(
+                        first.x - robot_position_.x,
+                        first.y - robot_position_.y);
+                    const float second_distance = std::hypot(
+                        second.x - robot_position_.x,
+                        second.y - robot_position_.y);
+                    return first_distance < second_distance;
+                });
+            const float nearest_distance = std::hypot(
+                nearest_static->x - robot_position_.x,
+                nearest_static->y - robot_position_.y);
+            if (nearest_distance <= large_radius) {
+                reporter_.Check(
+                    handler_.QueryStaticNodeEvidence(
+                        Point3D(*nearest_static)) ==
+                        StaticNodeEvidence::STATIC_OCCUPIED,
+                    "A current static semantic voxel is positive lifecycle evidence");
+            } else {
+                reporter_.Skip(
+                    "Static-node occupied evidence",
+                    "the local box contains no static voxel inside the radial lifecycle window");
+            }
+        } else {
+            reporter_.Skip("Static-node occupied evidence",
+                           "the received map has no configured static obstacle class");
+        }
+        const Point3D outside_window(
+            robot_position_.x + large_radius + 2.0f,
+            robot_position_.y, robot_position_.z);
+        reporter_.Check(
+            handler_.QueryStaticNodeEvidence(outside_window) ==
+                StaticNodeEvidence::UNKNOWN,
+            "Space outside R_update/window is never static deletion evidence");
 
         reporter_.Check(ValidateExtractedCloud(*small_obstacles, robot_position_,
                                                small_radius, OBS_CLOUD, tree),
@@ -1134,6 +1558,38 @@ private:
             reporter_.Check(false, "Modified semantic map can be serialized");
             return;
         }
+
+        // The physical static layer has a different lifetime from contour
+        // vertices: it survives outside the current square and is removed
+        // only after explicit-free evidence is observed at the old cell.
+        MapHandler persistent_handler;
+        MapHandlerParams persistent_params = params_;
+        persistent_params.semantic_params.local_window_radius = 1.0f;
+        persistent_handler.Init(persistent_params);
+        persistent_handler.UpdateRobotPosition(removed_obstacle);
+        reporter_.Check(
+            persistent_handler.SetSemanticOctomap(original_message),
+            "Persistent-static fixture accepts the occupied snapshot");
+        PointCloudPtr persistent_static(new PointCloud());
+        persistent_handler.GetPersistentStaticObsCloud(persistent_static);
+        reporter_.Check(
+            CloudContainsNear(*persistent_static, removed_obstacle, 0.2f),
+            "A current static obstacle enters the persistent collision layer");
+
+        persistent_handler.UpdateRobotPosition(
+            Point3D(-3.0f, -3.0f, removed_obstacle.z));
+        persistent_handler.SetSemanticOctomap(modified_message);
+        persistent_handler.GetPersistentStaticObsCloud(persistent_static);
+        reporter_.Check(
+            CloudContainsNear(*persistent_static, removed_obstacle, 0.2f),
+            "A static obstacle outside the current square is retained");
+
+        persistent_handler.UpdateRobotPosition(removed_obstacle);
+        persistent_handler.SetSemanticOctomap(modified_message);
+        persistent_handler.GetPersistentStaticObsCloud(persistent_static);
+        reporter_.Check(
+            !CloudContainsNear(*persistent_static, removed_obstacle, 0.2f),
+            "Explicit-free evidence removes an old persistent static cell");
 
         handler_.SetSemanticOctomap(modified_message);
         PointCloudPtr removed_changes(new PointCloud());

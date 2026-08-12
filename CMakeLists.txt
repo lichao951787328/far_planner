@@ -11,6 +11,7 @@ set(CMAKE_MODULE_PATH ${PROJECT_SOURCE_DIR}/cmake)
 ## Find catkin macros and libraries
 find_package(catkin REQUIRED COMPONENTS
   roscpp
+  roslib
   std_msgs
   sensor_msgs
   geometry_msgs
@@ -33,6 +34,7 @@ find_package(OpenCV REQUIRED)
 catkin_package(
   CATKIN_DEPENDS
   roscpp
+  roslib
   std_msgs
   sensor_msgs
   geometry_msgs
@@ -104,7 +106,45 @@ add_dependencies(navigation_demo_monitor
   semantic_octomap_generate_messages_cpp)
 target_link_libraries(navigation_demo_monitor ${catkin_LIBRARIES})
 
+catkin_install_python(PROGRAMS
+  scripts/replay_goal_selection.py
+  DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION})
+
 if(CATKIN_ENABLE_TESTING)
+  catkin_add_gtest(graph_lifecycle_policy_test
+    src/graph_lifecycle_policy_test.cpp)
+  if(TARGET graph_lifecycle_policy_test)
+    target_link_libraries(graph_lifecycle_policy_test ${catkin_LIBRARIES})
+  endif()
+
+  catkin_add_gtest(graph_shortest_path_policy_test
+    src/graph_shortest_path_policy_test.cpp)
+  if(TARGET graph_shortest_path_policy_test)
+    target_link_libraries(graph_shortest_path_policy_test
+      ${catkin_LIBRARIES} ${PCL_LIBRARIES} ${OpenCV_LIBS})
+  endif()
+
+  catkin_add_gtest(contour_simplification_policy_test
+    src/contour_simplification_policy_test.cpp)
+  if(TARGET contour_simplification_policy_test)
+    target_link_libraries(contour_simplification_policy_test
+      ${catkin_LIBRARIES} ${PCL_LIBRARIES} ${OpenCV_LIBS})
+  endif()
+
+  catkin_add_gtest(waypoint_projection_policy_test
+    src/waypoint_projection_policy_test.cpp)
+  if(TARGET waypoint_projection_policy_test)
+    target_link_libraries(waypoint_projection_policy_test
+      ${catkin_LIBRARIES})
+  endif()
+
+  catkin_add_gtest(terminal_visibility_policy_test
+    src/terminal_visibility_policy_test.cpp)
+  if(TARGET terminal_visibility_policy_test)
+    target_link_libraries(terminal_visibility_policy_test
+      ${catkin_LIBRARIES})
+  endif()
+
   # Interactive integration test: run the node and then publish /octomap_full.
   add_executable(map_handler_test
     src/map_handler_test.cpp
