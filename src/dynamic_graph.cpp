@@ -361,6 +361,8 @@ void DynamicGraph::CommitSemanticGraphUpdate(
     const std::function<StaticNodeEvidence(const Point3D&)>& evidence_query) {
     NodePtrStack remove_nodes;
     NodePtrStack promote_nodes;
+    std::size_t promotion_waiting_finalization = 0;
+    std::size_t promotion_waiting_edge = 0;
     NodePtrStack static_nodes = globalGraphNodes_;
     static_nodes.insert(static_nodes.end(), staticCandidateGraphNodes_.begin(),
                         staticCandidateGraphNodes_.end());
@@ -377,11 +379,26 @@ void DynamicGraph::CommitSemanticGraphUpdate(
                 : (evidence_query
                        ? evidence_query(node_ptr->position)
                        : StaticNodeEvidence::UNKNOWN);
+        const bool finalization_ready =
+            !dg_params_.static_promotion_requires_finalized ||
+            node_ptr->is_finalized;
+        const bool edge_ready =
+            !dg_params_.static_promotion_requires_active_edge ||
+            HasActiveSearchEligibleIncidentEdge(*node_ptr);
+        const bool promotion_ready = finalization_ready && edge_ready;
         const GraphLifecycleAction action = AdvanceStaticNodeLifecycle(
             *node_ptr, node_ptr->observed_in_semantic_snapshot, evidence,
             distance,
             dg_params_.static_update_radius, dg_params_.static_stitch_radius,
-            dg_params_.static_confirm_frames, dg_params_.static_remove_frames);
+            dg_params_.static_confirm_frames, dg_params_.static_remove_frames,
+            promotion_ready);
+        if (node_ptr->source == GraphNodeSource::STATIC_CANDIDATE &&
+            node_ptr->observed_in_semantic_snapshot &&
+            node_ptr->static_seen_count >=
+                std::max(1, dg_params_.static_confirm_frames)) {
+            if (!finalization_ready) ++promotion_waiting_finalization;
+            if (!edge_ready) ++promotion_waiting_edge;
+        }
         if (action == GraphLifecycleAction::PROMOTE_STATIC) {
             promote_nodes.push_back(node_ptr);
             ROS_INFO_STREAM("DG: promoted semantic static node " << node_ptr->id
@@ -410,6 +427,11 @@ void DynamicGraph::CommitSemanticGraphUpdate(
             neighbor->edge_states[node_ptr->id].source = source;
         }
     }
+    ROS_INFO_THROTTLE(
+        5.0,
+        "DG static promotion gate: promoted=%zu waiting_finalized=%zu waiting_active_edge=%zu",
+        promote_nodes.size(), promotion_waiting_finalization,
+        promotion_waiting_edge);
 
     // Replacement is a transaction, not an early filtering action.  At this
     // point all current contour nodes and validated route geometries exist and

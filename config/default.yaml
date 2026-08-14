@@ -132,6 +132,8 @@ Graph/dynamic_position_alpha            : 0.65    # Current-frame weight for mat
 Graph/static_confirm_frames             : 3       # Positive semantic observations before persistence
 Graph/static_remove_frames              : 3       # Consecutive local misses before true static deletion
 Graph/static_topology_remove_frames     : 5       # FAR-style recoverable contradictions; replacement also requires RANSAC-stable successors, a validated contour route and no static cut
+Graph/static_promotion_requires_finalized: true   # Do not persist a geometrically unstable contour corner
+Graph/static_promotion_requires_active_edge: true # Do not create permanent degree-zero static orphans
 
 # Same-current-contour edges search outward for the first fully collision-free
 # robot-centre segment. These values do not alter ordinary visibility edges.

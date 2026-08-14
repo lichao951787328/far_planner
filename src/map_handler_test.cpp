@@ -1591,6 +1591,53 @@ private:
             !CloudContainsNear(*persistent_static, removed_obstacle, 0.2f),
             "Explicit-free evidence removes an old persistent static cell");
 
+        // local_grid represents traversable terrain as an occupied semantic
+        // endpoint, not as an OctoMap miss.  Reclassifying an old obstacle
+        // voxel to a configured terrain class must therefore be explicit-free
+        // evidence for the obstacle lifecycle and persistent collision layer.
+        std::unique_ptr<octomap::AbstractOcTree> terrain_decoded(
+            octomap_msgs::msgToMap(*original_message));
+        auto* terrain_tree =
+            dynamic_cast<octomap::ColorOcTree*>(terrain_decoded.get());
+        if (!terrain_tree) {
+            reporter_.Check(false,
+                            "Synthetic terrain reclassification supports color updates");
+        } else {
+            octomap::ColorOcTreeNode* terrain_node =
+                terrain_tree->search(removed_coordinate);
+            if (!terrain_node) {
+                reporter_.Check(false,
+                                "Synthetic terrain reclassification finds the old obstacle");
+            } else {
+                terrain_node->setColor(0, 0, 0);
+                terrain_tree->updateInnerOccupancy();
+                octomap_msgs::OctomapPtr terrain_message(
+                    new octomap_msgs::Octomap());
+                terrain_message->header = original_message->header;
+                terrain_message->header.stamp = ros::Time::now();
+                if (!octomap_msgs::fullMapToMsg(
+                        *terrain_tree, *terrain_message)) {
+                    reporter_.Check(false,
+                                    "Terrain-reclassified semantic map can be serialized");
+                } else {
+                    MapHandler terrain_release_handler;
+                    terrain_release_handler.Init(params_);
+                    terrain_release_handler.UpdateRobotPosition(
+                        removed_obstacle);
+                    terrain_release_handler.SetSemanticOctomap(
+                        original_message);
+                    terrain_release_handler.SetSemanticOctomap(
+                        terrain_message);
+                    terrain_release_handler.GetPersistentStaticObsCloud(
+                        persistent_static);
+                    reporter_.Check(
+                        !CloudContainsNear(
+                            *persistent_static, removed_obstacle, 0.2f),
+                        "Occupied terrain semantics clear old persistent static collision cells");
+                }
+            }
+        }
+
         handler_.SetSemanticOctomap(modified_message);
         PointCloudPtr removed_changes(new PointCloud());
         PointCloudPtr local_obstacles(new PointCloud());

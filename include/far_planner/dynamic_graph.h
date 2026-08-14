@@ -25,6 +25,8 @@ struct DynamicGraphParams {
     int static_confirm_frames = 3;
     int static_remove_frames = 3;
     int static_topology_remove_frames = 5;
+    bool static_promotion_requires_finalized = true;
+    bool static_promotion_requires_active_edge = true;
 };
 
 class DynamicGraph {  

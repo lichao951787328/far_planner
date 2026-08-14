@@ -462,12 +462,25 @@ inline bool IsGraphEdgeSearchEligible(const NavNode& from,
            to_state->second.IsActive();
 }
 
+/** A persistent corner without a usable incident edge becomes a permanent
+ * orphan in the global graph.  Promotion is therefore allowed only after the
+ * candidate participates in at least one currently searchable edge. */
+inline bool HasActiveSearchEligibleIncidentEdge(const NavNode& node) {
+    for (const auto& neighbor : node.connect_nodes) {
+        if (neighbor && IsGraphEdgeSearchEligible(node, *neighbor)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 /** Pure lifecycle policy shared by production code and regression tests. */
 inline GraphLifecycleAction AdvanceStaticNodeLifecycle(
     NavNode& node, const bool observed,
     const StaticNodeEvidence evidence, const float robot_distance,
     const float update_radius, const float stitch_radius,
-    const int confirm_frames, const int remove_frames) {
+    const int confirm_frames, const int remove_frames,
+    const bool promotion_ready = true) {
     const bool is_static = node.source == GraphNodeSource::STATIC_CANDIDATE ||
                            node.source == GraphNodeSource::STATIC_GLOBAL;
     if (!is_static) return GraphLifecycleAction::KEEP;
@@ -484,7 +497,8 @@ inline GraphLifecycleAction AdvanceStaticNodeLifecycle(
         node.static_seen_count = std::min(
             std::max(1, confirm_frames), node.static_seen_count + 1);
         if (node.source == GraphNodeSource::STATIC_CANDIDATE &&
-            node.static_seen_count >= std::max(1, confirm_frames)) {
+            node.static_seen_count >= std::max(1, confirm_frames) &&
+            promotion_ready) {
             node.source = GraphNodeSource::STATIC_GLOBAL;
             return GraphLifecycleAction::PROMOTE_STATIC;
         }

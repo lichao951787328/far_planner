@@ -1067,6 +1067,10 @@ void FARMaster::LoadROSParams() {
                          graph_params_.static_remove_frames, 3);
   private_nh_.param<int>(graph_prefix    + "static_topology_remove_frames",
                          graph_params_.static_topology_remove_frames, 5);
+  private_nh_.param<bool>(graph_prefix   + "static_promotion_requires_finalized",
+                          graph_params_.static_promotion_requires_finalized, true);
+  private_nh_.param<bool>(graph_prefix   + "static_promotion_requires_active_edge",
+                          graph_params_.static_promotion_requires_active_edge, true);
   private_nh_.param<float>(graph_prefix  + "connect_angle_thred",       graph_params_.kConnectAngleThred, 10.0);
   private_nh_.param<float>(graph_prefix  + "dirs_filter_margin",        graph_params_.filter_dirs_margin, 10.0);
   graph_params_.filter_pos_margin        = FARUtil::kNavClearDist;

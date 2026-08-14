@@ -18,6 +18,12 @@ vehicle_height                          : 0.5
 robot_dim                               : 0.6
 Util/robot_collision_clearance          : 0.45
 
+# A persistent corner must survive several contour updates, finish FAR's
+# position/direction filter and own a currently valid edge before promotion.
+Graph/static_confirm_frames             : 5
+Graph/static_promotion_requires_finalized: true
+Graph/static_promotion_requires_active_edge: true
+
 # Cityscapes labels 2..8 emitted by grid_semantic_adapter_node.  Unknown
 # high-traversability points are remapped upstream to wall (label 3), so they
 # are also captured by this list.

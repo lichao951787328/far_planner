@@ -572,6 +572,13 @@ StaticNodeEvidence MapHandler::QueryStaticTreeEvidence(
             if (MatchRgbKey(dynamic_obstacle_groups_, rgb)) {
                 return StaticNodeEvidence::UNKNOWN;
             }
+            // local_grid stores traversable semantic cells as occupied
+            // endpoints because they are terrain observations, not sensor-ray
+            // free voxels.  For the lifetime of an old *obstacle* cell this is
+            // nevertheless authoritative explicit-free evidence.
+            if (MatchRgbKey(terrain_support_groups_, rgb)) {
+                return StaticNodeEvidence::EXPLICIT_FREE;
+            }
         } else {
             const octomap::ColorOcTreeNode* node = color_tree->search(query);
             if (!node) continue;
@@ -586,6 +593,9 @@ StaticNodeEvidence MapHandler::QueryStaticTreeEvidence(
             }
             if (MatchRgbKey(dynamic_obstacle_groups_, rgb)) {
                 return StaticNodeEvidence::UNKNOWN;
+            }
+            if (MatchRgbKey(terrain_support_groups_, rgb)) {
+                return StaticNodeEvidence::EXPLICIT_FREE;
             }
         }
     }

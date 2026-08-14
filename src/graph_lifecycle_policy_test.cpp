@@ -94,6 +94,39 @@ TEST(GraphLifecyclePolicy, StaticCandidateNeedsThreeObservations) {
     EXPECT_TRUE(IsGraphNodeSearchEligible(node));
 }
 
+TEST(GraphLifecyclePolicy, StaticCandidateWaitsForPromotionReadiness) {
+    NavNode node = MakeNode(GraphNodeSource::STATIC_CANDIDATE);
+    for (int frame = 0; frame < 3; ++frame) {
+        EXPECT_EQ(GraphLifecycleAction::KEEP,
+                  AdvanceStaticNodeLifecycle(
+                      node, true, StaticNodeEvidence::STATIC_OCCUPIED,
+                      5.0f, 12.0f, 15.0f, 3, 3, false));
+    }
+    EXPECT_EQ(GraphNodeSource::STATIC_CANDIDATE, node.source);
+    EXPECT_EQ(3, node.static_seen_count);
+
+    EXPECT_EQ(GraphLifecycleAction::PROMOTE_STATIC,
+              AdvanceStaticNodeLifecycle(
+                  node, true, StaticNodeEvidence::STATIC_OCCUPIED,
+                  5.0f, 12.0f, 15.0f, 3, 3, true));
+    EXPECT_EQ(GraphNodeSource::STATIC_GLOBAL, node.source);
+}
+
+TEST(GraphLifecyclePolicy, ActiveIncidentEdgeMustBeSearchEligible) {
+    NavNodePtr candidate =
+        MakeNodePtr(101, GraphNodeSource::STATIC_CANDIDATE);
+    NavNodePtr neighbor =
+        MakeNodePtr(102, GraphNodeSource::STATIC_GLOBAL);
+    EXPECT_FALSE(HasActiveSearchEligibleIncidentEdge(*candidate));
+
+    ConnectActiveStaticEdge(candidate, neighbor);
+    EXPECT_TRUE(HasActiveSearchEligibleIncidentEdge(*candidate));
+
+    candidate->edge_states[neighbor->id].static_valid = false;
+    neighbor->edge_states[candidate->id].static_valid = false;
+    EXPECT_FALSE(HasActiveSearchEligibleIncidentEdge(*candidate));
+}
+
 TEST(GraphLifecyclePolicy, CroppedContourEndpointNeverBecomesGlobalHistory) {
     NavNode node = MakeNode(GraphNodeSource::STATIC_CANDIDATE);
     node.is_transient_contour_endpoint = true;
