@@ -374,6 +374,7 @@ void FARMaster::Loop() {
     // A new semantic snapshot owns the expensive contour/topology rebuild.
     // Between snapshots, robot motion only refreshes transient start edges.
     if (!semantic_graph_dirty_) {
+      bool publish_graph_snapshot = false;
       if (is_graph_init_ && odom_connections_dirty_) {
         graph_manager_.UpdateOdomConnections();
         nav_graph_ = graph_manager_.GetNavGraph();
@@ -383,16 +384,23 @@ void FARMaster::Loop() {
         has_odom_connection_position_ = true;
         odom_connections_dirty_ = false;
         planning_requested_ = true;
+        publish_graph_snapshot = true;
+      }
+      if (planning_requested_ && is_graph_init_) {
+        planning_requested_ = false;
+        this->ExecutePlanningCycle();
+        publish_graph_snapshot = true;
+      }
+      if (publish_graph_snapshot) {
+        // Goal and odom edges are a transient query layer. Publish only after
+        // ExecutePlanningCycle has rebuilt them against this obstacle cloud,
+        // otherwise RViz/monitors observe a stale edge with a new map.
         planner_viz_.VizPointCloud(graph_static_obs_pub_,
                                    persistent_static_obs_ptr_);
         planner_viz_.VizGraph(nav_graph_);
         planner_viz_.VizSemanticGraphLayers(
             graph_manager_.GetStaticGraphNodes(),
             graph_manager_.GetDynamicLocalNodes(), nav_graph_);
-      }
-      if (planning_requested_ && is_graph_init_) {
-        planning_requested_ = false;
-        this->ExecutePlanningCycle();
       }
       PublishSeconds(main_loop_time_pub_, ros::WallTime::now() - loop_start);
       loop_rate.sleep();
@@ -512,12 +520,6 @@ void FARMaster::Loop() {
     planner_viz_.VizNodes(clear_nodes_, "clear_nodes", VizColor::ORANGE);
     planner_viz_.VizNodes(graph_manager_.GetOutContourNodes(), "out_contour", VizColor::YELLOW);
     planner_viz_.VizPoint3D(FARUtil::free_odom_p, "free_odom_position", VizColor::ORANGE, 1.0);
-    planner_viz_.VizPointCloud(graph_static_obs_pub_,
-                               persistent_static_obs_ptr_);
-    planner_viz_.VizGraph(nav_graph_);
-    planner_viz_.VizSemanticGraphLayers(
-        graph_manager_.GetStaticGraphNodes(),
-        graph_manager_.GetDynamicLocalNodes(), nav_graph_);
     planner_viz_.VizContourGraph(ContourGraph::contour_graph_);
     planner_viz_.VizGlobalPolygons(ContourGraph::global_contour_, ContourGraph::unmatched_contour_);
 
@@ -548,6 +550,15 @@ void FARMaster::Loop() {
       planning_requested_ = false;
       this->ExecutePlanningCycle();
     }
+    // Keep the collision cloud and graph geometry in the same post-planning
+    // snapshot. In particular, no GOAL_CONNECT edge from the preceding map
+    // may be visualized as if it belonged to the newly rebuilt map.
+    planner_viz_.VizPointCloud(graph_static_obs_pub_,
+                               persistent_static_obs_ptr_);
+    planner_viz_.VizGraph(nav_graph_);
+    planner_viz_.VizSemanticGraphLayers(
+        graph_manager_.GetStaticGraphNodes(),
+        graph_manager_.GetDynamicLocalNodes(), nav_graph_);
     PublishSeconds(main_loop_time_pub_, ros::WallTime::now() - loop_start);
     loop_rate.sleep();
   }

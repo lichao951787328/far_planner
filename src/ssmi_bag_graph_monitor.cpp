@@ -153,7 +153,8 @@ class SsmiBagGraphMonitor {
               "robot_component,robot_degree,blocked_edges,path_poses,"
               "path_length_m,path_goal_error_m,path_min_clearance_m,"
               "graph_edges_checked,graph_min_clearance_m,"
-              "graph_clearance_violations,waypoint_path_distance_m,reached,"
+              "graph_clearance_violations,robot_static_clearance_m,"
+              "waypoint_path_distance_m,reached,"
               "semantic_snapshot_s,semantic_update_s,semantic_callback_s,"
               "main_loop_s\n";
     }
@@ -313,6 +314,17 @@ class SsmiBagGraphMonitor {
       static_cloud_->width = static_cast<uint32_t>(static_cloud_->size());
       static_cloud_->height = 1;
       static_kdtree_->setInputCloud(static_cloud_);
+      robot_static_clearance_ = std::numeric_limits<double>::infinity();
+      if (have_aligned_odom_ && !static_cloud_->empty()) {
+        pcl::PointXYZ query(current_robot_.x, current_robot_.y,
+                            current_robot_.z);
+        std::vector<int> indices(1);
+        std::vector<float> squared_distances(1);
+        if (static_kdtree_->nearestKSearch(
+                query, 1, indices, squared_distances) > 0) {
+          robot_static_clearance_ = std::sqrt(squared_distances.front());
+        }
+      }
       graph_static_stamp_ = message->header.stamp;
       static_tree_dirty_ = false;
       if (have_full_graph_message_) EvaluateFullGraph(latest_full_graph_);
@@ -491,6 +503,14 @@ class SsmiBagGraphMonitor {
     if (graph_edges_checked_ > 0) {
       minimum_graph_clearance_over_run_ = std::min(
           minimum_graph_clearance_over_run_, graph_min_clearance_);
+    }
+    // Keep the worst offending snapshot for the final report.  The current
+    // details are rebuilt on every graph/cloud pair, so without this copy a
+    // transient unsafe edge is usually gone by the time the bag finishes.
+    if (!graph_violation_details_.empty() &&
+        graph_min_clearance_ < worst_graph_violation_clearance_) {
+      worst_graph_violation_clearance_ = graph_min_clearance_;
+      worst_graph_violation_details_ = graph_violation_details_;
     }
   }
 
@@ -714,6 +734,7 @@ class SsmiBagGraphMonitor {
          << path_length_ << ',' << path_goal_error_ << ','
          << path_min_clearance_ << ',' << graph_edges_checked_ << ','
          << graph_min_clearance_ << ',' << graph_clearance_violations_ << ','
+         << robot_static_clearance_ << ','
          << waypoint_path_distance_ << ',' << (reached_ ? 1 : 0) << ','
          << semantic_snapshot_time_ << ',' << semantic_update_time_ << ','
          << semantic_callback_time_ << ',' << main_loop_time_ << '\n';
@@ -759,8 +780,8 @@ class SsmiBagGraphMonitor {
              minimum_graph_clearance_over_run_,
              maximum_graph_clearance_violations_,
              ever_reached_ ? "true" : "false");
-    for (const auto& detail : graph_violation_details_) {
-      ROS_ERROR("SSMI graph clearance violation: %s", detail.c_str());
+    for (const auto& detail : worst_graph_violation_details_) {
+      ROS_ERROR("SSMI worst graph clearance violation: %s", detail.c_str());
     }
     if (csv_.is_open()) csv_.close();
   }
@@ -825,6 +846,10 @@ class SsmiBagGraphMonitor {
   double graph_min_clearance_ = std::numeric_limits<double>::infinity();
   double minimum_graph_clearance_over_run_ =
       std::numeric_limits<double>::infinity();
+  double worst_graph_violation_clearance_ =
+      std::numeric_limits<double>::infinity();
+  double robot_static_clearance_ =
+      std::numeric_limits<double>::infinity();
   double waypoint_path_distance_ = std::numeric_limits<double>::infinity();
   float semantic_snapshot_time_ = 0.0f;
   float semantic_update_time_ = 0.0f;
@@ -835,6 +860,7 @@ class SsmiBagGraphMonitor {
   std::vector<Point> latest_path_points_;
   MarkerArray latest_full_graph_;
   std::vector<std::string> graph_violation_details_;
+  std::vector<std::string> worst_graph_violation_details_;
   size_t static_points_ = 0;
   size_t dynamic_points_ = 0;
   size_t graph_static_points_ = 0;
