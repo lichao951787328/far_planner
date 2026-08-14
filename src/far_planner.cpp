@@ -154,6 +154,11 @@ void FARMaster::Init() {
   // DEBUG Publisher
   dynamic_obs_pub_     = nh.advertise<sensor_msgs::PointCloud2>("FAR_dynamic_obs_debug",1);
   surround_obs_debug_  = nh.advertise<sensor_msgs::PointCloud2>("FAR_obs_debug",1);
+  // Expose the exact persistent static cloud used by Graph edge validation.
+  // The local-planner cloud below is deliberately denser and therefore is
+  // not an equivalent source for reproducing Graph clearance decisions.
+  graph_static_obs_pub_ =
+      nh.advertise<sensor_msgs::PointCloud2>("semantic_graph_static_obstacles", 1);
   local_planner_static_obs_pub_ =
       nh.advertise<sensor_msgs::PointCloud2>("semantic_local_static_obstacles", 1);
   local_planner_dynamic_obs_pub_ =
@@ -192,6 +197,7 @@ void FARMaster::Init() {
   is_planner_running_ = false;
   is_graph_init_      = false;
   has_pending_route_goal_ = false;
+  has_commanded_goal_ = false;
   is_reset_env_       = false;
   is_stop_update_     = false;
   semantic_graph_dirty_ = false;
@@ -255,6 +261,7 @@ void FARMaster::Init() {
 
 void FARMaster::ResetEnvironmentAndGraph() {
   this->ResetInternalValues();
+  has_commanded_goal_ = false;
   if (!FARUtil::IsDebug) { // Terminal Output
     printf("\033[A"), printf("\033[A"), printf("\033[2K");
     std::cout<< "\033[1;31m V-Graph Resetting...\033[0m\n" << std::endl;
@@ -376,6 +383,8 @@ void FARMaster::Loop() {
         has_odom_connection_position_ = true;
         odom_connections_dirty_ = false;
         planning_requested_ = true;
+        planner_viz_.VizPointCloud(graph_static_obs_pub_,
+                                   persistent_static_obs_ptr_);
         planner_viz_.VizGraph(nav_graph_);
         planner_viz_.VizSemanticGraphLayers(
             graph_manager_.GetStaticGraphNodes(),
@@ -503,6 +512,8 @@ void FARMaster::Loop() {
     planner_viz_.VizNodes(clear_nodes_, "clear_nodes", VizColor::ORANGE);
     planner_viz_.VizNodes(graph_manager_.GetOutContourNodes(), "out_contour", VizColor::YELLOW);
     planner_viz_.VizPoint3D(FARUtil::free_odom_p, "free_odom_position", VizColor::ORANGE, 1.0);
+    planner_viz_.VizPointCloud(graph_static_obs_pub_,
+                               persistent_static_obs_ptr_);
     planner_viz_.VizGraph(nav_graph_);
     planner_viz_.VizSemanticGraphLayers(
         graph_manager_.GetStaticGraphNodes(),
@@ -629,7 +640,8 @@ void FARMaster::ExecutePlanningCycle() {
       is_planner_running_ = true;
       planner_viz_.VizPoint3D(waypoint, "waypoint", VizColor::MAGNA, 1.5);
       planner_viz_.VizPoint3D(current_free_goal, "free_goal", VizColor::GREEN, 1.5);
-      planner_viz_.VizPath(global_path, is_current_free_nav);
+      planner_viz_.VizPath(global_path, is_current_free_nav,
+                           has_commanded_goal_ ? &commanded_goal_ : nullptr);
     } else if (is_retry_wait) {
       // The current static+dynamic Graph has no route. Stop safely without
       // deleting the commanded destination; a later freshly rebuilt Graph
@@ -1279,6 +1291,8 @@ void FARMaster::WaypointCallBack(const geometry_msgs::PointStamped& route_goal) 
 }
 
 void FARMaster::ApplyWorldGoal(const Point3D& goal_p) {
+  commanded_goal_ = goal_p;
+  has_commanded_goal_ = true;
   graph_planner_.UpdateGoal(goal_p);
   // A new destination starts a new search snapshot. Revalidate start edges
   // first, then plan; no previous path or waypoint is reused.

@@ -1,0 +1,89 @@
+<?xml version="1.0"?>
+<launch>
+  <!-- One-command, controller-free SSMI integration test.
+
+       Startup order is intentional: all TF consumers are created before the
+       bag player, whose delay gives them time to subscribe before the first
+       cloud establishes map -> map_start.  No local planner, graph decoder,
+       pathFollower or pathfollowing node is included. -->
+  <arg name="bag"
+       default="/home/yanaibo/mapless_navigation/local_3d_semantic_voxel/local3DSemanticVoxelMap/dataset/2026-08-14-09-19-37.bag"/>
+  <arg name="bag_play_args" default="--clock --delay=3 --rate=0.5"/>
+  <arg name="launch_rviz" default="true"/>
+  <arg name="start_monitor" default="true"/>
+  <arg name="auto_goal" default="false"/>
+  <arg name="goal_x" default="7.98"/>
+  <arg name="goal_y" default="0.24"/>
+  <arg name="goal_z" default="0.0"/>
+  <arg name="goal_delay" default="5.0"/>
+  <arg name="output_csv"
+       default="$(find far_planner)/logs/ssmi_bag_graph_test.csv"/>
+  <arg name="finish_on_bag_idle" default="true"/>
+  <arg name="bag_idle_timeout" default="5.0"/>
+  <arg name="odom_timeout" default="3.0"/>
+  <arg name="semantic_map_timeout" default="3.0"/>
+
+  <param name="/use_sim_time" value="true"/>
+
+  <!-- /grids_points -> semantic point cloud -> first-cloud-relative map. -->
+  <include file="$(find semantic_octomap)/launch/semantic_octomap_grid.launch">
+    <arg name="input_topic" value="/grids_points"/>
+    <arg name="output_topic" value="/semantic_pcl/semantic_pcl"/>
+    <arg name="world_frame_id" value="map"/>
+    <arg name="use_initial_pose_reference" value="true"/>
+    <arg name="reference_frame_id" value="map_start"/>
+    <arg name="obstacle_threshold" value="0.6"/>
+    <arg name="rviz" value="false"/>
+  </include>
+
+  <node pkg="far_planner" type="far_planner" name="far_planner"
+        output="screen" required="true">
+    <rosparam command="load" file="$(find far_planner)/config/default.yaml"/>
+    <rosparam command="load" file="$(find far_planner)/config/ssmi_bag.yaml"/>
+    <param name="world_frame" value="map_start"/>
+    <param name="semantic_map_topic" value="/octomap_full"/>
+    <param name="odom_timeout" value="$(arg odom_timeout)"/>
+    <param name="semantic_map_timeout" value="$(arg semantic_map_timeout)"/>
+    <remap from="odom_world" to="/fusion_localization"/>
+    <remap from="goal_point" to="/goal_point"/>
+  </node>
+
+  <!-- RViz 2D Nav Goal remains available without starting a controller. -->
+  <node pkg="far_planner" type="pose_stamped_to_point_stamped"
+        name="ssmi_goal_adapter" output="screen" required="true">
+    <param name="input_goal_topic" value="/move_base_simple/goal"/>
+    <param name="output_goal_topic" value="/goal_point"/>
+    <param name="default_frame" value="map_start"/>
+  </node>
+
+  <node if="$(arg start_monitor)" pkg="far_planner"
+        type="ssmi_bag_graph_monitor" name="ssmi_bag_graph_monitor"
+        output="screen" required="true">
+    <param name="expected_frame" value="map_start"/>
+    <param name="source_odom_topic" value="/fusion_localization"/>
+    <param name="auto_goal" value="$(arg auto_goal)"/>
+    <param name="goal_x" value="$(arg goal_x)"/>
+    <param name="goal_y" value="$(arg goal_y)"/>
+    <param name="goal_z" value="$(arg goal_z)"/>
+    <param name="goal_publish_delay" value="$(arg goal_delay)"/>
+    <param name="output_csv" value="$(arg output_csv)"/>
+    <param name="finish_on_bag_idle" value="$(arg finish_on_bag_idle)"/>
+    <param name="bag_idle_timeout" value="$(arg bag_idle_timeout)"/>
+    <param name="position_tolerance" value="0.02"/>
+    <param name="yaw_tolerance_deg" value="1.0"/>
+    <param name="collision_clearance" value="0.45"/>
+    <param name="collision_check_radius" value="10.0"/>
+    <!-- FAR's discretization-safe collision radius plus one 0.4 m semantic
+         voxel, matching its contour-end exclusion for visibility routes. -->
+    <param name="visibility_endpoint_exclusion" value="0.875"/>
+  </node>
+
+  <node if="$(arg launch_rviz)" pkg="rviz" type="rviz"
+        name="ssmi_bag_graph_rviz"
+        args="-d $(find far_planner)/rviz/ssmi_bag_graph_test.rviz"/>
+
+  <!-- Keep this node last.  Looped playback needs coordinated
+       reset_semantic_octomap and reset_visibility_graph operations. -->
+  <node pkg="rosbag" type="play" name="ssmi_bag_player"
+        args="$(arg bag_play_args) $(arg bag)" output="screen"/>
+</launch>

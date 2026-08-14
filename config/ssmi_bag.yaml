@@ -1,0 +1,40 @@
+# SSMI bag integration overrides.
+#
+# launch/ssmi_bag_graph_test.launch loads default.yaml first and then this
+# file.  Keeping only the data-source-specific values here avoids duplicating
+# the planner tuning while still making the semantic contract explicit.
+
+world_frame                             : map_start
+semantic_map_topic                      : /octomap_full
+enable_goal_recording                   : false
+
+# Match the upstream Semantic OctoMap resolution.  This remains independent
+# from MapHandler/local_planner_resolution, which controls dense collision
+# samples for downstream consumers.
+contour_grid_resolution                 : 0.4
+
+# Keep the validated robot geometry unchanged during the data-adapter test.
+vehicle_height                          : 0.5
+robot_dim                               : 0.6
+Util/robot_collision_clearance          : 0.45
+
+# Cityscapes labels 2..8 emitted by grid_semantic_adapter_node.  Unknown
+# high-traversability points are remapped upstream to wall (label 3), so they
+# are also captured by this list.
+MapHandler/obstacle_groups:
+  - {name: building,      rgb: [70, 70, 70]}
+  - {name: wall,          rgb: [102, 102, 156]}
+  - {name: fence,         rgb: [190, 153, 153]}
+  - {name: pole,          rgb: [153, 153, 153]}
+  - {name: traffic_light, rgb: [250, 170, 30]}
+  - {name: traffic_sign,  rgb: [220, 220, 0]}
+  - {name: vegetation,    rgb: [107, 142, 35]}
+
+# Traversable Cityscapes labels 0, 1 and 9 provide terrain height support.
+MapHandler/terrain_support_groups:
+  - {name: road,     rgb: [128, 64, 128]}
+  - {name: sidewalk, rgb: [244, 35, 232]}
+  - {name: terrain,  rgb: [152, 251, 152]}
+
+MapHandler/dynamic_obstacle_groups:
+  - {name: dynamic_obstacle, rgb: [255, 0, 255]}

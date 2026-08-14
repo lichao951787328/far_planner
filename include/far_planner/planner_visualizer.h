@@ -3,6 +3,7 @@
 
 #include "utility.h"
 #include "contour_graph.h"
+#include <nav_msgs/Path.h>
 #include <visualization_msgs/Marker.h>
 #include <visualization_msgs/MarkerArray.h>
 
@@ -29,7 +30,8 @@ private:
     // Utility Cloud 
     PointCloudPtr point_cloud_ptr_;
     // rviz publisher 
-    ros::Publisher viz_node_pub_, viz_path_pub_, viz_poly_pub_, viz_graph_pub_;
+    ros::Publisher viz_node_pub_, viz_path_pub_, nav_path_pub_;
+    ros::Publisher viz_poly_pub_, viz_graph_pub_;
     ros::Publisher viz_contour_pub_, viz_map_pub_, viz_view_extend;
     ros::Publisher viz_static_global_pub_, viz_dynamic_local_pub_;
     ros::Publisher viz_search_graph_pub_, viz_dynamic_blocked_pub_;
@@ -52,7 +54,9 @@ public:
     void VizViewpointExtend(const NavNodePtr& ori_nav_ptr, const Point3D& extend_point);
 
     // True for non-attempts path
-    void VizPath(const NodePtrStack& global_path, const bool& is_free_nav=false);
+    void VizPath(const NodePtrStack& global_path,
+                 const bool& is_free_nav=false,
+                 const Point3D* commanded_goal=nullptr);
 
     void VizMapGrids(const PointStack& neighbor_centers, 
                      const PointStack& occupancy_centers,

@@ -1216,8 +1216,12 @@ bool ContourGraph::IsEdgeCollisionFreeInCloud(
     if (length < FARUtil::kEpsilon) return true;
 
     const float step = std::max(FARUtil::kLeafSize * 0.75f, 0.05f);
-    const float radius = std::max(FARUtil::kLeafSize * 0.75f,
-                                  FARUtil::kNavClearDist);
+    const float requested_radius = std::max(FARUtil::kLeafSize * 0.75f,
+                                            FARUtil::kNavClearDist);
+    // The samples approximate a continuous swept segment.  Inflate each
+    // sample sphere by half a step in quadrature so their union guarantees
+    // the requested perpendicular clearance even midway between samples.
+    const float radius = std::hypot(requested_radius, step * 0.5f);
     // The search ball, not only its centre, must stay outside the endpoints.
     // Otherwise points belonging to the target contour are reported as an
     // obstacle of the edge that intentionally terminates at that contour.
@@ -1229,6 +1233,26 @@ bool ContourGraph::IsEdgeCollisionFreeInCloud(
     for (float distance = endpoint_margin; distance <= length - endpoint_margin;
          distance += step) {
         const float ratio = distance / length;
+        PCLPoint sample;
+        sample.x = edge.start_p.x + dx * ratio;
+        sample.y = edge.start_p.y + dy * ratio;
+        sample.z = mid_z;
+        sample.intensity = 0.0f;
+        std::vector<int> indices;
+        std::vector<float> squared_distances;
+        if (kdtree->radiusSearch(
+                sample, radius, indices, squared_distances, 1) > 0) {
+            return false;
+        }
+    }
+    // A fixed step does not normally land exactly on the far end.  For the
+    // zero-exclusion routes used by odom, goal and contour-follow edges that
+    // omission could leave the final fraction of an otherwise blocked edge
+    // unchecked.  Sample the far checked endpoint explicitly (repeating an
+    // exact sample is harmless).
+    const float far_distance = length - endpoint_margin;
+    if (far_distance >= endpoint_margin) {
+        const float ratio = far_distance / length;
         PCLPoint sample;
         sample.x = edge.start_p.x + dx * ratio;
         sample.y = edge.start_p.y + dy * ratio;

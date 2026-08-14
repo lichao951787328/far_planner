@@ -16,6 +16,7 @@ find_package(catkin REQUIRED COMPONENTS
   sensor_msgs
   geometry_msgs
   nav_msgs
+  rosgraph_msgs
   tf
   visibility_graph_msg
   pcl_ros
@@ -39,6 +40,7 @@ catkin_package(
   sensor_msgs
   geometry_msgs
   nav_msgs
+  rosgraph_msgs
   tf
   pcl_ros
   octomap_msgs
@@ -106,6 +108,13 @@ add_dependencies(navigation_demo_monitor
   semantic_octomap_generate_messages_cpp)
 target_link_libraries(navigation_demo_monitor ${catkin_LIBRARIES})
 
+add_executable(ssmi_bag_graph_monitor src/ssmi_bag_graph_monitor.cpp)
+add_dependencies(ssmi_bag_graph_monitor
+  ${${PROJECT_NAME}_EXPORTED_TARGETS}
+  ${catkin_EXPORTED_TARGETS})
+target_link_libraries(ssmi_bag_graph_monitor
+  ${catkin_LIBRARIES} ${PCL_LIBRARIES})
+
 catkin_install_python(PROGRAMS
   scripts/replay_goal_selection.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION})
@@ -165,6 +174,7 @@ endif()
 
 install(TARGETS ${PROJECT_NAME} pose_stamped_to_odometry
   pose_stamped_to_point_stamped navigation_demo_monitor
+  ssmi_bag_graph_monitor
   ARCHIVE DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
   LIBRARY DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
   RUNTIME DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
@@ -176,4 +186,8 @@ install(DIRECTORY launch/
 
 install(DIRECTORY rviz/
   DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}/rviz
+)
+
+install(DIRECTORY config/
+  DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}/config
 )

@@ -58,6 +58,7 @@ private:
     ros::Subscriber read_command_sub_, save_command_sub_; // only use for terminal formatting
     ros::Publisher  goal_pub_, boundary_pub_;
     ros::Publisher  dynamic_obs_pub_, surround_obs_debug_;
+    ros::Publisher  graph_static_obs_pub_;
     ros::Publisher  local_planner_static_obs_pub_;
     ros::Publisher  local_planner_dynamic_obs_pub_;
     ros::Publisher  surround_obs_before_dyremove_debug_, surround_obs_after_dyremove_debug_;
@@ -82,6 +83,10 @@ private:
     // of being silently discarded.
     bool has_pending_route_goal_ = false;
     geometry_msgs::PointStamped pending_route_goal_;
+    // Keep the exact command independently from the terrain-adjusted Graph
+    // goal so /far_global_path can end at the point the operator requested.
+    bool has_commanded_goal_ = false;
+    Point3D commanded_goal_;
     // A semantic snapshot has changed the obstacle/terrain inputs but its
     // contour and visibility-graph update has not completed yet.
     bool semantic_graph_dirty_ = false;

@@ -1,0 +1,168 @@
+Panels:
+  - Class: rviz/Displays
+    Name: Displays
+    Property Tree Widget:
+      Expanded:
+        - /Global Options1
+        - /Semantic OctoMap1
+        - /Graph1
+        - /Path1
+      Splitter Ratio: 0.5
+    Tree Height: 760
+  - Class: rviz/Tool Properties
+    Expanded:
+      - /2D Nav Goal1
+    Name: Tool Properties
+    Splitter Ratio: 0.5
+  - Class: rviz/Views
+    Expanded:
+      - /Current View1
+    Name: Views
+    Splitter Ratio: 0.5
+Preferences:
+  PromptSaveOnExit: false
+Toolbars:
+  toolButtonStyle: 2
+Visualization Manager:
+  Class: ""
+  Displays:
+    - Alpha: 0.35
+      Cell Size: 1
+      Class: rviz/Grid
+      Color: 120; 120; 125
+      Enabled: true
+      Name: Ground Grid
+      Plane: XY
+      Plane Cell Count: 80
+      Reference Frame: <Fixed Frame>
+      Value: true
+    - Class: octomap_rviz_plugin/ColorOccupancyGrid
+      Enabled: true
+      Max. Height Display: 3
+      Max. Octree Depth: 16
+      Min. Height Display: -1.5
+      Name: Semantic OctoMap
+      Octomap Topic: /octomap_color
+      Queue Size: 3
+      Value: true
+      Voxel Alpha: 0.42
+      Voxel Coloring: Cell Color
+      Voxel Rendering: Occupied Voxels
+    - Class: rviz/PointCloud2
+      Enabled: true
+      Name: Local Static Obstacles
+      Topic: /semantic_local_static_obstacles
+      Queue Size: 2
+      Size (Pixels): 3
+      Style: Points
+      Color Transformer: FlatColor
+      Color: 80; 80; 80
+      Value: true
+    - Class: rviz/PointCloud2
+      Enabled: true
+      Name: Local Dynamic Obstacles
+      Topic: /semantic_local_dynamic_obstacles
+      Queue Size: 2
+      Size (Pixels): 5
+      Style: Points
+      Color Transformer: FlatColor
+      Color: 255; 0; 255
+      Value: true
+    - Class: rviz/Group
+      Enabled: true
+      Name: Graph
+      Displays:
+        - Class: rviz/MarkerArray
+          Enabled: true
+          Marker Topic: /viz_static_global_graph
+          Name: Static Global Graph
+          Queue Size: 10
+          Value: true
+        - Class: rviz/MarkerArray
+          Enabled: true
+          Marker Topic: /viz_current_search_graph
+          Name: Current Search Graph
+          Queue Size: 10
+          Value: true
+        - Class: rviz/MarkerArray
+          Enabled: true
+          Marker Topic: /viz_dynamic_blocked_edges
+          Name: Dynamic Blocked Edges
+          Queue Size: 10
+          Value: true
+        - Class: rviz/MarkerArray
+          Enabled: false
+          Marker Topic: /viz_graph_topic
+          Name: Full Graph Diagnostics
+          Queue Size: 10
+          Value: false
+    - Class: rviz/Group
+      Enabled: true
+      Name: Path
+      Displays:
+        - Class: rviz/Path
+          Enabled: true
+          Name: FAR Global Path
+          Topic: /far_global_path
+          Queue Size: 10
+          Color: 20; 100; 255
+          Alpha: 1
+          Line Style: Billboards
+          Line Width: 0.08
+          Value: true
+        - Class: rviz/Marker
+          Enabled: true
+          Marker Topic: /viz_path_topic
+          Name: FAR Path Marker
+          Queue Size: 10
+          Value: true
+        - Class: rviz/PointStamped
+          Enabled: true
+          Name: Current Waypoint
+          Topic: /way_point
+          Queue Size: 10
+          Color: 255; 0; 255
+          Radius: 0.35
+          Value: true
+        - Class: rviz/Marker
+          Enabled: true
+          Marker Topic: /viz_node_topic
+          Name: Goal and Waypoint Markers
+          Queue Size: 10
+          Value: true
+  Enabled: true
+  Global Options:
+    Background Color: 245; 245; 245
+    Default Light: true
+    Fixed Frame: map_start
+    Frame Rate: 30
+  Name: root
+  Tools:
+    - Class: rviz/Interact
+      Hide Inactive Objects: true
+    - Class: rviz/MoveCamera
+    - Class: rviz/Select
+    - Class: rviz/FocusCamera
+    - Class: rviz/Measure
+    - Class: rviz/SetInitialPose
+      Topic: /initialpose
+    - Class: rviz/SetGoal
+      Topic: /move_base_simple/goal
+  Value: true
+  Views:
+    Current:
+      Class: rviz/Orbit
+      Distance: 45
+      Focal Point:
+        X: 4
+        Y: 4
+        Z: 0
+      Pitch: 0.75
+      Target Frame: <Fixed Frame>
+      Yaw: 0.8
+    Saved: ~
+Window Geometry:
+  Height: 1000
+  Width: 1600
+  X: 50
+  Y: 30
