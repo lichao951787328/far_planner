@@ -127,6 +127,16 @@ TEST(GraphLifecyclePolicy, ActiveIncidentEdgeMustBeSearchEligible) {
     EXPECT_FALSE(HasActiveSearchEligibleIncidentEdge(*candidate));
 }
 
+TEST(GraphLifecyclePolicy, QueryEdgeCannotPromoteStaticOrphan) {
+    NavNodePtr candidate =
+        MakeNodePtr(103, GraphNodeSource::STATIC_CANDIDATE);
+    NavNodePtr odom = MakeNodePtr(104, GraphNodeSource::ODOM);
+    ConnectActiveStaticEdge(candidate, odom);
+
+    EXPECT_TRUE(IsGraphEdgeSearchEligible(*candidate, *odom));
+    EXPECT_FALSE(HasActiveSearchEligibleIncidentEdge(*candidate));
+}
+
 TEST(GraphLifecyclePolicy, CroppedContourEndpointNeverBecomesGlobalHistory) {
     NavNode node = MakeNode(GraphNodeSource::STATIC_CANDIDATE);
     node.is_transient_contour_endpoint = true;

@@ -462,12 +462,14 @@ inline bool IsGraphEdgeSearchEligible(const NavNode& from,
            to_state->second.IsActive();
 }
 
-/** A persistent corner without a usable incident edge becomes a permanent
- * orphan in the global graph.  Promotion is therefore allowed only after the
- * candidate participates in at least one currently searchable edge. */
+/** A persistent corner without a usable obstacle-graph edge becomes a
+ * permanent orphan in the global graph.  Odom and goal edges are deliberately
+ * ignored: they are rebuilt for each query and cannot prove that the corner
+ * belongs to reusable map topology. */
 inline bool HasActiveSearchEligibleIncidentEdge(const NavNode& node) {
     for (const auto& neighbor : node.connect_nodes) {
-        if (neighbor && IsGraphEdgeSearchEligible(node, *neighbor)) {
+        if (neighbor && !IsGraphQueryEndpoint(*neighbor) &&
+            IsGraphEdgeSearchEligible(node, *neighbor)) {
             return true;
         }
     }

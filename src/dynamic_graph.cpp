@@ -829,6 +829,7 @@ void DynamicGraph::UpdateOdomConnections() {
     std::size_t persistent_candidates = 0;
     std::size_t local_candidates = 0;
     std::size_t not_start_candidate = 0;
+    std::size_t not_topology_connected = 0;
     EdgeRejectionStats rejections;
     float farthest_candidate = 0.0f;
     float farthest_connection = 0.0f;
@@ -837,6 +838,14 @@ void DynamicGraph::UpdateOdomConnections() {
             !checked_candidates.insert(candidate->id).second) continue;
         if (!IsStartConnectionCandidate(*candidate)) {
             ++not_start_candidate;
+            continue;
+        }
+        // A start edge to a corner that has no reusable graph edge produces
+        // exactly the two-node dead end seen in the SSMI replay: odom and one
+        // blue orphan.  Preserve that corner for future matching, but do not
+        // select it as a query anchor until the map topology reconnects it.
+        if (!HasActiveSearchEligibleIncidentEdge(*candidate)) {
+            ++not_topology_connected;
             continue;
         }
         if (candidate->source == GraphNodeSource::STATIC_GLOBAL) {
@@ -889,10 +898,10 @@ void DynamicGraph::UpdateOdomConnections() {
     }
     ROS_INFO_THROTTLE(
         5.0,
-        "DG start connections: unique=%zu validated=%zu persistent=%zu local=%zu accepted=%zu skipped[not_start_candidate=%zu] farthest_candidate=%.2fm farthest_edge=%.2fm reject[unreachable=%zu direction=%zu static_cloud=%zu dynamic_cloud=%zu polygon=%zu terrain=%zu vote=%zu]",
+        "DG start connections: unique=%zu validated=%zu persistent=%zu local=%zu accepted=%zu skipped[not_start_candidate=%zu no_topology_edge=%zu] farthest_candidate=%.2fm farthest_edge=%.2fm reject[unreachable=%zu direction=%zu static_cloud=%zu dynamic_cloud=%zu polygon=%zu terrain=%zu vote=%zu]",
         checked_candidates.size(), validated_candidates,
         persistent_candidates, local_candidates, accepted_connections,
-        not_start_candidate,
+        not_start_candidate, not_topology_connected,
         farthest_candidate, farthest_connection, rejections.unreachable,
         rejections.direction_rejected, rejections.static_cloud_blocked,
         rejections.dynamic_cloud_blocked, rejections.polygon_blocked,

@@ -882,13 +882,27 @@ public:
     NodePtrStack GetNavGraph() const {
         NodePtrStack search_graph;
         for (const auto& node_ptr : globalGraphNodes_) {
-            if (IsSearchEligible(node_ptr)) search_graph.push_back(node_ptr);
+            if (!IsSearchEligible(node_ptr)) continue;
+            // Keep confirmed but currently orphaned corners in the matching
+            // map so a later contour can reconnect them.  They are not useful
+            // search vertices until they own a reusable, non-query edge.
+            if (node_ptr->source == GraphNodeSource::STATIC_GLOBAL &&
+                !HasActiveSearchEligibleIncidentEdge(*node_ptr)) {
+                continue;
+            }
+            search_graph.push_back(node_ptr);
         }
         for (const auto& node_ptr : staticCandidateGraphNodes_) {
-            if (IsSearchEligible(node_ptr)) search_graph.push_back(node_ptr);
+            if (IsSearchEligible(node_ptr) &&
+                HasActiveSearchEligibleIncidentEdge(*node_ptr)) {
+                search_graph.push_back(node_ptr);
+            }
         }
         for (const auto& node_ptr : dynamicLocalGraphNodes_) {
-            if (IsSearchEligible(node_ptr)) search_graph.push_back(node_ptr);
+            if (IsSearchEligible(node_ptr) &&
+                HasActiveSearchEligibleIncidentEdge(*node_ptr)) {
+                search_graph.push_back(node_ptr);
+            }
         }
         return search_graph;
     };
@@ -903,8 +917,11 @@ public:
     NodePtrStack GetStaticGraphNodes() const {
         NodePtrStack nodes;
         for (const auto& node_ptr : globalGraphNodes_) {
-            if (node_ptr && node_ptr->source == GraphNodeSource::STATIC_GLOBAL)
+            if (node_ptr &&
+                node_ptr->source == GraphNodeSource::STATIC_GLOBAL &&
+                HasActiveSearchEligibleIncidentEdge(*node_ptr)) {
                 nodes.push_back(node_ptr);
+            }
         }
         return nodes;
     };
