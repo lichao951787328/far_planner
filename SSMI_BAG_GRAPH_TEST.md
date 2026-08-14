@@ -86,7 +86,7 @@ point:
 - `/semantic_graph_static_obstacles`：FAR Graph 碰撞校验实际使用的持久静态点云。
 - `logs/ssmi_bag_graph_test.csv`：每次启动覆盖写入的独立监控结果。
 
-监控进程在 bag 时钟停止后输出 `SSMI_MONITOR_RESULT PASS/FAIL` 并退出。自动目标模式要求：对齐和 frame 正确、SemanticOcTree 与静态点存在、机器人节点位于最大连通分量、路径包含至少两个点、末点到原始目标不超过 2 cm、所有当前 route 到静态障碍的距离不小于 0.45 m。
+监控进程在 bag 时钟停止后输出 `SSMI_MONITOR_RESULT PASS/FAIL` 并退出。自动目标模式要求：对齐和 frame 正确、SemanticOcTree 与静态点存在、机器人节点位于最大连通分量、路径包含至少两个点、末点到原始目标不超过 2 cm、所有 route 到静态障碍的距离不小于 0.45 m。连通性和安全距离采用整轮累计判定，不能用最后一帧掩盖中途故障。
 
 到达状态只说明 bag 中记录的轨迹进入目标范围；本测试没有让机器人按照 `/far_global_path` 执行。
 

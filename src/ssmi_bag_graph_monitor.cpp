@@ -404,6 +404,11 @@ class SsmiBagGraphMonitor {
     }
 
     have_graph_ = graph_nodes_ > 0;
+    if (have_graph_ && have_aligned_odom_ &&
+        (robot_component_ == 0 || robot_component_ != largest_component_ ||
+         robot_degree_ == 0)) {
+      graph_connectivity_ever_failed_ = true;
+    }
     if (have_graph_ && first_graph_wall_.isZero()) {
       first_graph_wall_ = ros::WallTime::now();
     }
@@ -478,6 +483,14 @@ class SsmiBagGraphMonitor {
           graph_violation_details_.push_back(detail.str());
         }
       }
+    }
+    maximum_graph_edges_checked_ =
+        std::max(maximum_graph_edges_checked_, graph_edges_checked_);
+    maximum_graph_clearance_violations_ = std::max(
+        maximum_graph_clearance_violations_, graph_clearance_violations_);
+    if (graph_edges_checked_ > 0) {
+      minimum_graph_clearance_over_run_ = std::min(
+          minimum_graph_clearance_over_run_, graph_min_clearance_);
     }
   }
 
@@ -715,7 +728,8 @@ class SsmiBagGraphMonitor {
                               initial_yaw_error_deg_ <= yaw_tolerance_deg_;
     const bool semantic_ok = have_map_ && map_id_ == "SemanticOcTree" &&
                              static_points_ > 0;
-    const bool graph_ok = have_graph_ && robot_component_ > 0 &&
+    const bool graph_ok = have_graph_ && !graph_connectivity_ever_failed_ &&
+                          robot_component_ > 0 &&
                           robot_component_ == largest_component_ &&
                           robot_degree_ > 0;
     const bool goal_ok = !auto_goal_ ||
@@ -725,8 +739,8 @@ class SsmiBagGraphMonitor {
     // Clearance is reported as a first-class acceptance metric.  A failure is
     // intentionally non-destructive: the CSV and final summary remain usable
     // for tuning robot geometry and contour projections.
-    const bool clearance_ok = graph_edges_checked_ == 0 ||
-                              graph_clearance_violations_ == 0;
+    const bool clearance_ok = maximum_graph_edges_checked_ > 0 &&
+                              maximum_graph_clearance_violations_ == 0;
     final_pass_ = alignment_ok && FramesValid() && semantic_ok && graph_ok &&
                   goal_ok && clearance_ok;
 
@@ -736,12 +750,14 @@ class SsmiBagGraphMonitor {
              FramesValid() ? "PASS" : "FAIL",
              semantic_ok ? "PASS" : "FAIL", graph_ok ? "PASS" : "FAIL",
              goal_ok ? "PASS" : "FAIL", clearance_ok ? "PASS" : "FAIL");
-    ROS_INFO("SSMI metrics: initial_error=%.4fm yaw_error=%.3fdeg static=%zu accumulated=%zu graph=%zu/%zu components=%zu robot_component=%zu degree=%zu max_path=%zu min_goal_error=%.4fm graph_clearance=%.4fm violations=%zu reached=%s",
+    ROS_INFO("SSMI metrics: initial_error=%.4fm yaw_error=%.3fdeg static=%zu accumulated=%zu graph=%zu/%zu components=%zu robot_component=%zu degree=%zu connectivity_ever_failed=%s max_path=%zu min_goal_error=%.4fm min_graph_clearance=%.4fm max_violations=%zu reached=%s",
              initial_position_error_, initial_yaw_error_deg_, static_points_,
              accumulated_static_.size(), graph_nodes_, graph_edges_,
              graph_components_, robot_component_, robot_degree_,
+             graph_connectivity_ever_failed_ ? "true" : "false",
              maximum_path_poses_, minimum_path_goal_error_,
-             graph_min_clearance_, graph_clearance_violations_,
+             minimum_graph_clearance_over_run_,
+             maximum_graph_clearance_violations_,
              ever_reached_ ? "true" : "false");
     for (const auto& detail : graph_violation_details_) {
       ROS_ERROR("SSMI graph clearance violation: %s", detail.c_str());
@@ -786,6 +802,7 @@ class SsmiBagGraphMonitor {
   bool ever_nonempty_path_ = false;
   bool static_tree_dirty_ = false;
   bool have_full_graph_message_ = false;
+  bool graph_connectivity_ever_failed_ = false;
   bool finalized_ = false;
   bool final_pass_ = false;
 
@@ -806,6 +823,8 @@ class SsmiBagGraphMonitor {
   double path_min_clearance_ = std::numeric_limits<double>::infinity();
   double minimum_path_clearance_ = std::numeric_limits<double>::infinity();
   double graph_min_clearance_ = std::numeric_limits<double>::infinity();
+  double minimum_graph_clearance_over_run_ =
+      std::numeric_limits<double>::infinity();
   double waypoint_path_distance_ = std::numeric_limits<double>::infinity();
   float semantic_snapshot_time_ = 0.0f;
   float semantic_update_time_ = 0.0f;
@@ -830,6 +849,8 @@ class SsmiBagGraphMonitor {
   size_t maximum_path_poses_ = 0;
   size_t graph_edges_checked_ = 0;
   size_t graph_clearance_violations_ = 0;
+  size_t maximum_graph_edges_checked_ = 0;
+  size_t maximum_graph_clearance_violations_ = 0;
 
   std::unordered_map<uint64_t, pcl::PointXYZ> accumulated_static_;
   pcl::PointCloud<pcl::PointXYZ>::Ptr static_cloud_;
