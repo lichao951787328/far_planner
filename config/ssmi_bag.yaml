@@ -8,6 +8,13 @@ world_frame                             : map_start
 semantic_map_topic                      : /octomap_full
 enable_goal_recording                   : false
 
+# Accept a fused SemanticOcTree class only when its normalized top-1
+# probability reaches this value. Lower-confidence occupied voxels remain
+# UNKNOWN and cannot clear persistent static collision memory. Set 0.0 to
+# disable the filter.
+MapHandler/semantic_top1_only           : true
+MapHandler/semantic_min_probability     : 0.55
+
 # Match the upstream Semantic OctoMap resolution.  This remains independent
 # from MapHandler/local_planner_resolution, which controls dense collision
 # samples for downstream consumers.

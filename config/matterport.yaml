@@ -34,7 +34,7 @@ MapHandler/local_planner_radius         : 5.0
 MapHandler/local_planner_resolution     : 0.2
 MapHandler/local_planner_obstacle_intensity: 200.0
 MapHandler/semantic_top1_only           : true
-MapHandler/semantic_min_probability     : 0.55   # Reserved while binary top-1 mode is active
+MapHandler/semantic_min_probability     : 0.55   # Reject lower-confidence SemanticOcTree top-1 classes as UNKNOWN
 MapHandler/obstacle_groups:
   - {name: chair,         rgb: [0, 33, 193]}
   - {name: television,    rgb: [0, 67, 130]}

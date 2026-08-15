@@ -7,6 +7,7 @@
 
 
 #include "far_planner/map_handler.h"
+#include "far_planner/semantic_confidence.h"
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -36,6 +37,26 @@ inline bool MatchRgbKey(const GroupContainer& groups, uint32_t rgb_key) {
         if (group.rgb_key == rgb_key) return true;
     }
     return false;
+}
+
+inline bool GetConfidentSemanticColor(
+    const SemanticOcTreeNode& node,
+    const float min_probability,
+    ColorOcTreeNode::Color& color_out) {
+    if (!node.isSemanticsSet()) {
+        // A zero threshold explicitly restores the legacy RGB fallback.
+        if (min_probability <= 0.0f) {
+            color_out = node.getColor();
+            return true;
+        }
+        return false;
+    }
+    const octomap::SemanticsLogOdds semantics = node.getSemantics();
+    if (!SemanticConfidence::AcceptTop1(semantics, min_probability)) {
+        return false;
+    }
+    color_out = semantics.getSemanticColor();
+    return true;
 }
 
 // Three signed 21-bit grid coordinates. At 0.2 m resolution this remains
@@ -143,7 +164,8 @@ void ExtractClassifiedCloudInBox(
     for (auto it = tree.begin_leafs_bbx(box.min, box.max),
               end = tree.end_leafs_bbx(); it != end; ++it) {
         if (!tree.isNodeOccupied(*it)) continue;
-        const ColorOcTreeNode::Color color = color_getter(it);
+        ColorOcTreeNode::Color color;
+        if (!color_getter(it, color)) continue;
         if (!MatchRgbKey(groups, MakeRgbKey(color.r, color.g, color.b))) continue;
         AppendExpandedVoxelCenters(it.getCoordinate(), it.getSize(), resolution,
                                    box, cloud_out);
@@ -189,6 +211,17 @@ void MapHandler::Init(const MapHandlerParams& params) {
     dynamic_obstacle_groups_ = params.dynamic_obstacle_groups;
     if (semantic_params_.local_window_radius <= 0.0f) {
         semantic_params_.local_window_radius = std::max(0.0f, map_params_.sensor_range);
+    }
+    if (!std::isfinite(semantic_params_.min_semantic_prob)) {
+        ROS_WARN("MH: semantic_min_probability is not finite; using 0.55.");
+        semantic_params_.min_semantic_prob = 0.55f;
+    } else if (semantic_params_.min_semantic_prob < 0.0f ||
+               semantic_params_.min_semantic_prob > 1.0f) {
+        const float configured = semantic_params_.min_semantic_prob;
+        semantic_params_.min_semantic_prob = std::max(
+            0.0f, std::min(1.0f, semantic_params_.min_semantic_prob));
+        ROS_WARN("MH: semantic_min_probability %.3f is outside [0, 1]; clamped to %.3f.",
+                 configured, semantic_params_.min_semantic_prob);
     }
     terrain_search_radius_ = semantic_params_.terrain_search_radius > 0.0f
         ? semantic_params_.terrain_search_radius : 0.8f;
@@ -264,11 +297,12 @@ void MapHandler::RefreshLocalTerrainSupportOctomap() {
     std::unordered_map<uint64_t, PCLPoint> current_dynamic_voxels;
 
     if (semantic_tree) {
-        const auto get_semantic_color = [](const SemanticOctree::leaf_bbx_iterator& it) {
+        const auto get_semantic_color = [this](
+            const SemanticOctree::leaf_bbx_iterator& it,
+            ColorOcTreeNode::Color& color) {
             const SemanticOcTreeNode* node = it.operator->();
-            return node->isSemanticsSet()
-                ? node->getSemantics().getSemanticColor()
-                : node->getColor();
+            return GetConfidentSemanticColor(
+                *node, semantic_params_.min_semantic_prob, color);
         };
         ExtractClassifiedCloudInBox(*semantic_tree, local_box, obstacle_groups_,
                                     get_semantic_color, semantic_obs_cloud_);
@@ -282,8 +316,11 @@ void MapHandler::RefreshLocalTerrainSupportOctomap() {
         BuildDenseVoxelMap(*semantic_tree, current_dynamic_obs_cloud_,
                            current_dynamic_voxels);
     } else {
-        const auto get_color = [](const octomap::ColorOcTree::leaf_bbx_iterator& it) {
-            return it->getColor();
+        const auto get_color = [](
+            const octomap::ColorOcTree::leaf_bbx_iterator& it,
+            ColorOcTreeNode::Color& color) {
+            color = it->getColor();
+            return true;
         };
         ExtractClassifiedCloudInBox(*color_tree, local_box, obstacle_groups_,
                                     get_color, semantic_obs_cloud_);
@@ -470,17 +507,21 @@ void MapHandler::GetCloudOfPoint(const Point3D& center, const PointCloudPtr& clo
     const auto& groups = type == CloudType::OBS_CLOUD
         ? obstacle_groups_ : terrain_support_groups_;
     if (semantic_tree) {
-        const auto get_semantic_color = [](const SemanticOctree::leaf_bbx_iterator& it) {
+        const auto get_semantic_color = [this](
+            const SemanticOctree::leaf_bbx_iterator& it,
+            ColorOcTreeNode::Color& color) {
             const SemanticOcTreeNode* node = it.operator->();
-            return node->isSemanticsSet()
-                ? node->getSemantics().getSemanticColor()
-                : node->getColor();
+            return GetConfidentSemanticColor(
+                *node, semantic_params_.min_semantic_prob, color);
         };
         ExtractClassifiedCloudInBox(*semantic_tree, query_box, groups,
                                     get_semantic_color, cloudOut);
     } else {
-        const auto get_color = [](const octomap::ColorOcTree::leaf_bbx_iterator& it) {
-            return it->getColor();
+        const auto get_color = [](
+            const octomap::ColorOcTree::leaf_bbx_iterator& it,
+            ColorOcTreeNode::Color& color) {
+            color = it->getColor();
+            return true;
         };
         ExtractClassifiedCloudInBox(*color_tree, query_box, groups,
                                     get_color, cloudOut);
@@ -562,9 +603,13 @@ StaticNodeEvidence MapHandler::QueryStaticTreeEvidence(
                 ++known_free_samples;
                 continue;
             }
-            const ColorOcTreeNode::Color color = node->isSemanticsSet()
-                ? node->getSemantics().getSemanticColor()
-                : node->getColor();
+            ColorOcTreeNode::Color color;
+            if (!GetConfidentSemanticColor(
+                    *node, semantic_params_.min_semantic_prob, color)) {
+                // An occupied voxel with missing or weak semantics is unknown,
+                // never explicit-free evidence for deleting remembered walls.
+                return StaticNodeEvidence::UNKNOWN;
+            }
             const uint32_t rgb = MakeRgbKey(color.r, color.g, color.b);
             if (MatchRgbKey(obstacle_groups_, rgb)) {
                 return StaticNodeEvidence::STATIC_OCCUPIED;

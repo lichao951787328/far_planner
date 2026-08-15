@@ -175,7 +175,7 @@ bool DynamicGraph::HasStableReplacementTopology(
     for (const auto& first : current_polygon_nodes) {
         for (const auto& second : first->contour_connects) {
             if (second && first->id < second->id &&
-                IsStableValidatedContourReplacement(
+                IsStableValidatedCo ntourReplacement(
                     first, second, obsolete, current_polygon)) {
                 // The validated edge must replace the local contour section
                 // containing the obsolete corner.  A valid edge elsewhere on

@@ -1,4 +1,6 @@
 Panels:
+  - Class: semantic_octomap/SemanticLegendPanel
+    Name: 语义颜色图例
   - Class: rviz/Displays
     Name: Displays
     Property Tree Widget:

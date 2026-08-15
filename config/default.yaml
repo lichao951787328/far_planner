@@ -51,8 +51,12 @@ MapHandler/terrain_neighbor_radius      : 1.0     # XY terrain-support radius (2
 MapHandler/local_planner_radius         : 10.0    # 10 m radius: about 20 m x 20 m local collision-map coverage
 MapHandler/local_planner_resolution     : 0.2     # Dense XY sampling resolution for occupied octree voxels
 MapHandler/local_planner_obstacle_intensity: 200.0 # Hard-obstacle value for static and dynamic layers
-# The current planner intentionally uses binary top-1 semantics. The probability
-# field is retained for a future full SemanticOcTree decoder and is not applied yet.
+# SemanticOcTree classification uses the normalized probability of its top-1
+# class. Values below this threshold are UNKNOWN and cannot add a classified
+# cloud point or provide EXPLICIT_FREE evidence. ColorOcTree has no semantic
+# distribution, so it remains an exact-RGB compatibility path. Set the
+# threshold to 0.0 to disable confidence filtering and restore the legacy RGB
+# fallback for SemanticOcTree nodes without a semantic distribution.
 MapHandler/semantic_top1_only           : true
 MapHandler/semantic_min_probability     : 0.55
 MapHandler/obstacle_groups:

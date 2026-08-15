@@ -154,6 +154,13 @@ if(CATKIN_ENABLE_TESTING)
       ${catkin_LIBRARIES})
   endif()
 
+  catkin_add_gtest(semantic_confidence_policy_test
+    src/semantic_confidence_policy_test.cpp)
+  if(TARGET semantic_confidence_policy_test)
+    target_link_libraries(semantic_confidence_policy_test
+      ${catkin_LIBRARIES})
+  endif()
+
   # Interactive integration test: run the node and then publish /octomap_full.
   add_executable(map_handler_test
     src/map_handler_test.cpp

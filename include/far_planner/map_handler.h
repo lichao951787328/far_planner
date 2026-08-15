@@ -30,7 +30,9 @@ struct SemanticMapParams {
     float local_planner_radius = 5.0f;
     float local_planner_resolution = 0.2f;
     float local_planner_obstacle_intensity = 200.0f;
-    bool  use_top1_only = true;
+    bool  use_top1_only = true;  // Multi-class output is not implemented.
+    // Normalized SemanticOcTree top-1 probability required for classification.
+    // A rejected occupied voxel is UNKNOWN, including for static-clearance evidence.
     float min_semantic_prob = 0.55f;
 };
 
