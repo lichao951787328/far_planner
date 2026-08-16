@@ -56,13 +56,61 @@
 | 字段 | 含义 |
 |---|---|
 | `vertices` / `N` | 简化后的世界坐标轮廓顶点 |
-| `is_robot_inside` | `free_odom_p` 是否在该多边形内部，用于区分边是否跑到了障碍错误的一侧 |
+| `is_robot_inside` | 自由空间代理点 `free_odom_p` 是否在该多边形内部，用于区分边是否跑到了障碍错误的一侧 |
 | `is_pillar` | 小轮廓是否整体压缩成一个柱体节点 |
-| `is_boundary_clipped` | 多边形是否碰到局部轮廓画布的可靠边界带 |
+| `is_boundary_clipped` | 多边形是否进入局部轮廓画布边缘的非可靠裁剪带；这表示轮廓可能被观测窗口截断，并不表示那里存在真实墙端点 |
 | `perimeter` | 用于柱体和 frontier 判断的轮廓周长 |
 | `source` | 静态 `STATIC_CANDIDATE` 或动态 `DYNAMIC_LOCAL` |
 
 `Polygon` 每个语义快照都会重建，不承担跨帧身份。
+
+#### 2.1.1 `free_odom_p` 是什么
+
+`free_odom_p`（free odometry point）不是第二份里程计，也不是新的导航节点；它是一个与机器人当前位置相同或非常接近的**自由空间代理点**。`odom_pos`/odom 节点仍然保存机器人的真实当前位姿，`free_odom_p` 只在二维轮廓几何判断中代替它，避免机器人中心由于栅格化、障碍膨胀、模糊或闭合轮廓误差而恰好落进某个障碍多边形。
+
+`UpdateOdomFreePosition()` 的当前行为是：
+
+1. 先令 `free_p = odom_node_ptr->position`，所以正常情况下 `free_odom_p == odom_pos`；
+2. 如果 odom 落入任意非 pillar 的当前 `Polygon`，就在 odom 周围生成以 `kLeafSize` 为间距、覆盖约 `kNavClearDist` 邻域的采样网格，并按离 odom 从近到远检查；
+3. 取第一个不在任何非 pillar 多边形内部的采样点作为 `free_odom_p`；若没有找到，则用 `is_robot_inside_poly_` 记住本次失败，避免每帧在边界附近反复选择不同代理点；
+4. 随后用修正后的 `free_odom_p` 重新计算所有 `Polygon::is_robot_inside`。
+
+它主要有三处用途：
+
+- 判断多边形的哪一侧是机器人所在的自由侧，即 `Polygon::is_robot_inside`；
+- 当待检查边的一端是 odom 节点时，用它替换碰撞检测线段的 odom 端点；
+- 在 RViz/OpenCV 调试视图中以 `free_odom_position` 显示，便于发现“真实 odom 被轮廓误包围”的情况。
+
+因此，名字中的 `free` 表示“选在轮廓自由侧用于几何判定”，不是说它经过了完整局部规划器验证，也不应把它当成机器人真实位姿写回里程计。
+
+#### 2.1.2 `is_boundary_clipped` 中的“局部轮廓画布”是什么
+
+这里的画布是 `ContourDetector` 为每次轮廓提取临时创建的**以当前 odom 为中心的二维正方形 OpenCV 栅格图像**，不是 RViz 画面，也不是整张 OctoMap。当前静态或动态障碍点先按
+
+```text
+row = center_row + round((world_x - odom_x) / contour_grid_resolution)
+col = center_col + round((world_y - odom_y) / contour_grid_resolution)
+```
+
+投影到这张图；图上再执行阈值化、放大、模糊、`findContours()` 和 `approxPolyDP()`，最后把轮廓顶点转换回世界坐标。基础画布边长按下面的方式计算：
+
+```text
+MAT_SIZE = ceil(2 * sensor_range / contour_grid_resolution)
+若 MAT_SIZE 为偶数，再加 1，保证存在中心像素
+```
+
+所以它在世界坐标中的名义范围是以 `(odom_x, odom_y)` 为中心、X/Y 各约 `[-sensor_range, +sensor_range]` 的方窗。按 `config/default.yaml` 的 `sensor_range = 20.0 m`、`contour_grid_resolution = 0.4 m`，基础画布为 `101 × 101` 像素，覆盖约 `40 m × 40 m`；轮廓提取前还会按 `CDetector/resize_ratio = 3` 放大，但放大只提高图像处理采样密度，不改变世界范围。
+
+代码不会把整张画布都视为可靠。可靠窗口定义为：
+
+```text
+|x - odom_x| <= sensor_range - contour_boundary_guard
+|y - odom_y| <= sensor_range - contour_boundary_guard
+```
+
+其中实际 guard 至少为一个 `kLeafSize`。当前默认参数下 `contour_boundary_guard = 0.40 m`，所以可靠方窗的半边长是 `19.6 m`，从 `19.6 m` 到约 `20.0 m` 的外圈是边界保护带。只要一个 `Polygon` 有任一顶点不在可靠方窗内，`Polygon::is_boundary_clipped` 就设为 `true`；单个 `CTNode` 是否被裁剪也按它自己的位置独立设置。
+
+之所以需要这个标志，是因为真实障碍可能延伸到方窗外，但输入点云在画布边缘被截断；OpenCV 的 `findContours()` 仍会把可见片段闭合，于是画布边缘可能产生一个假的端点或一条假的闭合边。`is_boundary_clipped` 的语义正是“这是局部观测裁剪产物，不能证明物理墙体真的在这里结束”。后续代码因此会隔离这类端点的历史身份，并避免用其人工闭合段作为删除旧拓扑或确认持久邻接的证据。
 
 ### 2.2 `CTNode`：当前轮廓上的几何节点
 
@@ -72,14 +120,66 @@
 |---|---|
 | `position` | 轮廓顶点坐标，稍后会按 terrain-support 调整 z |
 | `front` / `back` | 同一闭合轮廓的前后邻接顶点 |
-| `surf_dirs` | 从角点沿轮廓两侧得到的两个表面方向 |
-| `free_direct` | `UNKNOW`、`CONVEX`、`CONCAVE` 或 `PILLAR` |
+| `surf_dirs` | 从当前顶点分别沿 `front`、`back` 两侧轮廓估计的两个单位切向量；二者共同描述局部墙面夹角 |
+| `free_direct` | 根据 `surf_dirs` 及机器人所在侧得到的顶点几何类型：直墙/未知、凸角、凹角或柱体 |
 | `poly_ptr` | 所属当前 `Polygon` |
 | `is_global_match` | 本帧是否已经匹配某个历史 `NavNode` |
 | `nav_node_id` | 匹配到的 `NavNode::id` |
-| `is_contour_necessary` | 为保持轮廓拓扑而强制保留的中间点 |
-| `is_boundary_clipped` | 位于画布可靠范围之外的裁剪端点 |
+| `is_contour_necessary` | 两个已匹配历史节点之间不能用一条近似直线代替当前轮廓时，需要补入图中的转折中间点 |
+| `is_boundary_clipped` | 当前顶点位于局部轮廓画布的非可靠边界保护带，可能是观测裁剪产生的假端点 |
 | `source` | 静态或动态语义来源 |
+
+#### 2.2.1 四个轮廓几何字段的详细含义
+
+##### `surf_dirs`：角点两侧的轮廓切向
+
+`surf_dirs` 是一对二维单位向量：
+
+```text
+surf_dirs.first  ：从当前 CTNode 沿 front 链方向离开的轮廓切向
+surf_dirs.second ：从当前 CTNode 沿 back 链方向离开的轮廓切向
+```
+
+它们不是障碍面的法向量，也不是“机器人可以往哪边走”的速度方向。计算时不会只使用紧邻顶点：代码会分别沿 `front/back` 向前找到与当前点相距至少 `kNavClearDist` 的轮廓段，再由 `ContourSurfDirs()` 估计较稳定的切向，以减小短边和栅格抖动的影响。
+
+两个向量近似反向时，当前点处在一条直墙上；二者存在明显夹角时，它们的归一化向量和
+
+```text
+topo_dir = normalize(surf_dirs.first + surf_dirs.second)
+```
+
+给出局部夹角的角平分方向。这个方向用于凸凹分类、历史节点方向匹配、候选连边方向约束以及边端点投影。pillar 没有稳定的两侧墙面方向，因此使用两个 `(0, 0, -1)` 作为特殊哨兵值，而不是实际三维向下方向。
+
+##### `free_direct`：这个轮廓顶点属于哪种几何类型
+
+虽然字段名叫 `free_direct`，当前类型值表达的主要是**相对于机器人自由侧的轮廓几何类别**，并不直接存储一个方向向量：
+
+| 值 | 当前源码中的含义 |
+|---|---|
+| `UNKNOW` | 两个 `surf_dirs` 近似相反，向量和接近零，说明这是直墙上的普通点，没有唯一角平分方向；也可能是尚未完成分类的初始状态。源码枚举名称就是拼写为 `UNKNOW`。这类点通常不作为新导航角点。 |
+| `CONVEX` | 沿 `topo_dir` 偏移一个 `kLeafSize` 后，测试点与 `free_odom_p` 位于多边形的不同内外侧。典型情况下表示障碍向自由空间凸出的外角，是主要绕障候选角点。 |
+| `CONCAVE` | 沿 `topo_dir` 偏移后，测试点与 `free_odom_p` 位于多边形的同一侧。典型情况下表示障碍轮廓的内凹角；它仍参与轮廓身份和方向约束，但几何可达性与凸角不同。 |
+| `PILLAR` | 整个小轮廓周长未超过柱体阈值，或沿任一侧都无法取得足够长的稳定表面方向；该轮廓被压缩为一个柱体节点。 |
+
+这里的凸/凹不是单纯依赖轮廓顶点顺时针或逆时针次序，而是把 `Polygon::is_robot_inside`（最终由 `free_odom_p` 判断）一起纳入，因此分类始终相对于机器人所在自由侧解释。
+
+##### `is_contour_necessary`：为什么某个未匹配中间点仍需要保留
+
+当前 CTNode 与历史 NavNode 完成匹配后，`EnclosePolygonsCheck()` 会沿同一多边形检查每一对相邻的“已匹配 CTNode”。如果它们之间的所有中间轮廓点都落在两端直线附近（具体为半径 `kNearDist` 的二维圆柱/走廊内），两端可以直接表示这一段轮廓；否则，遇到的第一个明显偏离直线的中间顶点会被记为 `block_vertex`。
+
+当这个 `block_vertex` 有 terrain-support 且处于允许更新的局部范围内时，代码设置：
+
+```text
+block_vertex->is_contour_necessary = true
+```
+
+含义是：如果只复用两端历史节点并直接相连，就会把实际弯折轮廓错误地“拉成弦”，可能穿过障碍或丢失拐弯拓扑，所以这个中间转折点应作为新节点候选保留。该标志不是永久身份，每个 `CTNode` 创建时都会重置；如果后续地形有效性检查失败，代码还会撤销它。
+
+##### `is_boundary_clipped`：当前顶点是否可能是画布裁剪产物
+
+对每个非 pillar CTNode，代码直接调用 `IsPointInsideReliableContourWindow(position)`。返回 false 时该字段为 true，也就是该顶点落在以 odom 为中心的方形轮廓画布外圈保护带中。它表达的是**观测可信度**，不是占用类别：点本身仍可能来自真实障碍，但局部窗口在这里截断了完整墙面，`findContours()` 又会强制闭合可见片段，所以不能把这个顶点当成已证实的物理墙端。
+
+`CTNode::is_boundary_clipped` 是逐顶点标记；`Polygon::is_boundary_clipped` 则是聚合标记——只要多边形任一顶点被裁剪，整个 Polygon 就为 true。具体画布尺寸、可靠窗口公式和默认 `19.6 m` 半边长见第 2.1.2 节。
 
 ### 2.3 `NavNode`：真正参与维护和搜索的导航图节点
 
@@ -93,14 +193,97 @@
 
 | 容器 | 含义 |
 |---|---|
-| `poly_connects` | visibility 边身份 |
-| `contour_connects` | contour-follow 边身份 |
-| `connect_nodes` | 两类边及查询边汇总后的实际邻接 |
-| `potential_edges` + `edge_votes` | visibility 候选和历史投票 |
-| `potential_contours` + `contour_votes` | contour 候选和历史投票 |
-| `edge_states[neighbor_id]` | 该有向邻接当前是否可被搜索、实际安全路线和边来源 |
+| `poly_connects` | 已确认具有 visibility 身份的邻居：两节点之间存在独立于“同轮廓相邻关系”的自由空间直连依据 |
+| `contour_connects` | 已确认具有 contour-follow 身份的邻居：两节点按当前或历史障碍轮廓顺序相邻，可沿障碍自由侧绕行 |
+| `connect_nodes` | 搜索邻接并集；无论一对节点有一种还是两种边身份，这里只保存一个对称邻接 |
+| `potential_edges` + `edge_votes` | visibility 的候选邻居列表，以及每对候选跨帧通过/失败的滑动投票队列 |
+| `potential_contours` + `contour_votes` | contour-follow 的候选邻居列表，以及每对候选跨帧“仍为轮廓邻接/不再邻接”的滑动投票队列 |
+| `edge_states[neighbor_id]` | `connect_nodes` 中该有向邻接的运行时状态：验证模式、来源、静态有效性、动态/拓扑阻塞、实际安全路线和代价 |
 
 同一对节点可能同时具有 visibility 和 contour 身份。删除一种身份时，只有在没有另一种身份的情况下才真正从 `connect_nodes` 删除。
+
+#### 2.3.1 六组图容器为什么要分开
+
+这六组容器不是六种互斥的边，而是把“候选证据、已确认身份、实际邻接、当前可用状态”分层保存：
+
+```text
+visibility 观测 ─> potential_edges + edge_votes ─> poly_connects ─┐
+                                                                  ├─> connect_nodes ─> edge_states ─> 搜索器
+contour 观测    ─> potential_contours + contour_votes ─> contour_connects ─┘
+```
+
+##### `poly_connects`：visibility 边身份表
+
+这里的 `poly` 是原 FAR 代码沿用的名字，实际表达的是普通 visibility 关系。两个节点要形成这种关系，需要通过角点类型/方向限制、轮廓和静动态点云碰撞、terrain-support 等检查，并取得足够的 visibility 投票。它回答的是：
+
+> 不依赖“它们属于同一段障碍轮廓”，机器人是否可以在自由空间中从一个节点直接看见并走向另一个节点？
+
+`poly_connects` 只记录这种边身份，不单独保存阻塞状态和路线细节。添加时会同时把对方放入两端节点的列表；删除 visibility 身份时，如果同一节点对仍有 contour 或其他合法边身份，实际搜索邻接不会随之删除。
+
+##### `contour_connects`：contour-follow 边身份表
+
+它记录两个导航节点是否对应同一障碍轮廓上按顺序可连接的节点。它回答的是：
+
+> 这两个点是否是同一轮廓拓扑中的相邻路标，可以沿墙体的自由侧从一个绕到另一个？
+
+这类边不能简单把两个角点中心直接连起来。`ValidateContourFollowEdge()` 会将路线投影到障碍的自由侧，保存具有机器人间隙的 `route_start/route_end`，并分别检查静态和动态碰撞层。静态 contour 身份可以跨帧保留；一次未观测不会立即删除，可靠的连续反证和安全替代拓扑才会推动删除。
+
+##### `connect_nodes`：搜索器实际遍历的邻居并集
+
+`connect_nodes` 是真正的无向邻接表，A 连接 B 时，A/B 两端都会保存对方。它汇总：
+
+- visibility 边；
+- contour-follow 边；
+- odom、goal 等查询层临时边；
+- 必要的 stitch 等连接。
+
+它不保存“为什么相连”，也不会因同一节点对拥有两种身份而出现两份 B。搜索器遍历这里的邻居，但还必须检查对应 `edge_states` 是否 active。因此，“出现在 `connect_nodes`”表示拓扑邻接存在，不等于这一帧一定允许通过。
+
+##### `potential_edges` 与 `edge_votes`：visibility 候选及时间证据
+
+`potential_edges` 保存曾被拿来评估 visibility 的候选邻居指针；`edge_votes[neighbor_id]` 保存同一候选最近若干次判断的 `1/0` 队列：通过几何、方向、碰撞和地形检查记正票，失败记负票。二者配套存在：前者便于遍历和清理候选关系，后者保存按邻居 ID 索引的时间证据。
+
+普通静态 visibility 不会因单帧抖动立即建立或撤销，而是由滑动投票达到门限后进入或退出 `poly_connects/connect_nodes`。动态边的投票窗口为 1，odom 查询边使用更短窗口，所以它们能更快响应。候选关系本身不等于可搜索边。
+
+##### `potential_contours` 与 `contour_votes`：轮廓邻接候选及时间证据
+
+这组结构与 visibility 投票平行，但证据问题不同。正票表示当前轮廓顺序、边界关系和地形检查仍支持“两节点为 contour-follow 邻居”；负票表示当前可靠轮廓不再支持该关系。投票达到条件后才写入 `contour_connects`，避免轮廓简化、遮挡或角点匹配抖动让墙边拓扑每帧闪烁。
+
+因此不能把 `contour_votes` 和 `edge_votes` 合并：同一对节点可能失去轮廓相邻关系，但仍然彼此可视；也可能仍是同一墙体的相邻角点，却不能采用普通中心点直连。
+
+##### `edge_states[neighbor_id]`：邻接当前到底能不能走
+
+每个 `connect_nodes` 邻居都有按对方 ID 索引的 `GraphEdgeState`。它保存的不是历史投票，而是已经形成邻接后的当前执行状态，包括：
+
+- `source`：静态 visibility、静态 contour、动态、stitch、odom 或 goal；
+- `validation_mode`：按普通 `VISIBILITY` 还是 `CONTOUR_FOLLOW` 方式验证；
+- `static_valid`、`dynamic_blocked`、`topology_blocked`、`active`；
+- contour-follow 的自由侧实际路线 `route_start/route_end` 及 `route_cost`；
+- 可靠轮廓连续否定旧 contour 关系的 `current_contour_misses`。
+
+最终可搜索条件是：
+
+```text
+static_valid && !dynamic_blocked && !topology_blocked && active
+```
+
+所以这几层的职责分别是：投票表回答“历史证据够不够”，身份表回答“这条边为什么存在”，`connect_nodes` 回答“图上有哪些邻居”，`edge_states` 回答“这条邻接此刻是否安全可用、实际走哪条路线”。
+
+#### 2.3.2 为什么同时需要 visibility 和 contour
+
+两者代表两种不同的可达依据：
+
+| 对比项 | visibility | contour-follow |
+|---|---|---|
+| 依据 | 两节点之间存在自由空间直连 | 两节点在同一障碍轮廓上顺序相邻 |
+| 典型用途 | 跨越开阔区、连接不同障碍物的角点、形成捷径 | 沿同一墙面/障碍外缘稳定绕行 |
+| 路线几何 | 通常检查两节点间的投影直连 | 保存向自由侧偏移后的 clearance route |
+| 主要风险 | 直线穿过障碍、落入角点非自由扇区 | OpenCV 假闭合边、局部裁剪端点、轮廓拓扑抖动 |
+| 生命周期 | visibility 投票独立维护 | contour 投票及拓扑替换策略独立维护 |
+
+只有 visibility 会漏掉重要的“沿障碍绕行”结构：两个墙角中心的直线可能擦过/穿过障碍，但向自由侧偏移后的 contour route 是安全的。只有 contour 又会把图限制成一圈圈障碍边界，失去跨开阔区的直连捷径，路径会过长甚至无法连接不同轮廓。
+
+同一节点对同时拥有两种身份也合理。例如同一障碍轮廓上的两个相邻凸角，既能沿轮廓自由侧安全绕行，二者之间也可能恰好无遮挡、满足 visibility。代码在 `connect_nodes` 中只保留一份邻接，并让 contour 身份优先使用 `CONTOUR_FOLLOW` 的安全路线状态。如果以后 contour 身份被可靠反证删除，但 visibility 身份仍成立，代码会保留这份邻接，并把 `edge_states` 重置为 visibility 验证；反过来删除 visibility 身份时，只要 contour 身份仍在，也不会切断搜索图。
 
 ### 2.4 节点来源 `GraphNodeSource`
 
@@ -290,6 +473,18 @@ node_ptr->is_wide_near  = false;
 ```
 
 范围外的 `STATIC_GLOBAL` 仍保存在持久全局图中，只是不参加这一轮局部匹配和局部重连。因此，“不在 near 集合”不等于“节点已删除”，也不等于全局路径搜索不能再使用该节点。
+
+这里的“局部 visibility/contour 边重连”也不是说 visibility 边离开局部范围就会被删除。更准确的生命周期是：**局部范围负责产生和更新连边证据，已成熟的边作为全局图关系持久保存，节点重新进入局部范围后再接受完整复检。**
+
+| visibility 边两端的当前位置 | 本轮处理 |
+|---|---|
+| 两端都在 `near_nav_nodes_` | 枚举为局部 pair，重新检查角点类型、方向规约、静/动态碰撞、地形、visibility 投票和同方向稀疏化 |
+| 一端在 near，另一端在局部外 | 复检已有的跨边界历史 visibility 边；原连接失效时，还会尝试让该外部节点改由其他 near 节点接回全局图 |
+| 两端都在局部外 | 不做本轮的完整 pair 验证，也不产生新 visibility 边；已确认的 `poly_connects/connect_nodes/edge_states` 继续留在全局图中供搜索使用 |
+
+因此，“两端都离开局部后不再两两重算”不等于“这条边在全局范围内就不管了”：它仍是全局搜索图的一部分，也仍可接受动态 mask 等运行时状态更新；只是当前没有来自该区域的新可靠局部观测，不应仅因“本帧未看见”就撤销历史边。机器人以后回到该区域，两端再次进入 near 工作集时，该边会按当前几何和障碍物证据被保留、阻塞或删除。
+
+这种“局部更新证据、全局保存结果”的方式也避免每帧对所有全局节点做 `O(N_global²)` 的两两验证；实际主要开销被限制为 `O(N_near²)`。当前静态节点的 near 筛选主要使用 `Graph/static_stitch_radius`（默认 28.5 m），动态节点主要使用 `sensor_range`（默认 20 m）。
 
 ##### 3.2.4.2 四个集合不是四个互斥距离环
 
@@ -2207,11 +2402,98 @@ GraphPlanner 搜索优先使用这个代价，而不是节点锚点间的直线�
 
 1. 节点不是同一点；
 2. 任一端都不能是 `CONCAVE`，即 `IsConvexConnect()` 要求两端均非凹角；
-3. 从每个非 pillar 角点看向另一端，方向必须位于该角点允许的自由扇区；
+3. 从每个非 pillar 角点看向另一端，方向必须位于该角点的 reduced-visibility 允许连接扇区；它不是完整自由空间，详见 9.2.1；
 4. 投影后的线段通过静态/动态点云与 Polygon 检查；
 5. terrain 检查通过；
-6. 两端 finalized 但本帧丢失 contour 身份时，不能随意新连；
+6. 若任一端是 finalized 的历史障碍节点但本帧没有匹配当前 CTNode，不为新的 visibility 候选增加正票；已有历史边仍按原投票维护，详见 9.2.2；
 7. visibility 投票达到条件。
+
+#### 9.2.1 “允许连接扇区”是什么，为什么连外侧相对扇区也排除
+
+设角点 A 的两条轮廓切向为：
+
+```text
+d1 = A.surf_dirs.first
+d2 = A.surf_dirs.second
+u  = normalize(B.position - A.position)
+```
+
+`IsOutReducedDirs()` 不是判断 `u` 是否落在整个几何自由空间，而是只接受下面两个扇区的并集，并加入随距离变化的角度容差：
+
+```text
+sector(d1, -d2)  或  sector(d2, -d1)
+```
+
+随后还要从 B 端反向检查 `normalize(A-B)`；两个端点都接受，方向条件才通过。`PILLAR` 因为没有可靠的两侧墙面切向而跳过这项限制，odom-frontier 也是显式例外。
+
+以正方形右上角 A 为例，若 `d1` 向左、`d2` 向下，则结果是：
+
+```text
+                         NE：外侧相对扇区
+                                ×
+                                │
+       NW：允许  <────────────── A ──────────────>  SE：允许
+                                │
+                                ×
+                         SW：正方形内部
+```
+
+所以这个判定确实同时排除了：
+
+1. `d1` 与 `d2` 之间的 SW 障碍内角；
+2. `-d1` 与 `-d2` 之间的 NE 外侧相对角。
+
+第一项是避免边从角点扎进障碍。第二项不是碰撞安全要求，而是 FAR 的 **partially reduced visibility graph** 稀疏化：代码希望保留从角点两侧“擦着/绕过”障碍的切向型边，删除从角点向开阔区径向发散、通常不会成为欧氏最短绕障路径必要转折的边。两个障碍顶点之间只有在两端都近似满足这种“pass around”方向时才留下，因此保留结果更接近障碍间的双切线连接，而不是完整 visibility graph 的全部可见点对。
+
+这也解释了为什么称它为“自由扇区”不够准确：NE 明明是无碰撞自由空间，仍会被方向规约删除。更准确的名字是 **reduced-visibility 允许连接扇区**；真正的自由/碰撞结论还要由后面的 Polygon、静动态点云和 terrain 检查给出。
+
+短边受到的限制较弱。代码通过
+
+```text
+margin_angle_noise = MarginAngleNoise(distance, kNearDist, kAngleNoise)
+```
+
+按距离放宽扇区：距离接近或小于 `kNearDist` 时角容差最高可接近 `90°`，短边几乎不做严格 reduction；长边才主要执行上述切向稀疏化。这与 FAR 为避免短边方向对顶点噪声过敏而保留短边的考虑一致。
+
+从完整可见性角度看，用户指出的问题成立：NE 中的边是可见且可能无碰撞的，只是被主动稀疏化了。理想精确多边形和欧氏最短路中，这通常是合理的冗余消除；但本工程还有栅格化、轮廓简化、clearance 投影、地形、动态障碍和局部裁剪，因此它不是碰撞层能证明的“必然无用”。如果出现“两点实际无遮挡但始终不连”的问题，应把 `IsOutReducedDirs()` 作为重点诊断项；它可能在稀疏或带噪图中删掉实际有用的可行边。
+
+#### 9.2.2 finalized 历史节点丢失当前轮廓匹配后为什么不能随意新连
+
+这里的两个状态含义不同：
+
+```text
+is_finalized == true
+    该 NavNode 的历史位置和 surf_dirs 已经过多帧稳定化
+
+is_contour_match == false
+    当前语义快照中没有 CTNode 匹配到这个历史 NavNode
+```
+
+后一种情况不等于已经确认节点消失。它可能由遮挡、离开可靠观测区、轮廓简化漏点或环境真实变化造成；但也正因为当前帧没有重新证明这个位置仍是有效角点，代码不能只凭旧位置和旧方向给它扩展新的 visibility 拓扑。
+
+`IsPolyMatchedForConnect()` 的实际门控是：只要任一端同时满足
+
+```text
+is_finalized && !is_contour_match && !IsFreeNavNode(node)
+```
+
+本轮即不调用 `RecordPolygonVote()`，也就是不给该 pair 追加 visibility 正票。`IsFreeNavNode()` 对 odom/navpoint 等自由查询节点放行；这里限制的是障碍派生的历史角点。
+
+必须区分“禁止新增”和“立即删旧”：
+
+```text
+历史节点 A 当前未匹配 CTNode
+        │
+        ├─ A-B 从未有过 visibility 证据
+        │      -> 没有正票，不能凭当前一帧创建新边
+        │
+        └─ A-C 已有足够历史 edge_votes / visibility 身份
+               -> 旧票不会仅因未匹配而自动清零，已有边仍可暂时保持
+```
+
+因此这条规则的准确含义是：**没有当前轮廓支持的 finalized 障碍角点不能为新 visibility 候选积累正票，但已有历史 visibility 边并不因此立即删除。** 旧边仍由已有投票、物理碰撞检查、动态 mask 和节点/拓扑生命周期共同维护。
+
+这样做是在两个风险之间折中：一方面防止暂时失去观测、甚至已经过时的历史角点凭旧几何制造新捷径；另一方面避免单帧遮挡或轮廓漏检把已经稳定的全局图立即切断。只有后续可靠反证、投票翻转、节点删除或其他明确结构条件才会真正消除旧 visibility 身份。
 
 ### 9.3 普通角点投影
 
