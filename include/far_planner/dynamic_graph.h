@@ -22,11 +22,20 @@ struct DynamicGraphParams {
     float static_update_radius = 28.5f;
     float static_stitch_radius = 28.5f;
     float dynamic_position_alpha = 0.65f;
+    // When positive, rejected visibility candidates no farther than this
+    // radius are exported as diagnostic markers. This is observability only.
+    float diagnostic_near_pair_radius = 0.0f;
     int static_confirm_frames = 3;
     int static_remove_frames = 3;
     int static_topology_remove_frames = 5;
+    int static_visibility_remove_frames = 3;
+    float static_duplicate_radius = 0.5f;
     bool static_promotion_requires_finalized = true;
     bool static_promotion_requires_active_edge = true;
+    bool static_promotion_requires_main_component = true;
+    // In dual-input mode, a locally observed static-looking corner may be
+    // promoted only when the confirmed global SemanticOcTree supports it.
+    bool static_promotion_requires_global_evidence = false;
 };
 
 class DynamicGraph {  
@@ -55,6 +64,11 @@ private:
     static NodePtrStack globalGraphNodes_;
     static NodePtrStack staticCandidateGraphNodes_;
     static NodePtrStack dynamicLocalGraphNodes_;
+    // IDs in the currently selected reusable static routing component.
+    // Confirmed nodes outside this set remain matching history and can rejoin
+    // when a validated static edge reconnects them, but are never query
+    // anchors or search vertices while detached.
+    static std::unordered_set<std::size_t> staticMainNodeIds_;
     static std::unordered_map<std::size_t, NavNodePtr> idx_node_map_;
     static std::unordered_map<NavNodePtr, std::pair<int, std::unordered_set<NavNodePtr>>> out_contour_nodes_map_;
     static std::vector<EdgeDiagnostic> contour_edge_diagnostics_;
@@ -79,7 +93,9 @@ private:
 
     bool ApplyValidatedGraphEdge(const NavNodePtr& node_ptr1,
                                  const NavNodePtr& node_ptr2,
-                                 bool structurally_valid);
+                                 bool structurally_valid,
+                                 EdgeRejectReason rejection_reason =
+                                     EdgeRejectReason::NONE);
 
     static void RemoveVisibilityEdge(const NavNodePtr& node_ptr1,
                                      const NavNodePtr& node_ptr2);
@@ -113,6 +129,8 @@ private:
     static void InitNodePosition(const NavNodePtr& node_ptr, const Point3D& new_pos); 
 
     void RemoveNodeFromGraph(const NavNodePtr& node_ptr);
+
+    void RefreshStaticMainComponent();
 
     bool UpdateNodeSurfDirs(const NavNodePtr& node_ptr, PointPair cur_dirs);
 
@@ -331,6 +349,13 @@ private:
         const bool is_current_static =
             ctnode_ptr->source == GraphNodeSource::STATIC_CANDIDATE ||
             ctnode_ptr->source == GraphNodeSource::STATIC_GLOBAL;
+        // Concave samples still contribute occupied contour geometry, but do
+        // not represent a free-space visibility vertex and must not become a
+        // persistent graph node.
+        if (is_current_static &&
+            ctnode_ptr->free_direct == NodeFreeDirect::CONCAVE) {
+            return false;
+        }
         // MatchContourWithNavGraph has already reduced the complete contour to
         // unmatched routing vertices (classified corners/pillars). In the
         // semantic pipeline the current snapshot itself is authoritative, so
@@ -824,6 +849,8 @@ public:
             state1.route_cost = state2.route_cost = 0.0f;
             state1.current_contour_misses =
                 state2.current_contour_misses = 0;
+            state1.static_visibility_misses =
+                state2.static_visibility_misses = 0;
         }
         node_ptr1->edge_states[node_ptr2->id] = state1;
         node_ptr2->edge_states[node_ptr1->id] = state2;
@@ -875,32 +902,54 @@ public:
         globalGraphNodes_.clear();
         staticCandidateGraphNodes_.clear();
         dynamicLocalGraphNodes_.clear();
+        staticMainNodeIds_.clear();
     }
 
     /* Get Internal Values */
     const NavNodePtr    GetOdomNode()         const { return odom_node_ptr_;};
     NodePtrStack GetNavGraph() const {
-        NodePtrStack search_graph;
+        NodePtrStack eligible_graph;
+        std::unordered_set<std::size_t> eligible_ids;
+        const auto append_eligible = [&eligible_graph, &eligible_ids](
+            const NavNodePtr& node_ptr) {
+            if (node_ptr && eligible_ids.insert(node_ptr->id).second) {
+                eligible_graph.push_back(node_ptr);
+            }
+        };
         for (const auto& node_ptr : globalGraphNodes_) {
             if (!IsSearchEligible(node_ptr)) continue;
+            if (IsGraphQueryEndpoint(*node_ptr)) {
+                append_eligible(node_ptr);
+                continue;
+            }
             // Keep confirmed but currently orphaned corners in the matching
             // map so a later contour can reconnect them.  They are not useful
             // search vertices until they own a reusable, non-query edge.
             if (node_ptr->source == GraphNodeSource::STATIC_GLOBAL &&
-                !HasActiveSearchEligibleIncidentEdge(*node_ptr)) {
+                (!staticMainNodeIds_.count(node_ptr->id) ||
+                 !HasActiveSearchEligibleIncidentEdge(*node_ptr))) {
                 continue;
             }
-            search_graph.push_back(node_ptr);
+            append_eligible(node_ptr);
         }
         for (const auto& node_ptr : staticCandidateGraphNodes_) {
             if (IsSearchEligible(node_ptr) &&
                 HasActiveSearchEligibleIncidentEdge(*node_ptr)) {
-                search_graph.push_back(node_ptr);
+                append_eligible(node_ptr);
             }
         }
         for (const auto& node_ptr : dynamicLocalGraphNodes_) {
             if (IsSearchEligible(node_ptr) &&
                 HasActiveSearchEligibleIncidentEdge(*node_ptr)) {
+                append_eligible(node_ptr);
+            }
+        }
+        const std::unordered_set<std::size_t> robot_reachable =
+            ActiveReachableNodeIdsWithin(odom_node_ptr_, eligible_ids);
+        NodePtrStack search_graph;
+        search_graph.reserve(robot_reachable.size());
+        for (const auto& node_ptr : eligible_graph) {
+            if (robot_reachable.count(node_ptr->id)) {
                 search_graph.push_back(node_ptr);
             }
         }
@@ -914,14 +963,35 @@ public:
                      dynamicLocalGraphNodes_.end());
         return nodes;
     };
+    /** All confirmed static history, including currently detached components
+     * and edge-less nodes. This is the global-map/diagnostic layer, not the
+     * set offered to the current path search. */
     NodePtrStack GetStaticGraphNodes() const {
         NodePtrStack nodes;
         for (const auto& node_ptr : globalGraphNodes_) {
             if (node_ptr &&
-                node_ptr->source == GraphNodeSource::STATIC_GLOBAL &&
-                HasActiveSearchEligibleIncidentEdge(*node_ptr)) {
+                node_ptr->source == GraphNodeSource::STATIC_GLOBAL) {
                 nodes.push_back(node_ptr);
             }
+        }
+        return nodes;
+    };
+    /** Currently selected reusable static component. Search applies an
+     * additional robot-reachability filter in GetNavGraph(). */
+    NodePtrStack GetStaticMainGraphNodes() const {
+        NodePtrStack nodes;
+        for (const auto& node_ptr : globalGraphNodes_) {
+            if (!node_ptr ||
+                node_ptr->source != GraphNodeSource::STATIC_GLOBAL ||
+                !staticMainNodeIds_.count(node_ptr->id)) continue;
+            const bool has_main_edge = std::any_of(
+                node_ptr->connect_nodes.begin(), node_ptr->connect_nodes.end(),
+                [&node_ptr](const NavNodePtr& neighbor) {
+                    return neighbor &&
+                        staticMainNodeIds_.count(neighbor->id) &&
+                        IsGraphEdgeSearchEligible(*node_ptr, *neighbor);
+                });
+            if (has_main_edge) nodes.push_back(node_ptr);
         }
         return nodes;
     };

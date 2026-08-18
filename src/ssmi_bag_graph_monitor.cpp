@@ -75,6 +75,14 @@ bool SameFrame(const std::string& first, const std::string& second) {
   return NormalizeFrame(first) == NormalizeFrame(second);
 }
 
+bool HasPointCloudField(const sensor_msgs::PointCloud2& cloud,
+                        const std::string& name) {
+  for (const auto& field : cloud.fields) {
+    if (field.name == name && field.count > 0) return true;
+  }
+  return false;
+}
+
 struct QuantizedPoint {
   long long x = 0;
   long long y = 0;
@@ -116,6 +124,9 @@ class SsmiBagGraphMonitor {
                                    "map_start");
     private_nh_.param<std::string>("source_odom_topic", source_odom_topic_,
                                    "/fusion_localization");
+    private_nh_.param<std::string>(
+        "local_voxel_topic", local_voxel_topic_,
+        "/local_3d_semantic_voxel_map/voxel_cloud");
     private_nh_.param<std::string>("output_csv", output_csv_, "");
     private_nh_.param("auto_goal", auto_goal_, false);
     private_nh_.param("goal_x", goal_.x, 7.98);
@@ -133,6 +144,10 @@ class SsmiBagGraphMonitor {
                       visibility_endpoint_exclusion_, 0.875);
     private_nh_.param("static_accumulation_resolution",
                       static_accumulation_resolution_, 0.20);
+    private_nh_.param("static_component_failure_frames",
+                      static_component_failure_frames_, 5);
+    static_component_failure_frames_ =
+        std::max(1, static_component_failure_frames_);
 
     if (output_csv_.empty()) {
       const std::string package = ros::package::getPath("far_planner");
@@ -144,12 +159,17 @@ class SsmiBagGraphMonitor {
     if (!csv_.is_open()) {
       ROS_ERROR("SSMI monitor cannot open CSV: %s", output_csv_.c_str());
     } else {
-      csv_ << "wall_elapsed_s,ros_time,map_stamp,odom_stamp,map_frame,"
-              "source_odom_frame,graph_frame,goal_frame,path_frame,"
+      csv_ << "wall_elapsed_s,ros_time,map_stamp,odom_stamp,"
+              "local_voxel_stamp,map_frame,source_odom_frame,"
+              "local_voxel_frame,local_voxel_points,"
+              "local_voxel_acquisitions,local_voxel_schema_valid,"
+              "graph_frame,goal_frame,path_frame,"
               "initial_position_error_m,initial_yaw_error_deg,"
               "static_points,dynamic_points,graph_static_points,"
               "accumulated_static_points,"
               "graph_nodes,graph_edges,graph_components,largest_component,"
+              "static_graph_nodes,static_graph_edges,static_graph_components,"
+              "static_graph_largest,static_graph_invalid_frames,"
               "robot_component,robot_degree,blocked_edges,path_poses,"
               "path_length_m,path_goal_error_m,path_min_clearance_m,"
               "graph_edges_checked,graph_min_clearance_m,"
@@ -163,6 +183,9 @@ class SsmiBagGraphMonitor {
                               &SsmiBagGraphMonitor::OdomCallback, this);
     map_sub_ = nh_.subscribe("/octomap_full", 1,
                              &SsmiBagGraphMonitor::MapCallback, this);
+    local_voxel_sub_ = nh_.subscribe(
+        local_voxel_topic_, 2,
+        &SsmiBagGraphMonitor::LocalVoxelCallback, this);
     static_cloud_sub_ = nh_.subscribe(
         "/semantic_local_static_obstacles", 2,
         &SsmiBagGraphMonitor::StaticCloudCallback, this);
@@ -175,6 +198,9 @@ class SsmiBagGraphMonitor {
     search_graph_sub_ = nh_.subscribe(
         "/viz_current_search_graph", 2,
         &SsmiBagGraphMonitor::SearchGraphCallback, this);
+    static_graph_sub_ = nh_.subscribe(
+        "/viz_static_main_graph", 2,
+        &SsmiBagGraphMonitor::StaticGraphCallback, this);
     full_graph_sub_ = nh_.subscribe(
         "/viz_graph_topic", 2,
         &SsmiBagGraphMonitor::FullGraphCallback, this);
@@ -210,9 +236,9 @@ class SsmiBagGraphMonitor {
                                       this);
     start_wall_ = ros::WallTime::now();
 
-    ROS_INFO("SSMI graph monitor: expected frame=%s, CSV=%s, auto_goal=%s",
-             expected_frame_.c_str(), output_csv_.c_str(),
-             auto_goal_ ? "true" : "false");
+    ROS_INFO("SSMI graph monitor: expected frame=%s, local voxel=%s, CSV=%s, auto_goal=%s",
+             expected_frame_.c_str(), local_voxel_topic_.c_str(),
+             output_csv_.c_str(), auto_goal_ ? "true" : "false");
   }
 
   ~SsmiBagGraphMonitor() {
@@ -268,6 +294,34 @@ class SsmiBagGraphMonitor {
     map_frame_ = message->header.frame_id;
     map_stamp_ = message->header.stamp;
     map_id_ = message->id;
+  }
+
+  void LocalVoxelCallback(
+      const sensor_msgs::PointCloud2ConstPtr& message) {
+    if (!message) return;
+    local_voxel_frame_ = message->header.frame_id;
+    local_voxel_points_ =
+        static_cast<size_t>(message->width) * message->height;
+    local_voxel_schema_valid_ =
+        HasPointCloudField(*message, "x") &&
+        HasPointCloudField(*message, "y") &&
+        HasPointCloudField(*message, "z") &&
+        HasPointCloudField(*message, "label") &&
+        HasPointCloudField(*message, "semantic_confidence") &&
+        (HasPointCloudField(*message, "traversability") ||
+         HasPointCloudField(*message, "intensity"));
+    if (message->header.stamp.isZero()) {
+      local_voxel_zero_stamp_seen_ = true;
+      return;
+    }
+    have_local_voxel_ = true;
+    if (local_voxel_stamp_.isZero() ||
+        message->header.stamp > local_voxel_stamp_) {
+      local_voxel_stamp_ = message->header.stamp;
+      ++local_voxel_acquisitions_;
+    } else if (message->header.stamp < local_voxel_stamp_) {
+      local_voxel_out_of_order_seen_ = true;
+    }
   }
 
   void StaticCloudCallback(const sensor_msgs::PointCloud2ConstPtr& message) {
@@ -425,6 +479,80 @@ class SsmiBagGraphMonitor {
       first_graph_wall_ = ros::WallTime::now();
     }
     WriteCsvRow();
+  }
+
+  void StaticGraphCallback(const MarkerArray::ConstPtr& message) {
+    if (!message) return;
+    const visualization_msgs::Marker* node_marker = nullptr;
+    const visualization_msgs::Marker* edge_marker = nullptr;
+    for (const auto& marker : message->markers) {
+      if (!marker.header.frame_id.empty()) {
+        static_graph_frame_ = marker.header.frame_id;
+      }
+      if (marker.ns == "static_main_nodes") node_marker = &marker;
+      if (marker.ns == "static_main_edges") edge_marker = &marker;
+    }
+    if (!node_marker || !edge_marker) return;
+
+    static_graph_nodes_ = node_marker->points.size();
+    static_graph_edges_ = edge_marker->points.size() / 2;
+    std::map<QuantizedPoint, size_t> point_index;
+    for (size_t index = 0; index < node_marker->points.size(); ++index) {
+      point_index.emplace(Quantize(node_marker->points[index]), index);
+    }
+    std::vector<std::set<size_t>> adjacency(static_graph_nodes_);
+    for (size_t index = 0; index + 1 < edge_marker->points.size();
+         index += 2) {
+      const auto first = point_index.find(
+          Quantize(edge_marker->points[index]));
+      const auto second = point_index.find(
+          Quantize(edge_marker->points[index + 1]));
+      if (first == point_index.end() || second == point_index.end()) continue;
+      adjacency[first->second].insert(second->second);
+      adjacency[second->second].insert(first->second);
+    }
+
+    std::vector<bool> visited(static_graph_nodes_, false);
+    std::vector<size_t> component_sizes;
+    for (size_t root = 0; root < static_graph_nodes_; ++root) {
+      if (visited[root]) continue;
+      size_t count = 0;
+      std::queue<size_t> pending;
+      pending.push(root);
+      visited[root] = true;
+      while (!pending.empty()) {
+        const size_t current = pending.front();
+        pending.pop();
+        ++count;
+        for (const size_t neighbor : adjacency[current]) {
+          if (!visited[neighbor]) {
+            visited[neighbor] = true;
+            pending.push(neighbor);
+          }
+        }
+      }
+      component_sizes.push_back(count);
+    }
+    static_graph_components_ = component_sizes.size();
+    static_graph_largest_ = component_sizes.empty()
+        ? 0
+        : *std::max_element(component_sizes.begin(), component_sizes.end());
+    if (static_graph_nodes_ > 0) have_static_graph_ = true;
+
+    const bool split = static_graph_nodes_ > 0 &&
+        (static_graph_components_ != 1 ||
+         static_graph_largest_ != static_graph_nodes_);
+    if (split) {
+      ++static_graph_invalid_frames_;
+      if (static_graph_invalid_frames_ >=
+          static_cast<size_t>(static_component_failure_frames_)) {
+        static_graph_connectivity_ever_failed_ = true;
+      }
+    } else {
+      static_graph_invalid_frames_ = 0;
+    }
+    maximum_static_graph_components_ = std::max(
+        maximum_static_graph_components_, static_graph_components_);
   }
 
   void FullGraphCallback(const MarkerArray::ConstPtr& message) {
@@ -609,6 +737,7 @@ class SsmiBagGraphMonitor {
 
   void WallTimerCallback(const ros::WallTimerEvent&) {
     if (auto_goal_ && !goal_sent_ && have_graph_ && have_map_ &&
+        have_local_voxel_ && local_voxel_schema_valid_ &&
         have_initial_alignment_ && !first_graph_wall_.isZero() &&
         (ros::WallTime::now() - first_graph_wall_).toSec() >=
             goal_publish_delay_) {
@@ -694,7 +823,15 @@ class SsmiBagGraphMonitor {
 
   bool FramesValid() const {
     if (!have_map_ || !SameFrame(map_frame_, expected_frame_)) return false;
+    if (!have_local_voxel_ ||
+        !SameFrame(local_voxel_frame_, expected_frame_)) {
+      return false;
+    }
     if (!graph_frame_.empty() && !SameFrame(graph_frame_, expected_frame_)) {
+      return false;
+    }
+    if (!static_graph_frame_.empty() &&
+        !SameFrame(static_graph_frame_, expected_frame_)) {
       return false;
     }
     if (!static_frame_.empty() && !SameFrame(static_frame_, expected_frame_)) {
@@ -722,14 +859,21 @@ class SsmiBagGraphMonitor {
     csv_ << std::fixed << std::setprecision(6)
          << (ros::WallTime::now() - start_wall_).toSec() << ','
          << ros::Time::now().toSec() << ',' << map_stamp_.toSec() << ','
-         << odom_stamp_.toSec() << ',' << map_frame_ << ','
-         << source_odom_frame_ << ',' << graph_frame_ << ',' << goal_frame_
+         << odom_stamp_.toSec() << ',' << local_voxel_stamp_.toSec() << ','
+         << map_frame_ << ',' << source_odom_frame_ << ','
+         << local_voxel_frame_ << ',' << local_voxel_points_ << ','
+         << local_voxel_acquisitions_ << ','
+         << (local_voxel_schema_valid_ ? 1 : 0) << ','
+         << graph_frame_ << ',' << goal_frame_
          << ',' << path_frame_ << ',' << initial_position_error_ << ','
          << initial_yaw_error_deg_ << ',' << static_points_ << ','
          << dynamic_points_ << ',' << graph_static_points_ << ','
          << accumulated_static_.size() << ','
          << graph_nodes_ << ',' << graph_edges_ << ',' << graph_components_
-         << ',' << largest_component_ << ',' << robot_component_ << ','
+         << ',' << largest_component_ << ',' << static_graph_nodes_ << ','
+         << static_graph_edges_ << ',' << static_graph_components_ << ','
+         << static_graph_largest_ << ',' << static_graph_invalid_frames_ << ','
+         << robot_component_ << ','
          << robot_degree_ << ',' << blocked_edges_ << ',' << path_poses_ << ','
          << path_length_ << ',' << path_goal_error_ << ','
          << path_min_clearance_ << ',' << graph_edges_checked_ << ','
@@ -749,10 +893,18 @@ class SsmiBagGraphMonitor {
                               initial_yaw_error_deg_ <= yaw_tolerance_deg_;
     const bool semantic_ok = have_map_ && map_id_ == "SemanticOcTree" &&
                              static_points_ > 0;
+    const bool local_voxel_ok = have_local_voxel_ &&
+                                local_voxel_acquisitions_ > 0 &&
+                                local_voxel_schema_valid_ &&
+                                !local_voxel_zero_stamp_seen_ &&
+                                !local_voxel_out_of_order_seen_;
     const bool graph_ok = have_graph_ && !graph_connectivity_ever_failed_ &&
                           robot_component_ > 0 &&
                           robot_component_ == largest_component_ &&
-                          robot_degree_ > 0;
+                          robot_degree_ > 0 && have_static_graph_ &&
+                          !static_graph_connectivity_ever_failed_ &&
+                          static_graph_components_ == 1 &&
+                          static_graph_largest_ == static_graph_nodes_;
     const bool goal_ok = !auto_goal_ ||
                          (goal_sent_ && ever_nonempty_path_ &&
                           maximum_path_poses_ > 1 &&
@@ -762,20 +914,29 @@ class SsmiBagGraphMonitor {
     // for tuning robot geometry and contour projections.
     const bool clearance_ok = maximum_graph_edges_checked_ > 0 &&
                               maximum_graph_clearance_violations_ == 0;
-    final_pass_ = alignment_ok && FramesValid() && semantic_ok && graph_ok &&
-                  goal_ok && clearance_ok;
+    final_pass_ = alignment_ok && FramesValid() && semantic_ok &&
+                  local_voxel_ok && graph_ok && goal_ok && clearance_ok;
 
     ROS_INFO("SSMI monitor finalizing: %s", reason.c_str());
-    ROS_INFO("SSMI_MONITOR_RESULT %s alignment=%s frames=%s semantic=%s graph=%s goal=%s clearance=%s",
+    ROS_INFO("SSMI_MONITOR_RESULT %s alignment=%s frames=%s semantic=%s local_voxel=%s graph=%s goal=%s clearance=%s",
              final_pass_ ? "PASS" : "FAIL", alignment_ok ? "PASS" : "FAIL",
              FramesValid() ? "PASS" : "FAIL",
-             semantic_ok ? "PASS" : "FAIL", graph_ok ? "PASS" : "FAIL",
+             semantic_ok ? "PASS" : "FAIL",
+             local_voxel_ok ? "PASS" : "FAIL",
+             graph_ok ? "PASS" : "FAIL",
              goal_ok ? "PASS" : "FAIL", clearance_ok ? "PASS" : "FAIL");
-    ROS_INFO("SSMI metrics: initial_error=%.4fm yaw_error=%.3fdeg static=%zu accumulated=%zu graph=%zu/%zu components=%zu robot_component=%zu degree=%zu connectivity_ever_failed=%s max_path=%zu min_goal_error=%.4fm min_graph_clearance=%.4fm max_violations=%zu reached=%s",
-             initial_position_error_, initial_yaw_error_deg_, static_points_,
-             accumulated_static_.size(), graph_nodes_, graph_edges_,
+    ROS_INFO("SSMI metrics: initial_error=%.4fm yaw_error=%.3fdeg local_voxel=%zu acquisitions=%zu schema=%s static=%zu accumulated=%zu graph=%zu/%zu components=%zu robot_component=%zu degree=%zu connectivity_ever_failed=%s static_graph=%zu/%zu components=%zu largest=%zu max_components=%zu connectivity_ever_failed=%s max_path=%zu min_goal_error=%.4fm min_graph_clearance=%.4fm max_violations=%zu reached=%s",
+             initial_position_error_, initial_yaw_error_deg_,
+             local_voxel_points_, local_voxel_acquisitions_,
+             local_voxel_schema_valid_ ? "true" : "false",
+             static_points_, accumulated_static_.size(),
+             graph_nodes_, graph_edges_,
              graph_components_, robot_component_, robot_degree_,
              graph_connectivity_ever_failed_ ? "true" : "false",
+             static_graph_nodes_, static_graph_edges_,
+             static_graph_components_, static_graph_largest_,
+             maximum_static_graph_components_,
+             static_graph_connectivity_ever_failed_ ? "true" : "false",
              maximum_path_poses_, minimum_path_goal_error_,
              minimum_graph_clearance_over_run_,
              maximum_graph_clearance_violations_,
@@ -789,32 +950,41 @@ class SsmiBagGraphMonitor {
   ros::NodeHandle nh_;
   ros::NodeHandle private_nh_;
   tf::TransformListener tf_listener_;
-  ros::Subscriber odom_sub_, map_sub_, static_cloud_sub_, dynamic_cloud_sub_;
+  ros::Subscriber odom_sub_, map_sub_, local_voxel_sub_, static_cloud_sub_;
+  ros::Subscriber dynamic_cloud_sub_;
   ros::Subscriber graph_static_cloud_sub_;
-  ros::Subscriber search_graph_sub_, full_graph_sub_, blocked_graph_sub_;
+  ros::Subscriber search_graph_sub_, static_graph_sub_, full_graph_sub_;
+  ros::Subscriber blocked_graph_sub_;
   ros::Subscriber path_sub_, waypoint_sub_, reach_sub_, goal_sub_, clock_sub_;
   ros::Subscriber snapshot_time_sub_, update_time_sub_, callback_time_sub_;
   ros::Subscriber main_loop_time_sub_;
   ros::Publisher goal_pub_;
   ros::WallTimer wall_timer_;
 
-  std::string expected_frame_, source_odom_topic_, output_csv_;
+  std::string expected_frame_, source_odom_topic_, local_voxel_topic_;
+  std::string output_csv_;
   std::string source_odom_frame_, map_frame_, graph_frame_, goal_frame_;
   std::string path_frame_, waypoint_frame_, static_frame_, dynamic_frame_;
-  std::string graph_static_frame_;
+  std::string graph_static_frame_, static_graph_frame_;
+  std::string local_voxel_frame_;
   std::string map_id_;
   std::ofstream csv_;
   ros::WallTime start_wall_, first_graph_wall_, last_clock_wall_;
-  ros::Time last_clock_, map_stamp_, odom_stamp_;
+  ros::Time last_clock_, map_stamp_, odom_stamp_, local_voxel_stamp_;
   ros::Time graph_static_stamp_;
 
   bool auto_goal_ = false;
   bool finish_on_bag_idle_ = true;
   bool have_clock_ = false;
   bool have_map_ = false;
+  bool have_local_voxel_ = false;
+  bool local_voxel_schema_valid_ = false;
+  bool local_voxel_zero_stamp_seen_ = false;
+  bool local_voxel_out_of_order_seen_ = false;
   bool have_aligned_odom_ = false;
   bool have_initial_alignment_ = false;
   bool have_graph_ = false;
+  bool have_static_graph_ = false;
   bool have_goal_ = false;
   bool have_waypoint_ = false;
   bool goal_sent_ = false;
@@ -824,6 +994,7 @@ class SsmiBagGraphMonitor {
   bool static_tree_dirty_ = false;
   bool have_full_graph_message_ = false;
   bool graph_connectivity_ever_failed_ = false;
+  bool static_graph_connectivity_ever_failed_ = false;
   bool finalized_ = false;
   bool final_pass_ = false;
 
@@ -836,6 +1007,7 @@ class SsmiBagGraphMonitor {
   double collision_check_radius_ = 10.0;
   double visibility_endpoint_exclusion_ = 0.875;
   double static_accumulation_resolution_ = 0.20;
+  int static_component_failure_frames_ = 5;
   double initial_position_error_ = std::numeric_limits<double>::infinity();
   double initial_yaw_error_deg_ = std::numeric_limits<double>::infinity();
   double path_length_ = 0.0;
@@ -862,12 +1034,20 @@ class SsmiBagGraphMonitor {
   std::vector<std::string> graph_violation_details_;
   std::vector<std::string> worst_graph_violation_details_;
   size_t static_points_ = 0;
+  size_t local_voxel_points_ = 0;
+  size_t local_voxel_acquisitions_ = 0;
   size_t dynamic_points_ = 0;
   size_t graph_static_points_ = 0;
   size_t graph_nodes_ = 0;
   size_t graph_edges_ = 0;
   size_t graph_components_ = 0;
   size_t largest_component_ = 0;
+  size_t static_graph_nodes_ = 0;
+  size_t static_graph_edges_ = 0;
+  size_t static_graph_components_ = 0;
+  size_t static_graph_largest_ = 0;
+  size_t static_graph_invalid_frames_ = 0;
+  size_t maximum_static_graph_components_ = 0;
   size_t robot_component_ = 0;
   size_t robot_degree_ = 0;
   size_t blocked_edges_ = 0;

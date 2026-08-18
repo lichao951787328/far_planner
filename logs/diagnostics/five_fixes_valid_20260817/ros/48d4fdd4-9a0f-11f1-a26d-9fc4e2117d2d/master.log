@@ -1,0 +1,823 @@
+[rosmaster.main][INFO] 2026-08-17 15:43:06,522: initialization complete, waiting for shutdown
+[rosmaster.main][INFO] 2026-08-17 15:43:06,522: Starting ROS Master Node
+[xmlrpc][INFO] 2026-08-17 15:43:06,533: XML-RPC server binding to 0.0.0.0:11311
+[xmlrpc][INFO] 2026-08-17 15:43:06,534: Started XML-RPC server [http://yanaibo-ThinkStation-P360-Tower:11311/]
+[rosmaster.master][INFO] 2026-08-17 15:43:06,534: Master initialized: port[11311], uri[http://yanaibo-ThinkStation-P360-Tower:11311/]
+[xmlrpc][INFO] 2026-08-17 15:43:06,534: xml rpc node: starting XML-RPC server
+[rosmaster.master][INFO] 2026-08-17 15:43:06,549: +PUB [/rosout] /probe http://yanaibo-ThinkStation-P360-Tower:39041/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,551: +SERVICE [/probe/get_loggers] /probe http://yanaibo-ThinkStation-P360-Tower:39041/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,551: +SERVICE [/probe/set_logger_level] /probe http://yanaibo-ThinkStation-P360-Tower:39041/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,554: +SUB [/reset_visibility_graph] /probe http://yanaibo-ThinkStation-P360-Tower:39041/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,557: +SUB [/odom_world] /probe http://yanaibo-ThinkStation-P360-Tower:39041/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,559: +SUB [/goal_point] /probe http://yanaibo-ThinkStation-P360-Tower:39041/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,560: +SUB [/update_visibility_graph] /probe http://yanaibo-ThinkStation-P360-Tower:39041/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,568: +PUB [/way_point] /probe http://yanaibo-ThinkStation-P360-Tower:39041/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,569: +PUB [/navigation_boundary] /probe http://yanaibo-ThinkStation-P360-Tower:39041/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,569: +PUB [/runtime] /probe http://yanaibo-ThinkStation-P360-Tower:39041/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,569: +PUB [/planning_time] /probe http://yanaibo-ThinkStation-P360-Tower:39041/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,569: +PUB [/far_traverse_time] /probe http://yanaibo-ThinkStation-P360-Tower:39041/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,570: +PUB [/semantic_snapshot_time] /probe http://yanaibo-ThinkStation-P360-Tower:39041/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,570: +PUB [/semantic_planner_update_time] /probe http://yanaibo-ThinkStation-P360-Tower:39041/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,570: +PUB [/semantic_callback_time] /probe http://yanaibo-ThinkStation-P360-Tower:39041/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,570: +PUB [/far_main_loop_time] /probe http://yanaibo-ThinkStation-P360-Tower:39041/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,570: +PUB [/far_reach_goal_status] /probe http://yanaibo-ThinkStation-P360-Tower:39041/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,571: +SUB [/read_file_dir] /probe http://yanaibo-ThinkStation-P360-Tower:39041/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,572: +SUB [/save_file_dir] /probe http://yanaibo-ThinkStation-P360-Tower:39041/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,572: +PUB [/FAR_dynamic_obs_debug] /probe http://yanaibo-ThinkStation-P360-Tower:39041/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,572: +PUB [/FAR_obs_debug] /probe http://yanaibo-ThinkStation-P360-Tower:39041/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,572: +PUB [/semantic_graph_static_obstacles] /probe http://yanaibo-ThinkStation-P360-Tower:39041/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,572: +PUB [/semantic_local_static_obstacles] /probe http://yanaibo-ThinkStation-P360-Tower:39041/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,572: +PUB [/semantic_local_dynamic_obstacles] /probe http://yanaibo-ThinkStation-P360-Tower:39041/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,572: +PUB [/FAR_obs_before_dyremove_debug] /probe http://yanaibo-ThinkStation-P360-Tower:39041/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,573: +PUB [/FAR_obs_after_dyremove_debug] /probe http://yanaibo-ThinkStation-P360-Tower:39041/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,573: +PUB [/FAR_scanGrid_debug] /probe http://yanaibo-ThinkStation-P360-Tower:39041/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,573: +PUB [/FAR_new_debug] /probe http://yanaibo-ThinkStation-P360-Tower:39041/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,573: +PUB [/FAR_terrain_height_debug] /probe http://yanaibo-ThinkStation-P360-Tower:39041/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,576: +CACHEDPARAM [/rosout_disable_topics_generation] by /probe
+[rosmaster.master][INFO] 2026-08-17 15:43:06,606: +PARAM [/run_id] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,607: +PARAM [/roslaunch/uris/host_yanaibo_thinkstation_p360_tower__38909] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,635: +PARAM [/rosversion] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,635: +PARAM [/rosdistro] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,636: +PARAM [/use_sim_time] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,636: +PARAM [/grid_semantic_adapter/input_topic] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,636: +PARAM [/grid_semantic_adapter/output_topic] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,636: +PARAM [/grid_semantic_adapter/obstacle_threshold] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,636: +PARAM [/grid_semantic_adapter/invalid_semantic_label] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,636: +PARAM [/grid_semantic_adapter/traversable_labels] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,636: +PARAM [/grid_semantic_adapter/existing_obstacle_labels] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,636: +PARAM [/grid_semantic_adapter/dynamic_labels] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,636: +PARAM [/grid_semantic_adapter/fallback_obstacle_label] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,636: +PARAM [/grid_semantic_adapter/dynamic_rgb] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,636: +PARAM [/grid_semantic_adapter/unknown_rgb] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,636: +PARAM [/octomap/pointcloud_topic] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,636: +PARAM [/octomap/world_frame_id] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,636: +PARAM [/octomap/use_initial_pose_reference] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,636: +PARAM [/octomap/reference_frame_id] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,636: +PARAM [/octomap/time_jump_reset_threshold] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,636: +PARAM [/octomap/resolution] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,636: +PARAM [/octomap/max_range] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,636: +PARAM [/octomap/raycast_range] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,636: +PARAM [/octomap/clamping_thres_min] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,636: +PARAM [/octomap/clamping_thres_max] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,636: +PARAM [/octomap/occupancy_thres] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,636: +PARAM [/octomap/prob_hit] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,636: +SERVICE [/rosout/get_loggers] /rosout http://yanaibo-ThinkStation-P360-Tower:33285/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,636: +PARAM [/octomap/prob_miss] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,637: +PARAM [/octomap/dynamic_free_updates] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,637: +PARAM [/octomap/dynamic_free_confirmations] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,637: +PARAM [/octomap/psi] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,637: +PARAM [/octomap/phi] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,637: +PARAM [/octomap/publish_2d_map] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,637: +SERVICE [/rosout/set_logger_level] /rosout http://yanaibo-ThinkStation-P360-Tower:33285/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,637: +PARAM [/octomap/min_ground_z] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,637: +PARAM [/octomap/max_ground_z] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,637: +PARAM [/octomap/initialize_floor] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,637: +PARAM [/octomap/input_mode] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,637: +PARAM [/octomap/enable_raycast_clearing] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,637: +PARAM [/octomap/obstacle_semantic_colors] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,637: +PARAM [/octomap/save_path] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,637: +PARAM [/far_planner/main_run_freq] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,638: +PARAM [/far_planner/contour_grid_resolution] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,638: +PARAM [/far_planner/enable_goal_recording] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,638: +PARAM [/far_planner/goal_record_file] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,638: +PARAM [/far_planner/robot_dim] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,638: +PARAM [/far_planner/vehicle_height] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,638: +PARAM [/far_planner/sensor_range] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,638: +PARAM [/far_planner/terrain_range] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,638: +PARAM [/far_planner/local_planner_range] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,638: +PARAM [/far_planner/visualize_ratio] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,638: +PARAM [/far_planner/is_viewpoint_extend] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,638: +PARAM [/far_planner/is_multi_layer] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,638: +PARAM [/far_planner/is_opencv_visual] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,638: +PARAM [/far_planner/is_static_env] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,639: +PARAM [/far_planner/is_pub_boundary] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,639: +PARAM [/far_planner/is_debug_output] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,639: +PARAM [/far_planner/is_attempt_autoswitch] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,639: +SUB [/clock] /rosout http://yanaibo-ThinkStation-P360-Tower:33285/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,639: +PARAM [/far_planner/world_frame] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,639: +PARAM [/far_planner/semantic_map_topic] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,639: +PARAM [/far_planner/odom_timeout] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,639: +PARAM [/far_planner/semantic_map_timeout] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,639: +PARAM [/far_planner/odom_connection_update_distance] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,639: +PARAM [/far_planner/GraphMsger/robot_id] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,639: +PARAM [/far_planner/MapHandler/floor_height] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,639: +PUB [/rosout_agg] /rosout http://yanaibo-ThinkStation-P360-Tower:33285/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,639: +PARAM [/far_planner/MapHandler/semantic_local_window_radius] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,640: +PARAM [/far_planner/MapHandler/terrain_search_radius] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,640: +PARAM [/far_planner/MapHandler/terrain_neighbor_radius] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,640: +PARAM [/far_planner/MapHandler/local_planner_radius] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,640: +PARAM [/far_planner/MapHandler/local_planner_resolution] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,640: +PARAM [/far_planner/MapHandler/local_planner_obstacle_intensity] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,640: +PARAM [/far_planner/MapHandler/semantic_top1_only] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,640: +PARAM [/far_planner/MapHandler/semantic_min_probability] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,640: +PARAM [/far_planner/MapHandler/obstacle_groups] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,640: +PARAM [/far_planner/MapHandler/terrain_support_groups] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,640: +PARAM [/far_planner/MapHandler/dynamic_obstacle_groups] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,641: +PARAM [/far_planner/MapHandler/cell_length] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,641: +SUB [/rosout] /rosout http://yanaibo-ThinkStation-P360-Tower:33285/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,641: +PARAM [/far_planner/MapHandler/map_grid_max_length] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,641: +PARAM [/far_planner/MapHandler/map_grad_max_height] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,641: +PARAM [/far_planner/Util/angle_noise] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,641: +PARAM [/far_planner/Util/accept_max_align_angle] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,641: +PARAM [/far_planner/Util/robot_collision_clearance] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,641: +PARAM [/far_planner/Util/visibility_edge_projection] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,641: +PARAM [/far_planner/Util/obs_inflate_size] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,641: +PARAM [/far_planner/Util/new_intensity_thred] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,641: +PARAM [/far_planner/Util/terrain_free_Z] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,641: +PARAM [/far_planner/Util/dyosb_update_thred] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,641: +PARAM [/far_planner/Util/new_point_counter] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,641: +PARAM [/far_planner/Util/dynamic_obs_dacay_time] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,641: +PARAM [/far_planner/Util/new_points_decay_time] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,641: +PARAM [/far_planner/Graph/connect_votes_size] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,641: +PARAM [/far_planner/Graph/clear_dumper_thred] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,641: +PARAM [/far_planner/Graph/node_finalize_thred] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,641: +PARAM [/far_planner/Graph/filter_pool_size] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,641: +PARAM [/far_planner/Graph/static_update_radius] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,641: +PARAM [/far_planner/Graph/static_stitch_radius] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,641: +PARAM [/far_planner/Graph/dynamic_position_alpha] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,641: +PARAM [/far_planner/Graph/diagnostic_near_pair_radius] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,641: +PARAM [/far_planner/Graph/static_confirm_frames] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,641: +PARAM [/far_planner/Graph/static_remove_frames] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,641: +PARAM [/far_planner/Graph/static_topology_remove_frames] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,641: +PARAM [/far_planner/Graph/static_visibility_remove_frames] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,641: +PARAM [/far_planner/Graph/static_duplicate_radius] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,641: +PARAM [/far_planner/Graph/static_promotion_requires_finalized] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,641: +PARAM [/far_planner/Graph/static_promotion_requires_active_edge] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,641: +PARAM [/far_planner/Graph/static_promotion_requires_main_component] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,641: +PARAM [/far_planner/ContourGraph/projection_min] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,641: +PARAM [/far_planner/ContourGraph/projection_step] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,641: +PARAM [/far_planner/ContourGraph/projection_max] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,641: +PARAM [/far_planner/ContourGraph/boundary_guard] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,642: +PARAM [/far_planner/CDetector/resize_ratio] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,642: +PARAM [/far_planner/CDetector/filter_count_value] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,642: +PARAM [/far_planner/CDetector/dynamic_simplify_ratio] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,642: +PARAM [/far_planner/CDetector/collinear_tolerance] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,642: +PARAM [/far_planner/CDetector/collinear_angle_deg] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,642: +PARAM [/far_planner/CDetector/is_save_img] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,642: +PARAM [/far_planner/CDetector/img_folder_path] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,642: +PARAM [/far_planner/GPlanner/converge_distance] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,642: +PARAM [/far_planner/GPlanner/goal_adjust_radius] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,642: +PARAM [/far_planner/GPlanner/free_counter_thred] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,642: +PARAM [/far_planner/GPlanner/reach_goal_vote_size] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,642: +PARAM [/far_planner/GPlanner/path_momentum_thred] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,642: +PARAM [/ssmi_goal_adapter/input_goal_topic] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,642: +PARAM [/ssmi_goal_adapter/output_goal_topic] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,642: +PARAM [/ssmi_goal_adapter/default_frame] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,642: +PARAM [/ssmi_bag_graph_monitor/expected_frame] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,642: +PARAM [/ssmi_bag_graph_monitor/source_odom_topic] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,642: +PARAM [/ssmi_bag_graph_monitor/auto_goal] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,642: +PARAM [/ssmi_bag_graph_monitor/goal_x] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,642: +PARAM [/ssmi_bag_graph_monitor/goal_y] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,642: +PARAM [/ssmi_bag_graph_monitor/goal_z] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,642: +PARAM [/ssmi_bag_graph_monitor/goal_publish_delay] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,642: +PARAM [/ssmi_bag_graph_monitor/output_csv] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,642: +PARAM [/ssmi_bag_graph_monitor/finish_on_bag_idle] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,642: +PARAM [/ssmi_bag_graph_monitor/bag_idle_timeout] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,642: +PARAM [/ssmi_bag_graph_monitor/position_tolerance] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,642: +PARAM [/ssmi_bag_graph_monitor/yaw_tolerance_deg] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,642: +PARAM [/ssmi_bag_graph_monitor/collision_clearance] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,642: +PARAM [/ssmi_bag_graph_monitor/collision_check_radius] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,642: +PARAM [/ssmi_bag_graph_monitor/visibility_endpoint_exclusion] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,642: +PARAM [/ssmi_bag_graph_monitor/static_component_failure_frames] by /roslaunch
+[rosmaster.master][INFO] 2026-08-17 15:43:06,664: +PUB [/rosout] /grid_semantic_adapter http://yanaibo-ThinkStation-P360-Tower:37173/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,665: +SERVICE [/grid_semantic_adapter/get_loggers] /grid_semantic_adapter http://yanaibo-ThinkStation-P360-Tower:37173/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,665: +SERVICE [/grid_semantic_adapter/set_logger_level] /grid_semantic_adapter http://yanaibo-ThinkStation-P360-Tower:37173/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,666: +SUB [/clock] /grid_semantic_adapter http://yanaibo-ThinkStation-P360-Tower:37173/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,668: +PUB [/semantic_pcl/semantic_pcl] /grid_semantic_adapter http://yanaibo-ThinkStation-P360-Tower:37173/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,668: +PUB [/rosout] /semantic_octomap http://yanaibo-ThinkStation-P360-Tower:33625/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,669: +SERVICE [/semantic_octomap/get_loggers] /semantic_octomap http://yanaibo-ThinkStation-P360-Tower:33625/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,669: +SERVICE [/semantic_octomap/set_logger_level] /semantic_octomap http://yanaibo-ThinkStation-P360-Tower:33625/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,669: +SUB [/grids_points] /grid_semantic_adapter http://yanaibo-ThinkStation-P360-Tower:37173/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,670: +CACHEDPARAM [/rosout_disable_topics_generation] by /grid_semantic_adapter
+[rosmaster.master][INFO] 2026-08-17 15:43:06,671: +SUB [/clock] /semantic_octomap http://yanaibo-ThinkStation-P360-Tower:33625/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,674: +PUB [/rosout] /ssmi_goal_adapter http://yanaibo-ThinkStation-P360-Tower:34821/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,674: +SUB [/tf] /semantic_octomap http://yanaibo-ThinkStation-P360-Tower:33625/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,674: +SERVICE [/ssmi_goal_adapter/get_loggers] /ssmi_goal_adapter http://yanaibo-ThinkStation-P360-Tower:34821/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,675: +SERVICE [/ssmi_goal_adapter/set_logger_level] /ssmi_goal_adapter http://yanaibo-ThinkStation-P360-Tower:34821/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,676: +SUB [/tf_static] /semantic_octomap http://yanaibo-ThinkStation-P360-Tower:33625/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,676: +PUB [/tf_static] /semantic_octomap http://yanaibo-ThinkStation-P360-Tower:33625/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,677: +CACHEDPARAM [/rosout_disable_topics_generation] by /semantic_octomap
+[rosmaster.master][INFO] 2026-08-17 15:43:06,677: +SUB [/clock] /ssmi_goal_adapter http://yanaibo-ThinkStation-P360-Tower:34821/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,678: +SERVICE [/toggle_use_semantic_color] /semantic_octomap http://yanaibo-ThinkStation-P360-Tower:33625/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,679: +SERVICE [/querry_RLE] /semantic_octomap http://yanaibo-ThinkStation-P360-Tower:33625/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,679: +PUB [/rosout] /ssmi_bag_graph_monitor http://yanaibo-ThinkStation-P360-Tower:40113/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,680: +SERVICE [/reset_semantic_octomap] /semantic_octomap http://yanaibo-ThinkStation-P360-Tower:33625/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,680: +PUB [/rosout] /ssmi_bag_player http://yanaibo-ThinkStation-P360-Tower:44687/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,680: +SERVICE [/ssmi_bag_graph_monitor/get_loggers] /ssmi_bag_graph_monitor http://yanaibo-ThinkStation-P360-Tower:40113/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,681: +PUB [/goal_point] /ssmi_goal_adapter http://yanaibo-ThinkStation-P360-Tower:34821/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,681: +SERVICE [/ssmi_bag_player/get_loggers] /ssmi_bag_player http://yanaibo-ThinkStation-P360-Tower:44687/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,682: +SERVICE [/ssmi_bag_graph_monitor/set_logger_level] /ssmi_bag_graph_monitor http://yanaibo-ThinkStation-P360-Tower:40113/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,682: +SERVICE [/ssmi_bag_player/set_logger_level] /ssmi_bag_player http://yanaibo-ThinkStation-P360-Tower:44687/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,684: +SUB [/move_base_simple/goal] /ssmi_goal_adapter http://yanaibo-ThinkStation-P360-Tower:34821/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,685: +CACHEDPARAM [/rosout_disable_topics_generation] by /ssmi_goal_adapter
+[rosmaster.master][INFO] 2026-08-17 15:43:06,685: +SUB [/clock] /ssmi_bag_graph_monitor http://yanaibo-ThinkStation-P360-Tower:40113/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,687: +SUB [/clock] /ssmi_bag_player http://yanaibo-ThinkStation-P360-Tower:44687/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,687: +SUB [/tf] /ssmi_bag_graph_monitor http://yanaibo-ThinkStation-P360-Tower:40113/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,687: +PUB [/clock] /ssmi_bag_player http://yanaibo-ThinkStation-P360-Tower:44687/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,688: +SERVICE [/ssmi_bag_player/pause_playback] /ssmi_bag_player http://yanaibo-ThinkStation-P360-Tower:44687/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,689: +CACHEDPARAM [/rosout_disable_topics_generation] by /ssmi_bag_player
+[rosmaster.master][INFO] 2026-08-17 15:43:06,689: +SUB [/tf_static] /ssmi_bag_graph_monitor http://yanaibo-ThinkStation-P360-Tower:40113/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,692: +PUB [/octomap_full] /semantic_octomap http://yanaibo-ThinkStation-P360-Tower:33625/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,693: +PUB [/octomap_color] /semantic_octomap http://yanaibo-ThinkStation-P360-Tower:33625/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,693: +PUB [/occupancy_map_2D] /semantic_octomap http://yanaibo-ThinkStation-P360-Tower:33625/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,695: +SUB [/semantic_pcl/semantic_pcl] /semantic_octomap http://yanaibo-ThinkStation-P360-Tower:33625/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,697: +SUB [/fusion_localization] /ssmi_bag_graph_monitor http://yanaibo-ThinkStation-P360-Tower:40113/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,698: +SUB [/octomap_full] /ssmi_bag_graph_monitor http://yanaibo-ThinkStation-P360-Tower:40113/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,699: +SUB [/semantic_local_static_obstacles] /ssmi_bag_graph_monitor http://yanaibo-ThinkStation-P360-Tower:40113/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,699: -PUB [/rosout] /probe http://yanaibo-ThinkStation-P360-Tower:39041/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,699: -PUB [/way_point] /probe http://yanaibo-ThinkStation-P360-Tower:39041/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,700: -PUB [/navigation_boundary] /probe http://yanaibo-ThinkStation-P360-Tower:39041/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,700: -PUB [/runtime] /probe http://yanaibo-ThinkStation-P360-Tower:39041/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,700: -PUB [/planning_time] /probe http://yanaibo-ThinkStation-P360-Tower:39041/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,700: +SUB [/semantic_graph_static_obstacles] /ssmi_bag_graph_monitor http://yanaibo-ThinkStation-P360-Tower:40113/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,700: -PUB [/far_traverse_time] /probe http://yanaibo-ThinkStation-P360-Tower:39041/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,701: -PUB [/semantic_snapshot_time] /probe http://yanaibo-ThinkStation-P360-Tower:39041/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,701: -PUB [/semantic_planner_update_time] /probe http://yanaibo-ThinkStation-P360-Tower:39041/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,701: -PUB [/semantic_callback_time] /probe http://yanaibo-ThinkStation-P360-Tower:39041/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,702: -PUB [/far_main_loop_time] /probe http://yanaibo-ThinkStation-P360-Tower:39041/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,702: -PUB [/far_reach_goal_status] /probe http://yanaibo-ThinkStation-P360-Tower:39041/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,702: +SUB [/semantic_local_dynamic_obstacles] /ssmi_bag_graph_monitor http://yanaibo-ThinkStation-P360-Tower:40113/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,702: -PUB [/FAR_dynamic_obs_debug] /probe http://yanaibo-ThinkStation-P360-Tower:39041/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,703: -PUB [/FAR_obs_debug] /probe http://yanaibo-ThinkStation-P360-Tower:39041/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,703: -PUB [/semantic_graph_static_obstacles] /probe http://yanaibo-ThinkStation-P360-Tower:39041/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,703: -PUB [/semantic_local_static_obstacles] /probe http://yanaibo-ThinkStation-P360-Tower:39041/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,704: -PUB [/semantic_local_dynamic_obstacles] /probe http://yanaibo-ThinkStation-P360-Tower:39041/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,704: -PUB [/FAR_obs_before_dyremove_debug] /probe http://yanaibo-ThinkStation-P360-Tower:39041/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,704: +SUB [/viz_current_search_graph] /ssmi_bag_graph_monitor http://yanaibo-ThinkStation-P360-Tower:40113/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,704: -PUB [/FAR_obs_after_dyremove_debug] /probe http://yanaibo-ThinkStation-P360-Tower:39041/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,704: -PUB [/FAR_scanGrid_debug] /probe http://yanaibo-ThinkStation-P360-Tower:39041/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,705: -PUB [/FAR_new_debug] /probe http://yanaibo-ThinkStation-P360-Tower:39041/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,705: -PUB [/FAR_terrain_height_debug] /probe http://yanaibo-ThinkStation-P360-Tower:39041/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,705: -SUB [/reset_visibility_graph] /probe http://yanaibo-ThinkStation-P360-Tower:39041/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,706: -SUB [/odom_world] /probe http://yanaibo-ThinkStation-P360-Tower:39041/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,706: +SUB [/viz_static_global_graph] /ssmi_bag_graph_monitor http://yanaibo-ThinkStation-P360-Tower:40113/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,706: -SUB [/goal_point] /probe http://yanaibo-ThinkStation-P360-Tower:39041/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,706: -SUB [/update_visibility_graph] /probe http://yanaibo-ThinkStation-P360-Tower:39041/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,706: -SUB [/read_file_dir] /probe http://yanaibo-ThinkStation-P360-Tower:39041/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,707: -SUB [/save_file_dir] /probe http://yanaibo-ThinkStation-P360-Tower:39041/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,707: +SUB [/viz_graph_topic] /ssmi_bag_graph_monitor http://yanaibo-ThinkStation-P360-Tower:40113/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,707: -SERVICE [/probe/get_loggers] /probe rosrpc://yanaibo-ThinkStation-P360-Tower:56325
+[rosmaster.master][INFO] 2026-08-17 15:43:06,707: -SERVICE [/probe/set_logger_level] /probe rosrpc://yanaibo-ThinkStation-P360-Tower:56325
+[rosmaster.master][INFO] 2026-08-17 15:43:06,708: -CACHEDPARAM [/rosout_disable_topics_generation] by /probe
+[rosmaster.master][INFO] 2026-08-17 15:43:06,708: +PUB [/fusion_localization] /ssmi_bag_player http://yanaibo-ThinkStation-P360-Tower:44687/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,708: +SUB [/viz_dynamic_blocked_edges] /ssmi_bag_graph_monitor http://yanaibo-ThinkStation-P360-Tower:40113/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,708: +PUB [/tf] /ssmi_bag_player http://yanaibo-ThinkStation-P360-Tower:44687/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,709: +PUB [/grids_points] /ssmi_bag_player http://yanaibo-ThinkStation-P360-Tower:44687/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,709: +SUB [/far_global_path] /ssmi_bag_graph_monitor http://yanaibo-ThinkStation-P360-Tower:40113/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,710: +SUB [/way_point] /ssmi_bag_graph_monitor http://yanaibo-ThinkStation-P360-Tower:40113/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,712: +SUB [/far_reach_goal_status] /ssmi_bag_graph_monitor http://yanaibo-ThinkStation-P360-Tower:40113/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,713: +SUB [/goal_point] /ssmi_bag_graph_monitor http://yanaibo-ThinkStation-P360-Tower:40113/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,716: +SUB [/semantic_snapshot_time] /ssmi_bag_graph_monitor http://yanaibo-ThinkStation-P360-Tower:40113/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,718: +SUB [/semantic_planner_update_time] /ssmi_bag_graph_monitor http://yanaibo-ThinkStation-P360-Tower:40113/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,721: +SUB [/semantic_callback_time] /ssmi_bag_graph_monitor http://yanaibo-ThinkStation-P360-Tower:40113/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,722: +SUB [/far_main_loop_time] /ssmi_bag_graph_monitor http://yanaibo-ThinkStation-P360-Tower:40113/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,723: +PUB [/goal_point] /ssmi_bag_graph_monitor http://yanaibo-ThinkStation-P360-Tower:40113/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,723: publisherUpdate[/rosout] -> http://yanaibo-ThinkStation-P360-Tower:33285/ ['http://yanaibo-ThinkStation-P360-Tower:39041/', 'http://yanaibo-ThinkStation-P360-Tower:37173/']
+[rosmaster.master][INFO] 2026-08-17 15:43:06,723: publisherUpdate[/tf_static] -> http://yanaibo-ThinkStation-P360-Tower:33625/ ['http://yanaibo-ThinkStation-P360-Tower:33625/']
+[rosmaster.master][INFO] 2026-08-17 15:43:06,724: +CACHEDPARAM [/rosout_disable_topics_generation] by /ssmi_bag_graph_monitor
+[rosmaster.master][INFO] 2026-08-17 15:43:06,725: publisherUpdate[/goal_point] -> http://yanaibo-ThinkStation-P360-Tower:39041/ ['http://yanaibo-ThinkStation-P360-Tower:34821/']
+[rosmaster.master][INFO] 2026-08-17 15:43:06,727: publisherUpdate[/rosout] -> http://yanaibo-ThinkStation-P360-Tower:33285/ ['http://yanaibo-ThinkStation-P360-Tower:39041/', 'http://yanaibo-ThinkStation-P360-Tower:37173/']: sec=0.00, result=[1, '', 0]
+[rosmaster.master][INFO] 2026-08-17 15:43:06,727: publisherUpdate[/goal_point] -> http://yanaibo-ThinkStation-P360-Tower:39041/ ['http://yanaibo-ThinkStation-P360-Tower:34821/']: sec=0.00, exception=[Errno 111] Connection refused
+[rosmaster.master][INFO] 2026-08-17 15:43:06,727: publisherUpdate[/tf_static] -> http://yanaibo-ThinkStation-P360-Tower:33625/ ['http://yanaibo-ThinkStation-P360-Tower:33625/']: sec=0.00, result=[1, '', 0]
+[rosmaster.master][INFO] 2026-08-17 15:43:06,727: publisherUpdate[/rosout] -> http://yanaibo-ThinkStation-P360-Tower:33285/ ['http://yanaibo-ThinkStation-P360-Tower:39041/', 'http://yanaibo-ThinkStation-P360-Tower:37173/', 'http://yanaibo-ThinkStation-P360-Tower:33625/']
+[rosmaster.master][INFO] 2026-08-17 15:43:06,728: publisherUpdate[/clock] -> http://yanaibo-ThinkStation-P360-Tower:37173/ ['http://yanaibo-ThinkStation-P360-Tower:44687/']
+[rosmaster.master][INFO] 2026-08-17 15:43:06,728: +PUB [/rosout] /far_planner http://yanaibo-ThinkStation-P360-Tower:39681/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,729: publisherUpdate[/rosout] -> http://yanaibo-ThinkStation-P360-Tower:33285/ ['http://yanaibo-ThinkStation-P360-Tower:39041/', 'http://yanaibo-ThinkStation-P360-Tower:37173/', 'http://yanaibo-ThinkStation-P360-Tower:33625/']: sec=0.00, result=[1, '', 0]
+[rosmaster.master][INFO] 2026-08-17 15:43:06,729: publisherUpdate[/rosout] -> http://yanaibo-ThinkStation-P360-Tower:33285/ ['http://yanaibo-ThinkStation-P360-Tower:39041/', 'http://yanaibo-ThinkStation-P360-Tower:37173/', 'http://yanaibo-ThinkStation-P360-Tower:33625/', 'http://yanaibo-ThinkStation-P360-Tower:34821/']
+[rosmaster.master][INFO] 2026-08-17 15:43:06,729: +SERVICE [/far_planner/get_loggers] /far_planner http://yanaibo-ThinkStation-P360-Tower:39681/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,730: publisherUpdate[/rosout] -> http://yanaibo-ThinkStation-P360-Tower:33285/ ['http://yanaibo-ThinkStation-P360-Tower:39041/', 'http://yanaibo-ThinkStation-P360-Tower:37173/', 'http://yanaibo-ThinkStation-P360-Tower:33625/', 'http://yanaibo-ThinkStation-P360-Tower:34821/']: sec=0.00, result=[1, '', 0]
+[rosmaster.master][INFO] 2026-08-17 15:43:06,730: publisherUpdate[/clock] -> http://yanaibo-ThinkStation-P360-Tower:37173/ ['http://yanaibo-ThinkStation-P360-Tower:44687/']: sec=0.00, result=[1, '', 0]
+[rosmaster.master][INFO] 2026-08-17 15:43:06,730: +SERVICE [/far_planner/set_logger_level] /far_planner http://yanaibo-ThinkStation-P360-Tower:39681/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,731: publisherUpdate[/rosout] -> http://yanaibo-ThinkStation-P360-Tower:33285/ ['http://yanaibo-ThinkStation-P360-Tower:39041/', 'http://yanaibo-ThinkStation-P360-Tower:37173/', 'http://yanaibo-ThinkStation-P360-Tower:33625/', 'http://yanaibo-ThinkStation-P360-Tower:34821/', 'http://yanaibo-ThinkStation-P360-Tower:40113/']
+[rosmaster.master][INFO] 2026-08-17 15:43:06,731: publisherUpdate[/clock] -> http://yanaibo-ThinkStation-P360-Tower:33625/ ['http://yanaibo-ThinkStation-P360-Tower:44687/']
+[rosmaster.master][INFO] 2026-08-17 15:43:06,733: publisherUpdate[/rosout] -> http://yanaibo-ThinkStation-P360-Tower:33285/ ['http://yanaibo-ThinkStation-P360-Tower:39041/', 'http://yanaibo-ThinkStation-P360-Tower:37173/', 'http://yanaibo-ThinkStation-P360-Tower:33625/', 'http://yanaibo-ThinkStation-P360-Tower:34821/', 'http://yanaibo-ThinkStation-P360-Tower:40113/']: sec=0.00, result=[1, '', 0]
+[rosmaster.master][INFO] 2026-08-17 15:43:06,733: publisherUpdate[/clock] -> http://yanaibo-ThinkStation-P360-Tower:33625/ ['http://yanaibo-ThinkStation-P360-Tower:44687/']: sec=0.00, result=[1, '', 0]
+[rosmaster.master][INFO] 2026-08-17 15:43:06,733: publisherUpdate[/rosout] -> http://yanaibo-ThinkStation-P360-Tower:33285/ ['http://yanaibo-ThinkStation-P360-Tower:39041/', 'http://yanaibo-ThinkStation-P360-Tower:37173/', 'http://yanaibo-ThinkStation-P360-Tower:33625/', 'http://yanaibo-ThinkStation-P360-Tower:34821/', 'http://yanaibo-ThinkStation-P360-Tower:40113/', 'http://yanaibo-ThinkStation-P360-Tower:44687/']
+[rosmaster.master][INFO] 2026-08-17 15:43:06,733: publisherUpdate[/clock] -> http://yanaibo-ThinkStation-P360-Tower:34821/ ['http://yanaibo-ThinkStation-P360-Tower:44687/']
+[rosmaster.master][INFO] 2026-08-17 15:43:06,734: publisherUpdate[/rosout] -> http://yanaibo-ThinkStation-P360-Tower:33285/ ['http://yanaibo-ThinkStation-P360-Tower:39041/', 'http://yanaibo-ThinkStation-P360-Tower:37173/', 'http://yanaibo-ThinkStation-P360-Tower:33625/', 'http://yanaibo-ThinkStation-P360-Tower:34821/', 'http://yanaibo-ThinkStation-P360-Tower:40113/', 'http://yanaibo-ThinkStation-P360-Tower:44687/']: sec=0.00, result=[1, '', 0]
+[rosmaster.master][INFO] 2026-08-17 15:43:06,734: publisherUpdate[/clock] -> http://yanaibo-ThinkStation-P360-Tower:33285/ ['http://yanaibo-ThinkStation-P360-Tower:44687/']
+[rosmaster.master][INFO] 2026-08-17 15:43:06,734: +SUB [/clock] /far_planner http://yanaibo-ThinkStation-P360-Tower:39681/
+[rosmaster.threadpool][ERROR] 2026-08-17 15:43:06,735: Traceback (most recent call last):
+  File "/opt/ros/noetic/lib/python3/dist-packages/rosmaster/threadpool.py", line 218, in run
+    result = cmd(*args)
+  File "/opt/ros/noetic/lib/python3/dist-packages/rosmaster/master_api.py", line 210, in publisher_update_task
+    ret = xmlrpcapi(api).publisherUpdate('/master', topic, pub_uris)
+  File "/usr/lib/python3.8/xmlrpc/client.py", line 1109, in __call__
+    return self.__send(self.__name, args)
+  File "/usr/lib/python3.8/xmlrpc/client.py", line 1450, in __request
+    response = self.__transport.request(
+  File "/usr/lib/python3.8/xmlrpc/client.py", line 1153, in request
+    return self.single_request(host, handler, request_body, verbose)
+  File "/usr/lib/python3.8/xmlrpc/client.py", line 1165, in single_request
+    http_conn = self.send_request(host, handler, request_body, verbose)
+  File "/usr/lib/python3.8/xmlrpc/client.py", line 1278, in send_request
+    self.send_content(connection, request_body)
+  File "/usr/lib/python3.8/xmlrpc/client.py", line 1308, in send_content
+    connection.endheaders(request_body)
+  File "/usr/lib/python3.8/http/client.py", line 1251, in endheaders
+    self._send_output(message_body, encode_chunked=encode_chunked)
+  File "/usr/lib/python3.8/http/client.py", line 1011, in _send_output
+    self.send(msg)
+  File "/usr/lib/python3.8/http/client.py", line 951, in send
+    self.connect()
+  File "/usr/lib/python3.8/http/client.py", line 922, in connect
+    self.sock = self._create_connection(
+  File "/usr/lib/python3.8/socket.py", line 808, in create_connection
+    raise err
+  File "/usr/lib/python3.8/socket.py", line 796, in create_connection
+    sock.connect(sa)
+ConnectionRefusedError: [Errno 111] Connection refused
+
+[rosmaster.master][INFO] 2026-08-17 15:43:06,735: publisherUpdate[/clock] -> http://yanaibo-ThinkStation-P360-Tower:34821/ ['http://yanaibo-ThinkStation-P360-Tower:44687/']: sec=0.00, result=[1, '', 0]
+[rosmaster.master][INFO] 2026-08-17 15:43:06,735: publisherUpdate[/clock] -> http://yanaibo-ThinkStation-P360-Tower:33285/ ['http://yanaibo-ThinkStation-P360-Tower:44687/']: sec=0.00, result=[1, '', 0]
+[rosmaster.master][INFO] 2026-08-17 15:43:06,735: publisherUpdate[/clock] -> http://yanaibo-ThinkStation-P360-Tower:40113/ ['http://yanaibo-ThinkStation-P360-Tower:44687/']
+[rosmaster.master][INFO] 2026-08-17 15:43:06,736: publisherUpdate[/clock] -> http://yanaibo-ThinkStation-P360-Tower:44687/ ['http://yanaibo-ThinkStation-P360-Tower:44687/']
+[rosmaster.master][INFO] 2026-08-17 15:43:06,736: publisherUpdate[/rosout] -> http://yanaibo-ThinkStation-P360-Tower:33285/ ['http://yanaibo-ThinkStation-P360-Tower:37173/', 'http://yanaibo-ThinkStation-P360-Tower:33625/', 'http://yanaibo-ThinkStation-P360-Tower:34821/', 'http://yanaibo-ThinkStation-P360-Tower:40113/', 'http://yanaibo-ThinkStation-P360-Tower:44687/']
+[rosmaster.master][INFO] 2026-08-17 15:43:06,737: +SUB [/reset_visibility_graph] /far_planner http://yanaibo-ThinkStation-P360-Tower:39681/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,738: publisherUpdate[/clock] -> http://yanaibo-ThinkStation-P360-Tower:40113/ ['http://yanaibo-ThinkStation-P360-Tower:44687/']: sec=0.00, result=[1, '', 0]
+[rosmaster.master][INFO] 2026-08-17 15:43:06,738: publisherUpdate[/rosout] -> http://yanaibo-ThinkStation-P360-Tower:33285/ ['http://yanaibo-ThinkStation-P360-Tower:37173/', 'http://yanaibo-ThinkStation-P360-Tower:33625/', 'http://yanaibo-ThinkStation-P360-Tower:34821/', 'http://yanaibo-ThinkStation-P360-Tower:40113/', 'http://yanaibo-ThinkStation-P360-Tower:44687/']: sec=0.00, result=[1, '', 0]
+[rosmaster.master][INFO] 2026-08-17 15:43:06,738: publisherUpdate[/clock] -> http://yanaibo-ThinkStation-P360-Tower:44687/ ['http://yanaibo-ThinkStation-P360-Tower:44687/']: sec=0.00, result=[1, '', 0]
+[rosmaster.master][INFO] 2026-08-17 15:43:06,738: publisherUpdate[/semantic_graph_static_obstacles] -> http://yanaibo-ThinkStation-P360-Tower:40113/ []
+[rosmaster.master][INFO] 2026-08-17 15:43:06,739: publisherUpdate[/tf] -> http://yanaibo-ThinkStation-P360-Tower:33625/ ['http://yanaibo-ThinkStation-P360-Tower:44687/']
+[rosmaster.master][INFO] 2026-08-17 15:43:06,739: publisherUpdate[/grids_points] -> http://yanaibo-ThinkStation-P360-Tower:37173/ ['http://yanaibo-ThinkStation-P360-Tower:44687/']
+[rosmaster.master][INFO] 2026-08-17 15:43:06,740: +SUB [/fusion_localization] /far_planner http://yanaibo-ThinkStation-P360-Tower:39681/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,740: publisherUpdate[/semantic_graph_static_obstacles] -> http://yanaibo-ThinkStation-P360-Tower:40113/ []: sec=0.00, result=[1, '', 0]
+[rosmaster.master][INFO] 2026-08-17 15:43:06,740: publisherUpdate[/grids_points] -> http://yanaibo-ThinkStation-P360-Tower:37173/ ['http://yanaibo-ThinkStation-P360-Tower:44687/']: sec=0.00, result=[1, '', 0]
+[rosmaster.master][INFO] 2026-08-17 15:43:06,740: publisherUpdate[/tf] -> http://yanaibo-ThinkStation-P360-Tower:33625/ ['http://yanaibo-ThinkStation-P360-Tower:44687/']: sec=0.00, result=[1, '', 0]
+[rosmaster.master][INFO] 2026-08-17 15:43:06,740: publisherUpdate[/semantic_local_static_obstacles] -> http://yanaibo-ThinkStation-P360-Tower:40113/ []
+[rosmaster.master][INFO] 2026-08-17 15:43:06,741: publisherUpdate[/rosout] -> http://yanaibo-ThinkStation-P360-Tower:33285/ ['http://yanaibo-ThinkStation-P360-Tower:37173/', 'http://yanaibo-ThinkStation-P360-Tower:33625/', 'http://yanaibo-ThinkStation-P360-Tower:34821/', 'http://yanaibo-ThinkStation-P360-Tower:40113/', 'http://yanaibo-ThinkStation-P360-Tower:44687/', 'http://yanaibo-ThinkStation-P360-Tower:39681/']
+[rosmaster.master][INFO] 2026-08-17 15:43:06,741: publisherUpdate[/semantic_local_static_obstacles] -> http://yanaibo-ThinkStation-P360-Tower:40113/ []: sec=0.00, result=[1, '', 0]
+[rosmaster.master][INFO] 2026-08-17 15:43:06,741: publisherUpdate[/semantic_local_dynamic_obstacles] -> http://yanaibo-ThinkStation-P360-Tower:40113/ []
+[rosmaster.master][INFO] 2026-08-17 15:43:06,742: +SUB [/goal_point] /far_planner http://yanaibo-ThinkStation-P360-Tower:39681/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,742: publisherUpdate[/semantic_local_dynamic_obstacles] -> http://yanaibo-ThinkStation-P360-Tower:40113/ []: sec=0.00, result=[1, '', 0]
+[rosmaster.master][INFO] 2026-08-17 15:43:06,742: publisherUpdate[/rosout] -> http://yanaibo-ThinkStation-P360-Tower:33285/ ['http://yanaibo-ThinkStation-P360-Tower:37173/', 'http://yanaibo-ThinkStation-P360-Tower:33625/', 'http://yanaibo-ThinkStation-P360-Tower:34821/', 'http://yanaibo-ThinkStation-P360-Tower:40113/', 'http://yanaibo-ThinkStation-P360-Tower:44687/', 'http://yanaibo-ThinkStation-P360-Tower:39681/']: sec=0.00, result=[1, '', 0]
+[rosmaster.master][INFO] 2026-08-17 15:43:06,742: publisherUpdate[/fusion_localization] -> http://yanaibo-ThinkStation-P360-Tower:40113/ ['http://yanaibo-ThinkStation-P360-Tower:44687/']
+[rosmaster.master][INFO] 2026-08-17 15:43:06,742: publisherUpdate[/fusion_localization] -> http://yanaibo-ThinkStation-P360-Tower:40113/ ['http://yanaibo-ThinkStation-P360-Tower:44687/']: sec=0.00, result=[1, '', 0]
+[rosmaster.master][INFO] 2026-08-17 15:43:06,742: publisherUpdate[/tf] -> http://yanaibo-ThinkStation-P360-Tower:40113/ ['http://yanaibo-ThinkStation-P360-Tower:44687/']
+[rosmaster.master][INFO] 2026-08-17 15:43:06,743: publisherUpdate[/tf] -> http://yanaibo-ThinkStation-P360-Tower:40113/ ['http://yanaibo-ThinkStation-P360-Tower:44687/']: sec=0.00, result=[1, '', 0]
+[rosmaster.master][INFO] 2026-08-17 15:43:06,743: publisherUpdate[/goal_point] -> http://yanaibo-ThinkStation-P360-Tower:40113/ ['http://yanaibo-ThinkStation-P360-Tower:34821/', 'http://yanaibo-ThinkStation-P360-Tower:40113/']
+[rosmaster.master][INFO] 2026-08-17 15:43:06,743: +SUB [/update_visibility_graph] /far_planner http://yanaibo-ThinkStation-P360-Tower:39681/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,744: publisherUpdate[/goal_point] -> http://yanaibo-ThinkStation-P360-Tower:40113/ ['http://yanaibo-ThinkStation-P360-Tower:34821/', 'http://yanaibo-ThinkStation-P360-Tower:40113/']: sec=0.00, result=[1, '', 0]
+[rosmaster.master][INFO] 2026-08-17 15:43:06,744: +PUB [/way_point] /far_planner http://yanaibo-ThinkStation-P360-Tower:39681/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,744: +PUB [/navigation_boundary] /far_planner http://yanaibo-ThinkStation-P360-Tower:39681/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,745: +PUB [/runtime] /far_planner http://yanaibo-ThinkStation-P360-Tower:39681/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,745: +PUB [/planning_time] /far_planner http://yanaibo-ThinkStation-P360-Tower:39681/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,745: +PUB [/far_traverse_time] /far_planner http://yanaibo-ThinkStation-P360-Tower:39681/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,745: +PUB [/semantic_snapshot_time] /far_planner http://yanaibo-ThinkStation-P360-Tower:39681/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,746: +PUB [/semantic_planner_update_time] /far_planner http://yanaibo-ThinkStation-P360-Tower:39681/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,746: +PUB [/semantic_callback_time] /far_planner http://yanaibo-ThinkStation-P360-Tower:39681/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,746: +PUB [/far_main_loop_time] /far_planner http://yanaibo-ThinkStation-P360-Tower:39681/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,746: +PUB [/far_reach_goal_status] /far_planner http://yanaibo-ThinkStation-P360-Tower:39681/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,747: +SUB [/read_file_dir] /far_planner http://yanaibo-ThinkStation-P360-Tower:39681/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,748: +SUB [/save_file_dir] /far_planner http://yanaibo-ThinkStation-P360-Tower:39681/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,749: +PUB [/FAR_dynamic_obs_debug] /far_planner http://yanaibo-ThinkStation-P360-Tower:39681/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,749: +PUB [/FAR_obs_debug] /far_planner http://yanaibo-ThinkStation-P360-Tower:39681/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,749: +PUB [/semantic_graph_static_obstacles] /far_planner http://yanaibo-ThinkStation-P360-Tower:39681/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,749: +PUB [/semantic_local_static_obstacles] /far_planner http://yanaibo-ThinkStation-P360-Tower:39681/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,750: +PUB [/semantic_local_dynamic_obstacles] /far_planner http://yanaibo-ThinkStation-P360-Tower:39681/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,750: +PUB [/FAR_obs_before_dyremove_debug] /far_planner http://yanaibo-ThinkStation-P360-Tower:39681/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,750: +PUB [/FAR_obs_after_dyremove_debug] /far_planner http://yanaibo-ThinkStation-P360-Tower:39681/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,750: +PUB [/FAR_scanGrid_debug] /far_planner http://yanaibo-ThinkStation-P360-Tower:39681/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,751: +PUB [/FAR_new_debug] /far_planner http://yanaibo-ThinkStation-P360-Tower:39681/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,751: +PUB [/FAR_terrain_height_debug] /far_planner http://yanaibo-ThinkStation-P360-Tower:39681/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,769: +SUB [/octomap_full] /far_planner http://yanaibo-ThinkStation-P360-Tower:39681/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,769: +PUB [/local_terrain_path_debug] /far_planner http://yanaibo-ThinkStation-P360-Tower:39681/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,769: +PUB [/local_terrain_map_debug] /far_planner http://yanaibo-ThinkStation-P360-Tower:39681/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,770: +SUB [/planning_attemptable] /far_planner http://yanaibo-ThinkStation-P360-Tower:39681/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,770: +PUB [/viz_node_topic] /far_planner http://yanaibo-ThinkStation-P360-Tower:39681/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,770: +PUB [/viz_path_topic] /far_planner http://yanaibo-ThinkStation-P360-Tower:39681/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,770: +PUB [/far_global_path] /far_planner http://yanaibo-ThinkStation-P360-Tower:39681/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,771: +PUB [/viz_poly_topic] /far_planner http://yanaibo-ThinkStation-P360-Tower:39681/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,771: +PUB [/viz_graph_topic] /far_planner http://yanaibo-ThinkStation-P360-Tower:39681/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,771: +PUB [/viz_contour_topic] /far_planner http://yanaibo-ThinkStation-P360-Tower:39681/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,771: +PUB [/viz_grid_map_topic] /far_planner http://yanaibo-ThinkStation-P360-Tower:39681/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,771: +PUB [/viz_viewpoint_extend_topic] /far_planner http://yanaibo-ThinkStation-P360-Tower:39681/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,771: +PUB [/viz_static_global_graph] /far_planner http://yanaibo-ThinkStation-P360-Tower:39681/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,771: +PUB [/viz_dynamic_local_graph] /far_planner http://yanaibo-ThinkStation-P360-Tower:39681/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,771: +PUB [/viz_current_search_graph] /far_planner http://yanaibo-ThinkStation-P360-Tower:39681/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,772: +PUB [/viz_dynamic_blocked_edges] /far_planner http://yanaibo-ThinkStation-P360-Tower:39681/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,772: +PUB [/robot_vgraph] /far_planner http://yanaibo-ThinkStation-P360-Tower:39681/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,773: +SUB [/tf] /far_planner http://yanaibo-ThinkStation-P360-Tower:39681/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,774: +SUB [/tf_static] /far_planner http://yanaibo-ThinkStation-P360-Tower:39681/
+[rosmaster.master][INFO] 2026-08-17 15:43:06,841: publisherUpdate[/way_point] -> http://yanaibo-ThinkStation-P360-Tower:40113/ ['http://yanaibo-ThinkStation-P360-Tower:39681/']
+[rosmaster.master][INFO] 2026-08-17 15:43:06,842: publisherUpdate[/way_point] -> http://yanaibo-ThinkStation-P360-Tower:40113/ ['http://yanaibo-ThinkStation-P360-Tower:39681/']: sec=0.00, result=[1, '', 0]
+[rosmaster.master][INFO] 2026-08-17 15:43:06,842: publisherUpdate[/semantic_snapshot_time] -> http://yanaibo-ThinkStation-P360-Tower:40113/ ['http://yanaibo-ThinkStation-P360-Tower:39681/']
+[rosmaster.master][INFO] 2026-08-17 15:43:06,842: publisherUpdate[/semantic_snapshot_time] -> http://yanaibo-ThinkStation-P360-Tower:40113/ ['http://yanaibo-ThinkStation-P360-Tower:39681/']: sec=0.00, result=[1, '', 0]
+[rosmaster.master][INFO] 2026-08-17 15:43:06,842: publisherUpdate[/semantic_planner_update_time] -> http://yanaibo-ThinkStation-P360-Tower:40113/ ['http://yanaibo-ThinkStation-P360-Tower:39681/']
+[rosmaster.master][INFO] 2026-08-17 15:43:06,842: publisherUpdate[/semantic_planner_update_time] -> http://yanaibo-ThinkStation-P360-Tower:40113/ ['http://yanaibo-ThinkStation-P360-Tower:39681/']: sec=0.00, result=[1, '', 0]
+[rosmaster.master][INFO] 2026-08-17 15:43:06,842: publisherUpdate[/semantic_callback_time] -> http://yanaibo-ThinkStation-P360-Tower:40113/ ['http://yanaibo-ThinkStation-P360-Tower:39681/']
+[rosmaster.master][INFO] 2026-08-17 15:43:06,842: publisherUpdate[/semantic_callback_time] -> http://yanaibo-ThinkStation-P360-Tower:40113/ ['http://yanaibo-ThinkStation-P360-Tower:39681/']: sec=0.00, result=[1, '', 0]
+[rosmaster.master][INFO] 2026-08-17 15:43:06,842: publisherUpdate[/far_main_loop_time] -> http://yanaibo-ThinkStation-P360-Tower:40113/ ['http://yanaibo-ThinkStation-P360-Tower:39681/']
+[rosmaster.master][INFO] 2026-08-17 15:43:06,843: publisherUpdate[/far_main_loop_time] -> http://yanaibo-ThinkStation-P360-Tower:40113/ ['http://yanaibo-ThinkStation-P360-Tower:39681/']: sec=0.00, result=[1, '', 0]
+[rosmaster.master][INFO] 2026-08-17 15:43:06,843: publisherUpdate[/far_reach_goal_status] -> http://yanaibo-ThinkStation-P360-Tower:40113/ ['http://yanaibo-ThinkStation-P360-Tower:39681/']
+[rosmaster.master][INFO] 2026-08-17 15:43:06,843: publisherUpdate[/far_reach_goal_status] -> http://yanaibo-ThinkStation-P360-Tower:40113/ ['http://yanaibo-ThinkStation-P360-Tower:39681/']: sec=0.00, result=[1, '', 0]
+[rosmaster.master][INFO] 2026-08-17 15:43:06,843: publisherUpdate[/semantic_graph_static_obstacles] -> http://yanaibo-ThinkStation-P360-Tower:40113/ ['http://yanaibo-ThinkStation-P360-Tower:39681/']
+[rosmaster.master][INFO] 2026-08-17 15:43:06,843: publisherUpdate[/semantic_graph_static_obstacles] -> http://yanaibo-ThinkStation-P360-Tower:40113/ ['http://yanaibo-ThinkStation-P360-Tower:39681/']: sec=0.00, result=[1, '', 0]
+[rosmaster.master][INFO] 2026-08-17 15:43:06,843: publisherUpdate[/semantic_local_static_obstacles] -> http://yanaibo-ThinkStation-P360-Tower:40113/ ['http://yanaibo-ThinkStation-P360-Tower:39681/']
+[rosmaster.master][INFO] 2026-08-17 15:43:06,843: publisherUpdate[/semantic_local_static_obstacles] -> http://yanaibo-ThinkStation-P360-Tower:40113/ ['http://yanaibo-ThinkStation-P360-Tower:39681/']: sec=0.00, result=[1, '', 0]
+[rosmaster.master][INFO] 2026-08-17 15:43:06,843: publisherUpdate[/semantic_local_dynamic_obstacles] -> http://yanaibo-ThinkStation-P360-Tower:40113/ ['http://yanaibo-ThinkStation-P360-Tower:39681/']
+[rosmaster.master][INFO] 2026-08-17 15:43:06,843: publisherUpdate[/semantic_local_dynamic_obstacles] -> http://yanaibo-ThinkStation-P360-Tower:40113/ ['http://yanaibo-ThinkStation-P360-Tower:39681/']: sec=0.00, result=[1, '', 0]
+[rosmaster.master][INFO] 2026-08-17 15:43:06,843: publisherUpdate[/far_global_path] -> http://yanaibo-ThinkStation-P360-Tower:40113/ ['http://yanaibo-ThinkStation-P360-Tower:39681/']
+[rosmaster.master][INFO] 2026-08-17 15:43:06,843: publisherUpdate[/far_global_path] -> http://yanaibo-ThinkStation-P360-Tower:40113/ ['http://yanaibo-ThinkStation-P360-Tower:39681/']: sec=0.00, result=[1, '', 0]
+[rosmaster.master][INFO] 2026-08-17 15:43:06,843: publisherUpdate[/viz_graph_topic] -> http://yanaibo-ThinkStation-P360-Tower:40113/ ['http://yanaibo-ThinkStation-P360-Tower:39681/']
+[rosmaster.master][INFO] 2026-08-17 15:43:06,844: publisherUpdate[/viz_graph_topic] -> http://yanaibo-ThinkStation-P360-Tower:40113/ ['http://yanaibo-ThinkStation-P360-Tower:39681/']: sec=0.00, result=[1, '', 0]
+[rosmaster.master][INFO] 2026-08-17 15:43:06,844: publisherUpdate[/viz_static_global_graph] -> http://yanaibo-ThinkStation-P360-Tower:40113/ ['http://yanaibo-ThinkStation-P360-Tower:39681/']
+[rosmaster.master][INFO] 2026-08-17 15:43:06,844: publisherUpdate[/viz_static_global_graph] -> http://yanaibo-ThinkStation-P360-Tower:40113/ ['http://yanaibo-ThinkStation-P360-Tower:39681/']: sec=0.00, result=[1, '', 0]
+[rosmaster.master][INFO] 2026-08-17 15:43:06,844: publisherUpdate[/viz_current_search_graph] -> http://yanaibo-ThinkStation-P360-Tower:40113/ ['http://yanaibo-ThinkStation-P360-Tower:39681/']
+[rosmaster.master][INFO] 2026-08-17 15:43:06,844: publisherUpdate[/viz_current_search_graph] -> http://yanaibo-ThinkStation-P360-Tower:40113/ ['http://yanaibo-ThinkStation-P360-Tower:39681/']: sec=0.00, result=[1, '', 0]
+[rosmaster.master][INFO] 2026-08-17 15:43:06,844: publisherUpdate[/viz_dynamic_blocked_edges] -> http://yanaibo-ThinkStation-P360-Tower:40113/ ['http://yanaibo-ThinkStation-P360-Tower:39681/']
+[rosmaster.master][INFO] 2026-08-17 15:43:06,844: publisherUpdate[/viz_dynamic_blocked_edges] -> http://yanaibo-ThinkStation-P360-Tower:40113/ ['http://yanaibo-ThinkStation-P360-Tower:39681/']: sec=0.00, result=[1, '', 0]
+[rosmaster.master][INFO] 2026-08-17 15:43:09,710: +CACHEDPARAM [/rosout/omit_topics] by /rosout
+[rosmaster.master][INFO] 2026-08-17 15:43:10,114: +CACHEDPARAM [/rosout_disable_topics_generation] by /far_planner
+[rosmaster.master][INFO] 2026-08-17 15:46:10,095: -PUB [/rosout] /ssmi_bag_player http://yanaibo-ThinkStation-P360-Tower:44687/
+[rosmaster.master][INFO] 2026-08-17 15:46:10,095: publisherUpdate[/rosout] -> http://yanaibo-ThinkStation-P360-Tower:33285/ ['http://yanaibo-ThinkStation-P360-Tower:37173/', 'http://yanaibo-ThinkStation-P360-Tower:33625/', 'http://yanaibo-ThinkStation-P360-Tower:34821/', 'http://yanaibo-ThinkStation-P360-Tower:40113/', 'http://yanaibo-ThinkStation-P360-Tower:39681/']
+[rosmaster.master][INFO] 2026-08-17 15:46:10,095: -PUB [/clock] /ssmi_bag_player http://yanaibo-ThinkStation-P360-Tower:44687/
+[rosmaster.master][INFO] 2026-08-17 15:46:10,096: -PUB [/fusion_localization] /ssmi_bag_player http://yanaibo-ThinkStation-P360-Tower:44687/
+[rosmaster.master][INFO] 2026-08-17 15:46:10,096: publisherUpdate[/rosout] -> http://yanaibo-ThinkStation-P360-Tower:33285/ ['http://yanaibo-ThinkStation-P360-Tower:37173/', 'http://yanaibo-ThinkStation-P360-Tower:33625/', 'http://yanaibo-ThinkStation-P360-Tower:34821/', 'http://yanaibo-ThinkStation-P360-Tower:40113/', 'http://yanaibo-ThinkStation-P360-Tower:39681/']: sec=0.00, result=[1, '', 0]
+[rosmaster.master][INFO] 2026-08-17 15:46:10,096: publisherUpdate[/clock] -> http://yanaibo-ThinkStation-P360-Tower:33285/ []
+[rosmaster.master][INFO] 2026-08-17 15:46:10,096: publisherUpdate[/clock] -> http://yanaibo-ThinkStation-P360-Tower:33285/ []: sec=0.00, result=[1, '', 0]
+[rosmaster.master][INFO] 2026-08-17 15:46:10,097: -PUB [/tf] /ssmi_bag_player http://yanaibo-ThinkStation-P360-Tower:44687/
+[rosmaster.master][INFO] 2026-08-17 15:46:10,097: publisherUpdate[/clock] -> http://yanaibo-ThinkStation-P360-Tower:37173/ []
+[rosmaster.master][INFO] 2026-08-17 15:46:10,097: -PUB [/grids_points] /ssmi_bag_player http://yanaibo-ThinkStation-P360-Tower:44687/
+[rosmaster.master][INFO] 2026-08-17 15:46:10,097: -SUB [/clock] /ssmi_bag_player http://yanaibo-ThinkStation-P360-Tower:44687/
+[rosmaster.master][INFO] 2026-08-17 15:46:10,097: publisherUpdate[/clock] -> http://yanaibo-ThinkStation-P360-Tower:37173/ []: sec=0.00, result=[1, '', 0]
+[rosmaster.master][INFO] 2026-08-17 15:46:10,097: -SERVICE [/ssmi_bag_player/get_loggers] /ssmi_bag_player rosrpc://yanaibo-ThinkStation-P360-Tower:55397
+[rosmaster.master][INFO] 2026-08-17 15:46:10,097: publisherUpdate[/clock] -> http://yanaibo-ThinkStation-P360-Tower:33625/ []
+[rosmaster.master][INFO] 2026-08-17 15:46:10,098: -SERVICE [/ssmi_bag_player/set_logger_level] /ssmi_bag_player rosrpc://yanaibo-ThinkStation-P360-Tower:55397
+[rosmaster.master][INFO] 2026-08-17 15:46:10,098: publisherUpdate[/clock] -> http://yanaibo-ThinkStation-P360-Tower:33625/ []: sec=0.00, result=[1, '', 0]
+[rosmaster.master][INFO] 2026-08-17 15:46:10,098: -SERVICE [/ssmi_bag_player/pause_playback] /ssmi_bag_player rosrpc://yanaibo-ThinkStation-P360-Tower:55397
+[rosmaster.master][INFO] 2026-08-17 15:46:10,098: publisherUpdate[/clock] -> http://yanaibo-ThinkStation-P360-Tower:34821/ []
+[rosmaster.master][INFO] 2026-08-17 15:46:10,098: -CACHEDPARAM [/rosout_disable_topics_generation] by /ssmi_bag_player
+[rosmaster.master][INFO] 2026-08-17 15:46:10,098: publisherUpdate[/clock] -> http://yanaibo-ThinkStation-P360-Tower:34821/ []: sec=0.00, result=[1, '', 0]
+[rosmaster.master][INFO] 2026-08-17 15:46:10,098: publisherUpdate[/clock] -> http://yanaibo-ThinkStation-P360-Tower:40113/ []
+[rosmaster.master][INFO] 2026-08-17 15:46:10,099: publisherUpdate[/clock] -> http://yanaibo-ThinkStation-P360-Tower:40113/ []: sec=0.00, result=[1, '', 0]
+[rosmaster.master][INFO] 2026-08-17 15:46:10,099: publisherUpdate[/clock] -> http://yanaibo-ThinkStation-P360-Tower:44687/ []
+[rosmaster.master][INFO] 2026-08-17 15:46:10,105: publisherUpdate[/clock] -> http://yanaibo-ThinkStation-P360-Tower:44687/ []: sec=0.01, exception=[Errno 111] Connection refused
+[rosmaster.threadpool][ERROR] 2026-08-17 15:46:10,106: Traceback (most recent call last):
+  File "/opt/ros/noetic/lib/python3/dist-packages/rosmaster/threadpool.py", line 218, in run
+    result = cmd(*args)
+  File "/opt/ros/noetic/lib/python3/dist-packages/rosmaster/master_api.py", line 210, in publisher_update_task
+    ret = xmlrpcapi(api).publisherUpdate('/master', topic, pub_uris)
+  File "/usr/lib/python3.8/xmlrpc/client.py", line 1109, in __call__
+    return self.__send(self.__name, args)
+  File "/usr/lib/python3.8/xmlrpc/client.py", line 1450, in __request
+    response = self.__transport.request(
+  File "/usr/lib/python3.8/xmlrpc/client.py", line 1153, in request
+    return self.single_request(host, handler, request_body, verbose)
+  File "/usr/lib/python3.8/xmlrpc/client.py", line 1165, in single_request
+    http_conn = self.send_request(host, handler, request_body, verbose)
+  File "/usr/lib/python3.8/xmlrpc/client.py", line 1278, in send_request
+    self.send_content(connection, request_body)
+  File "/usr/lib/python3.8/xmlrpc/client.py", line 1308, in send_content
+    connection.endheaders(request_body)
+  File "/usr/lib/python3.8/http/client.py", line 1251, in endheaders
+    self._send_output(message_body, encode_chunked=encode_chunked)
+  File "/usr/lib/python3.8/http/client.py", line 1011, in _send_output
+    self.send(msg)
+  File "/usr/lib/python3.8/http/client.py", line 951, in send
+    self.connect()
+  File "/usr/lib/python3.8/http/client.py", line 922, in connect
+    self.sock = self._create_connection(
+  File "/usr/lib/python3.8/socket.py", line 808, in create_connection
+    raise err
+  File "/usr/lib/python3.8/socket.py", line 796, in create_connection
+    sock.connect(sa)
+ConnectionRefusedError: [Errno 111] Connection refused
+
+[rosmaster.master][INFO] 2026-08-17 15:46:10,106: publisherUpdate[/clock] -> http://yanaibo-ThinkStation-P360-Tower:39681/ []
+[rosmaster.master][INFO] 2026-08-17 15:46:10,106: publisherUpdate[/clock] -> http://yanaibo-ThinkStation-P360-Tower:39681/ []: sec=0.00, result=[1, '', 0]
+[rosmaster.master][INFO] 2026-08-17 15:46:10,106: publisherUpdate[/fusion_localization] -> http://yanaibo-ThinkStation-P360-Tower:40113/ []
+[rosmaster.master][INFO] 2026-08-17 15:46:10,106: publisherUpdate[/fusion_localization] -> http://yanaibo-ThinkStation-P360-Tower:40113/ []: sec=0.00, result=[1, '', 0]
+[rosmaster.master][INFO] 2026-08-17 15:46:10,106: publisherUpdate[/fusion_localization] -> http://yanaibo-ThinkStation-P360-Tower:39681/ []
+[rosmaster.master][INFO] 2026-08-17 15:46:10,106: publisherUpdate[/fusion_localization] -> http://yanaibo-ThinkStation-P360-Tower:39681/ []: sec=0.00, result=[1, '', 0]
+[rosmaster.master][INFO] 2026-08-17 15:46:10,106: publisherUpdate[/tf] -> http://yanaibo-ThinkStation-P360-Tower:33625/ []
+[rosmaster.master][INFO] 2026-08-17 15:46:10,107: publisherUpdate[/tf] -> http://yanaibo-ThinkStation-P360-Tower:33625/ []: sec=0.00, result=[1, '', 0]
+[rosmaster.master][INFO] 2026-08-17 15:46:10,107: publisherUpdate[/tf] -> http://yanaibo-ThinkStation-P360-Tower:40113/ []
+[rosmaster.master][INFO] 2026-08-17 15:46:10,107: publisherUpdate[/tf] -> http://yanaibo-ThinkStation-P360-Tower:40113/ []: sec=0.00, result=[1, '', 0]
+[rosmaster.master][INFO] 2026-08-17 15:46:10,107: publisherUpdate[/tf] -> http://yanaibo-ThinkStation-P360-Tower:39681/ []
+[rosmaster.master][INFO] 2026-08-17 15:46:10,107: publisherUpdate[/tf] -> http://yanaibo-ThinkStation-P360-Tower:39681/ []: sec=0.00, result=[1, '', 0]
+[rosmaster.master][INFO] 2026-08-17 15:46:10,107: publisherUpdate[/grids_points] -> http://yanaibo-ThinkStation-P360-Tower:37173/ []
+[rosmaster.master][INFO] 2026-08-17 15:46:10,107: publisherUpdate[/grids_points] -> http://yanaibo-ThinkStation-P360-Tower:37173/ []: sec=0.00, result=[1, '', 0]
+[rosmaster.master][INFO] 2026-08-17 15:46:15,114: -PUB [/rosout] /ssmi_bag_graph_monitor http://yanaibo-ThinkStation-P360-Tower:40113/
+[rosmaster.master][INFO] 2026-08-17 15:46:15,114: publisherUpdate[/rosout] -> http://yanaibo-ThinkStation-P360-Tower:33285/ ['http://yanaibo-ThinkStation-P360-Tower:37173/', 'http://yanaibo-ThinkStation-P360-Tower:33625/', 'http://yanaibo-ThinkStation-P360-Tower:34821/', 'http://yanaibo-ThinkStation-P360-Tower:39681/']
+[rosmaster.master][INFO] 2026-08-17 15:46:15,114: -PUB [/goal_point] /ssmi_bag_graph_monitor http://yanaibo-ThinkStation-P360-Tower:40113/
+[rosmaster.master][INFO] 2026-08-17 15:46:15,115: -SUB [/clock] /ssmi_bag_graph_monitor http://yanaibo-ThinkStation-P360-Tower:40113/
+[rosmaster.master][INFO] 2026-08-17 15:46:15,115: publisherUpdate[/rosout] -> http://yanaibo-ThinkStation-P360-Tower:33285/ ['http://yanaibo-ThinkStation-P360-Tower:37173/', 'http://yanaibo-ThinkStation-P360-Tower:33625/', 'http://yanaibo-ThinkStation-P360-Tower:34821/', 'http://yanaibo-ThinkStation-P360-Tower:39681/']: sec=0.00, result=[1, '', 0]
+[rosmaster.master][INFO] 2026-08-17 15:46:15,115: -SUB [/tf] /ssmi_bag_graph_monitor http://yanaibo-ThinkStation-P360-Tower:40113/
+[rosmaster.master][INFO] 2026-08-17 15:46:15,115: publisherUpdate[/goal_point] -> http://yanaibo-ThinkStation-P360-Tower:40113/ ['http://yanaibo-ThinkStation-P360-Tower:34821/']
+[rosmaster.master][INFO] 2026-08-17 15:46:15,115: -SUB [/tf_static] /ssmi_bag_graph_monitor http://yanaibo-ThinkStation-P360-Tower:40113/
+[rosmaster.master][INFO] 2026-08-17 15:46:15,115: -SUB [/fusion_localization] /ssmi_bag_graph_monitor http://yanaibo-ThinkStation-P360-Tower:40113/
+[rosmaster.master][INFO] 2026-08-17 15:46:15,116: -SUB [/octomap_full] /ssmi_bag_graph_monitor http://yanaibo-ThinkStation-P360-Tower:40113/
+[rosmaster.master][INFO] 2026-08-17 15:46:15,116: -SUB [/semantic_local_static_obstacles] /ssmi_bag_graph_monitor http://yanaibo-ThinkStation-P360-Tower:40113/
+[rosmaster.master][INFO] 2026-08-17 15:46:15,116: -SUB [/semantic_graph_static_obstacles] /ssmi_bag_graph_monitor http://yanaibo-ThinkStation-P360-Tower:40113/
+[rosmaster.master][INFO] 2026-08-17 15:46:15,116: -SUB [/semantic_local_dynamic_obstacles] /ssmi_bag_graph_monitor http://yanaibo-ThinkStation-P360-Tower:40113/
+[rosmaster.master][INFO] 2026-08-17 15:46:15,116: -SUB [/viz_current_search_graph] /ssmi_bag_graph_monitor http://yanaibo-ThinkStation-P360-Tower:40113/
+[rosmaster.master][INFO] 2026-08-17 15:46:15,116: -SUB [/viz_static_global_graph] /ssmi_bag_graph_monitor http://yanaibo-ThinkStation-P360-Tower:40113/
+[rosmaster.master][INFO] 2026-08-17 15:46:15,117: -SUB [/viz_graph_topic] /ssmi_bag_graph_monitor http://yanaibo-ThinkStation-P360-Tower:40113/
+[rosmaster.master][INFO] 2026-08-17 15:46:15,117: -SUB [/viz_dynamic_blocked_edges] /ssmi_bag_graph_monitor http://yanaibo-ThinkStation-P360-Tower:40113/
+[rosmaster.master][INFO] 2026-08-17 15:46:15,117: -SUB [/far_global_path] /ssmi_bag_graph_monitor http://yanaibo-ThinkStation-P360-Tower:40113/
+[rosmaster.master][INFO] 2026-08-17 15:46:15,117: -SUB [/way_point] /ssmi_bag_graph_monitor http://yanaibo-ThinkStation-P360-Tower:40113/
+[rosmaster.master][INFO] 2026-08-17 15:46:15,117: -SUB [/far_reach_goal_status] /ssmi_bag_graph_monitor http://yanaibo-ThinkStation-P360-Tower:40113/
+[rosmaster.master][INFO] 2026-08-17 15:46:15,117: -SUB [/goal_point] /ssmi_bag_graph_monitor http://yanaibo-ThinkStation-P360-Tower:40113/
+[rosmaster.master][INFO] 2026-08-17 15:46:15,117: -SUB [/semantic_snapshot_time] /ssmi_bag_graph_monitor http://yanaibo-ThinkStation-P360-Tower:40113/
+[rosmaster.master][INFO] 2026-08-17 15:46:15,117: -SUB [/semantic_planner_update_time] /ssmi_bag_graph_monitor http://yanaibo-ThinkStation-P360-Tower:40113/
+[rosmaster.master][INFO] 2026-08-17 15:46:15,118: -SUB [/semantic_callback_time] /ssmi_bag_graph_monitor http://yanaibo-ThinkStation-P360-Tower:40113/
+[rosmaster.master][INFO] 2026-08-17 15:46:15,118: -SUB [/far_main_loop_time] /ssmi_bag_graph_monitor http://yanaibo-ThinkStation-P360-Tower:40113/
+[rosmaster.master][INFO] 2026-08-17 15:46:15,118: -SERVICE [/ssmi_bag_graph_monitor/get_loggers] /ssmi_bag_graph_monitor rosrpc://yanaibo-ThinkStation-P360-Tower:50633
+[rosmaster.master][INFO] 2026-08-17 15:46:15,118: -SERVICE [/ssmi_bag_graph_monitor/set_logger_level] /ssmi_bag_graph_monitor rosrpc://yanaibo-ThinkStation-P360-Tower:50633
+[rosmaster.master][INFO] 2026-08-17 15:46:15,118: -CACHEDPARAM [/rosout_disable_topics_generation] by /ssmi_bag_graph_monitor
+[rosmaster.master][INFO] 2026-08-17 15:46:15,129: publisherUpdate[/goal_point] -> http://yanaibo-ThinkStation-P360-Tower:40113/ ['http://yanaibo-ThinkStation-P360-Tower:34821/']: sec=0.01, exception=[Errno 111] Connection refused
+[rosmaster.threadpool][ERROR] 2026-08-17 15:46:15,129: Traceback (most recent call last):
+  File "/opt/ros/noetic/lib/python3/dist-packages/rosmaster/threadpool.py", line 218, in run
+    result = cmd(*args)
+  File "/opt/ros/noetic/lib/python3/dist-packages/rosmaster/master_api.py", line 210, in publisher_update_task
+    ret = xmlrpcapi(api).publisherUpdate('/master', topic, pub_uris)
+  File "/usr/lib/python3.8/xmlrpc/client.py", line 1109, in __call__
+    return self.__send(self.__name, args)
+  File "/usr/lib/python3.8/xmlrpc/client.py", line 1450, in __request
+    response = self.__transport.request(
+  File "/usr/lib/python3.8/xmlrpc/client.py", line 1153, in request
+    return self.single_request(host, handler, request_body, verbose)
+  File "/usr/lib/python3.8/xmlrpc/client.py", line 1165, in single_request
+    http_conn = self.send_request(host, handler, request_body, verbose)
+  File "/usr/lib/python3.8/xmlrpc/client.py", line 1278, in send_request
+    self.send_content(connection, request_body)
+  File "/usr/lib/python3.8/xmlrpc/client.py", line 1308, in send_content
+    connection.endheaders(request_body)
+  File "/usr/lib/python3.8/http/client.py", line 1251, in endheaders
+    self._send_output(message_body, encode_chunked=encode_chunked)
+  File "/usr/lib/python3.8/http/client.py", line 1011, in _send_output
+    self.send(msg)
+  File "/usr/lib/python3.8/http/client.py", line 951, in send
+    self.connect()
+  File "/usr/lib/python3.8/http/client.py", line 922, in connect
+    self.sock = self._create_connection(
+  File "/usr/lib/python3.8/socket.py", line 808, in create_connection
+    raise err
+  File "/usr/lib/python3.8/socket.py", line 796, in create_connection
+    sock.connect(sa)
+ConnectionRefusedError: [Errno 111] Connection refused
+
+[rosmaster.master][INFO] 2026-08-17 15:46:15,130: publisherUpdate[/goal_point] -> http://yanaibo-ThinkStation-P360-Tower:39681/ ['http://yanaibo-ThinkStation-P360-Tower:34821/']
+[rosmaster.master][INFO] 2026-08-17 15:46:15,130: publisherUpdate[/goal_point] -> http://yanaibo-ThinkStation-P360-Tower:39681/ ['http://yanaibo-ThinkStation-P360-Tower:34821/']: sec=0.00, result=[1, '', 0]
+[rosmaster.master][INFO] 2026-08-17 15:46:15,406: -PUB [/rosout] /ssmi_goal_adapter http://yanaibo-ThinkStation-P360-Tower:34821/
+[rosmaster.master][INFO] 2026-08-17 15:46:15,406: -PUB [/goal_point] /ssmi_goal_adapter http://yanaibo-ThinkStation-P360-Tower:34821/
+[rosmaster.master][INFO] 2026-08-17 15:46:15,407: -SUB [/clock] /ssmi_goal_adapter http://yanaibo-ThinkStation-P360-Tower:34821/
+[rosmaster.master][INFO] 2026-08-17 15:46:15,407: -SUB [/move_base_simple/goal] /ssmi_goal_adapter http://yanaibo-ThinkStation-P360-Tower:34821/
+[rosmaster.master][INFO] 2026-08-17 15:46:15,407: -SERVICE [/ssmi_goal_adapter/get_loggers] /ssmi_goal_adapter rosrpc://yanaibo-ThinkStation-P360-Tower:41469
+[rosmaster.master][INFO] 2026-08-17 15:46:15,407: -SERVICE [/ssmi_goal_adapter/set_logger_level] /ssmi_goal_adapter rosrpc://yanaibo-ThinkStation-P360-Tower:41469
+[rosmaster.master][INFO] 2026-08-17 15:46:15,407: -CACHEDPARAM [/rosout_disable_topics_generation] by /ssmi_goal_adapter
+[rosmaster.master][INFO] 2026-08-17 15:46:15,414: -PUB [/rosout] /grid_semantic_adapter http://yanaibo-ThinkStation-P360-Tower:37173/
+[rosmaster.master][INFO] 2026-08-17 15:46:15,414: -PUB [/semantic_pcl/semantic_pcl] /grid_semantic_adapter http://yanaibo-ThinkStation-P360-Tower:37173/
+[rosmaster.master][INFO] 2026-08-17 15:46:15,414: -SUB [/clock] /grid_semantic_adapter http://yanaibo-ThinkStation-P360-Tower:37173/
+[rosmaster.master][INFO] 2026-08-17 15:46:15,414: -SUB [/grids_points] /grid_semantic_adapter http://yanaibo-ThinkStation-P360-Tower:37173/
+[rosmaster.master][INFO] 2026-08-17 15:46:15,415: -SERVICE [/grid_semantic_adapter/get_loggers] /grid_semantic_adapter rosrpc://yanaibo-ThinkStation-P360-Tower:35495
+[rosmaster.master][INFO] 2026-08-17 15:46:15,415: -PUB [/rosout] /semantic_octomap http://yanaibo-ThinkStation-P360-Tower:33625/
+[rosmaster.master][INFO] 2026-08-17 15:46:15,415: -SERVICE [/grid_semantic_adapter/set_logger_level] /grid_semantic_adapter rosrpc://yanaibo-ThinkStation-P360-Tower:35495
+[rosmaster.master][INFO] 2026-08-17 15:46:15,415: -PUB [/tf_static] /semantic_octomap http://yanaibo-ThinkStation-P360-Tower:33625/
+[rosmaster.master][INFO] 2026-08-17 15:46:15,415: -CACHEDPARAM [/rosout_disable_topics_generation] by /grid_semantic_adapter
+[rosmaster.master][INFO] 2026-08-17 15:46:15,416: -PUB [/octomap_full] /semantic_octomap http://yanaibo-ThinkStation-P360-Tower:33625/
+[rosmaster.master][INFO] 2026-08-17 15:46:15,416: -PUB [/octomap_color] /semantic_octomap http://yanaibo-ThinkStation-P360-Tower:33625/
+[rosmaster.master][INFO] 2026-08-17 15:46:15,416: -PUB [/occupancy_map_2D] /semantic_octomap http://yanaibo-ThinkStation-P360-Tower:33625/
+[rosmaster.master][INFO] 2026-08-17 15:46:15,416: -SUB [/clock] /semantic_octomap http://yanaibo-ThinkStation-P360-Tower:33625/
+[rosmaster.master][INFO] 2026-08-17 15:46:15,417: -SUB [/tf] /semantic_octomap http://yanaibo-ThinkStation-P360-Tower:33625/
+[rosmaster.master][INFO] 2026-08-17 15:46:15,417: -SUB [/tf_static] /semantic_octomap http://yanaibo-ThinkStation-P360-Tower:33625/
+[rosmaster.master][INFO] 2026-08-17 15:46:15,417: -SUB [/semantic_pcl/semantic_pcl] /semantic_octomap http://yanaibo-ThinkStation-P360-Tower:33625/
+[rosmaster.master][INFO] 2026-08-17 15:46:15,417: -SERVICE [/semantic_octomap/get_loggers] /semantic_octomap rosrpc://yanaibo-ThinkStation-P360-Tower:53081
+[rosmaster.master][INFO] 2026-08-17 15:46:15,418: -SERVICE [/semantic_octomap/set_logger_level] /semantic_octomap rosrpc://yanaibo-ThinkStation-P360-Tower:53081
+[rosmaster.master][INFO] 2026-08-17 15:46:15,418: -SERVICE [/toggle_use_semantic_color] /semantic_octomap rosrpc://yanaibo-ThinkStation-P360-Tower:53081
+[rosmaster.master][INFO] 2026-08-17 15:46:15,418: -SERVICE [/querry_RLE] /semantic_octomap rosrpc://yanaibo-ThinkStation-P360-Tower:53081
+[rosmaster.master][INFO] 2026-08-17 15:46:15,418: -SERVICE [/reset_semantic_octomap] /semantic_octomap rosrpc://yanaibo-ThinkStation-P360-Tower:53081
+[rosmaster.master][INFO] 2026-08-17 15:46:15,419: -CACHEDPARAM [/rosout_disable_topics_generation] by /semantic_octomap
+[rosmaster.master][INFO] 2026-08-17 15:46:15,430: -PUB [/rosout] /far_planner http://yanaibo-ThinkStation-P360-Tower:39681/
+[rosmaster.master][INFO] 2026-08-17 15:46:15,431: publisherUpdate[/rosout] -> http://yanaibo-ThinkStation-P360-Tower:33285/ ['http://yanaibo-ThinkStation-P360-Tower:37173/', 'http://yanaibo-ThinkStation-P360-Tower:33625/', 'http://yanaibo-ThinkStation-P360-Tower:39681/']
+[rosmaster.master][INFO] 2026-08-17 15:46:15,431: -PUB [/way_point] /far_planner http://yanaibo-ThinkStation-P360-Tower:39681/
+[rosmaster.master][INFO] 2026-08-17 15:46:15,431: publisherUpdate[/rosout] -> http://yanaibo-ThinkStation-P360-Tower:33285/ ['http://yanaibo-ThinkStation-P360-Tower:37173/', 'http://yanaibo-ThinkStation-P360-Tower:33625/', 'http://yanaibo-ThinkStation-P360-Tower:39681/']: sec=0.00, result=[1, '', 0]
+[rosmaster.master][INFO] 2026-08-17 15:46:15,431: publisherUpdate[/goal_point] -> http://yanaibo-ThinkStation-P360-Tower:39681/ []
+[rosmaster.master][INFO] 2026-08-17 15:46:15,432: -PUB [/navigation_boundary] /far_planner http://yanaibo-ThinkStation-P360-Tower:39681/
+[rosmaster.master][INFO] 2026-08-17 15:46:15,432: -PUB [/runtime] /far_planner http://yanaibo-ThinkStation-P360-Tower:39681/
+[rosmaster.master][INFO] 2026-08-17 15:46:15,432: -PUB [/planning_time] /far_planner http://yanaibo-ThinkStation-P360-Tower:39681/
+[rosmaster.master][INFO] 2026-08-17 15:46:15,432: -PUB [/far_traverse_time] /far_planner http://yanaibo-ThinkStation-P360-Tower:39681/
+[rosmaster.master][INFO] 2026-08-17 15:46:15,432: -PUB [/semantic_snapshot_time] /far_planner http://yanaibo-ThinkStation-P360-Tower:39681/
+[rosmaster.master][INFO] 2026-08-17 15:46:15,432: -PUB [/semantic_planner_update_time] /far_planner http://yanaibo-ThinkStation-P360-Tower:39681/
+[rosmaster.master][INFO] 2026-08-17 15:46:15,432: -PUB [/semantic_callback_time] /far_planner http://yanaibo-ThinkStation-P360-Tower:39681/
+[rosmaster.master][INFO] 2026-08-17 15:46:15,432: -PUB [/far_main_loop_time] /far_planner http://yanaibo-ThinkStation-P360-Tower:39681/
+[rosmaster.master][INFO] 2026-08-17 15:46:15,433: -PUB [/far_reach_goal_status] /far_planner http://yanaibo-ThinkStation-P360-Tower:39681/
+[rosmaster.master][INFO] 2026-08-17 15:46:15,433: -PUB [/FAR_dynamic_obs_debug] /far_planner http://yanaibo-ThinkStation-P360-Tower:39681/
+[rosmaster.master][INFO] 2026-08-17 15:46:15,433: -PUB [/FAR_obs_debug] /far_planner http://yanaibo-ThinkStation-P360-Tower:39681/
+[rosmaster.master][INFO] 2026-08-17 15:46:15,433: -PUB [/semantic_graph_static_obstacles] /far_planner http://yanaibo-ThinkStation-P360-Tower:39681/
+[rosmaster.master][INFO] 2026-08-17 15:46:15,433: -PUB [/semantic_local_static_obstacles] /far_planner http://yanaibo-ThinkStation-P360-Tower:39681/
+[rosmaster.master][INFO] 2026-08-17 15:46:15,433: -PUB [/semantic_local_dynamic_obstacles] /far_planner http://yanaibo-ThinkStation-P360-Tower:39681/
+[rosmaster.master][INFO] 2026-08-17 15:46:15,433: -PUB [/FAR_obs_before_dyremove_debug] /far_planner http://yanaibo-ThinkStation-P360-Tower:39681/
+[rosmaster.master][INFO] 2026-08-17 15:46:15,433: -PUB [/FAR_obs_after_dyremove_debug] /far_planner http://yanaibo-ThinkStation-P360-Tower:39681/
+[rosmaster.master][INFO] 2026-08-17 15:46:15,433: -PUB [/FAR_scanGrid_debug] /far_planner http://yanaibo-ThinkStation-P360-Tower:39681/
+[rosmaster.master][INFO] 2026-08-17 15:46:15,434: -PUB [/FAR_new_debug] /far_planner http://yanaibo-ThinkStation-P360-Tower:39681/
+[rosmaster.master][INFO] 2026-08-17 15:46:15,434: -PUB [/FAR_terrain_height_debug] /far_planner http://yanaibo-ThinkStation-P360-Tower:39681/
+[rosmaster.master][INFO] 2026-08-17 15:46:15,434: -PUB [/local_terrain_path_debug] /far_planner http://yanaibo-ThinkStation-P360-Tower:39681/
+[rosmaster.master][INFO] 2026-08-17 15:46:15,434: -PUB [/local_terrain_map_debug] /far_planner http://yanaibo-ThinkStation-P360-Tower:39681/
+[rosmaster.master][INFO] 2026-08-17 15:46:15,434: -PUB [/viz_node_topic] /far_planner http://yanaibo-ThinkStation-P360-Tower:39681/
+[rosmaster.master][INFO] 2026-08-17 15:46:15,434: -PUB [/viz_path_topic] /far_planner http://yanaibo-ThinkStation-P360-Tower:39681/
+[rosmaster.master][INFO] 2026-08-17 15:46:15,434: -PUB [/far_global_path] /far_planner http://yanaibo-ThinkStation-P360-Tower:39681/
+[rosmaster.master][INFO] 2026-08-17 15:46:15,434: -PUB [/viz_poly_topic] /far_planner http://yanaibo-ThinkStation-P360-Tower:39681/
+[rosmaster.master][INFO] 2026-08-17 15:46:15,434: -PUB [/viz_graph_topic] /far_planner http://yanaibo-ThinkStation-P360-Tower:39681/
+[rosmaster.master][INFO] 2026-08-17 15:46:15,435: -PUB [/viz_contour_topic] /far_planner http://yanaibo-ThinkStation-P360-Tower:39681/
+[rosmaster.master][INFO] 2026-08-17 15:46:15,435: -PUB [/viz_grid_map_topic] /far_planner http://yanaibo-ThinkStation-P360-Tower:39681/
+[rosmaster.master][INFO] 2026-08-17 15:46:15,435: -PUB [/viz_viewpoint_extend_topic] /far_planner http://yanaibo-ThinkStation-P360-Tower:39681/
+[rosmaster.master][INFO] 2026-08-17 15:46:15,435: -PUB [/viz_static_global_graph] /far_planner http://yanaibo-ThinkStation-P360-Tower:39681/
+[rosmaster.master][INFO] 2026-08-17 15:46:15,435: -PUB [/viz_dynamic_local_graph] /far_planner http://yanaibo-ThinkStation-P360-Tower:39681/
+[rosmaster.master][INFO] 2026-08-17 15:46:15,435: -PUB [/viz_current_search_graph] /far_planner http://yanaibo-ThinkStation-P360-Tower:39681/
+[rosmaster.master][INFO] 2026-08-17 15:46:15,435: -PUB [/viz_dynamic_blocked_edges] /far_planner http://yanaibo-ThinkStation-P360-Tower:39681/
+[rosmaster.master][INFO] 2026-08-17 15:46:15,435: -PUB [/robot_vgraph] /far_planner http://yanaibo-ThinkStation-P360-Tower:39681/
+[rosmaster.master][INFO] 2026-08-17 15:46:15,435: -SUB [/clock] /far_planner http://yanaibo-ThinkStation-P360-Tower:39681/
+[rosmaster.master][INFO] 2026-08-17 15:46:15,436: -SUB [/reset_visibility_graph] /far_planner http://yanaibo-ThinkStation-P360-Tower:39681/
+[rosmaster.master][INFO] 2026-08-17 15:46:15,436: -SUB [/fusion_localization] /far_planner http://yanaibo-ThinkStation-P360-Tower:39681/
+[rosmaster.master][INFO] 2026-08-17 15:46:15,436: -SUB [/goal_point] /far_planner http://yanaibo-ThinkStation-P360-Tower:39681/
+[rosmaster.master][INFO] 2026-08-17 15:46:15,436: -SUB [/update_visibility_graph] /far_planner http://yanaibo-ThinkStation-P360-Tower:39681/
+[rosmaster.master][INFO] 2026-08-17 15:46:15,436: -SUB [/read_file_dir] /far_planner http://yanaibo-ThinkStation-P360-Tower:39681/
+[rosmaster.master][INFO] 2026-08-17 15:46:15,436: -SUB [/save_file_dir] /far_planner http://yanaibo-ThinkStation-P360-Tower:39681/
+[rosmaster.master][INFO] 2026-08-17 15:46:15,436: -SUB [/octomap_full] /far_planner http://yanaibo-ThinkStation-P360-Tower:39681/
+[rosmaster.master][INFO] 2026-08-17 15:46:15,437: -SUB [/planning_attemptable] /far_planner http://yanaibo-ThinkStation-P360-Tower:39681/
+[rosmaster.master][INFO] 2026-08-17 15:46:15,437: -SUB [/tf] /far_planner http://yanaibo-ThinkStation-P360-Tower:39681/
+[rosmaster.master][INFO] 2026-08-17 15:46:15,437: -SUB [/tf_static] /far_planner http://yanaibo-ThinkStation-P360-Tower:39681/
+[rosmaster.master][INFO] 2026-08-17 15:46:15,437: -SERVICE [/far_planner/get_loggers] /far_planner rosrpc://yanaibo-ThinkStation-P360-Tower:39257
+[rosmaster.master][INFO] 2026-08-17 15:46:15,437: -SERVICE [/far_planner/set_logger_level] /far_planner rosrpc://yanaibo-ThinkStation-P360-Tower:39257
+[rosmaster.master][INFO] 2026-08-17 15:46:15,437: -CACHEDPARAM [/rosout_disable_topics_generation] by /far_planner
+[rosmaster.master][INFO] 2026-08-17 15:46:15,451: publisherUpdate[/goal_point] -> http://yanaibo-ThinkStation-P360-Tower:39681/ []: sec=0.02, exception=[Errno 111] Connection refused
+[rosmaster.threadpool][ERROR] 2026-08-17 15:46:15,452: Traceback (most recent call last):
+  File "/opt/ros/noetic/lib/python3/dist-packages/rosmaster/threadpool.py", line 218, in run
+    result = cmd(*args)
+  File "/opt/ros/noetic/lib/python3/dist-packages/rosmaster/master_api.py", line 210, in publisher_update_task
+    ret = xmlrpcapi(api).publisherUpdate('/master', topic, pub_uris)
+  File "/usr/lib/python3.8/xmlrpc/client.py", line 1109, in __call__
+    return self.__send(self.__name, args)
+  File "/usr/lib/python3.8/xmlrpc/client.py", line 1450, in __request
+    response = self.__transport.request(
+  File "/usr/lib/python3.8/xmlrpc/client.py", line 1153, in request
+    return self.single_request(host, handler, request_body, verbose)
+  File "/usr/lib/python3.8/xmlrpc/client.py", line 1165, in single_request
+    http_conn = self.send_request(host, handler, request_body, verbose)
+  File "/usr/lib/python3.8/xmlrpc/client.py", line 1278, in send_request
+    self.send_content(connection, request_body)
+  File "/usr/lib/python3.8/xmlrpc/client.py", line 1308, in send_content
+    connection.endheaders(request_body)
+  File "/usr/lib/python3.8/http/client.py", line 1251, in endheaders
+    self._send_output(message_body, encode_chunked=encode_chunked)
+  File "/usr/lib/python3.8/http/client.py", line 1011, in _send_output
+    self.send(msg)
+  File "/usr/lib/python3.8/http/client.py", line 951, in send
+    self.connect()
+  File "/usr/lib/python3.8/http/client.py", line 922, in connect
+    self.sock = self._create_connection(
+  File "/usr/lib/python3.8/socket.py", line 808, in create_connection
+    raise err
+  File "/usr/lib/python3.8/socket.py", line 796, in create_connection
+    sock.connect(sa)
+ConnectionRefusedError: [Errno 111] Connection refused
+
+[rosmaster.master][INFO] 2026-08-17 15:46:15,452: publisherUpdate[/rosout] -> http://yanaibo-ThinkStation-P360-Tower:33285/ ['http://yanaibo-ThinkStation-P360-Tower:33625/', 'http://yanaibo-ThinkStation-P360-Tower:39681/']
+[rosmaster.master][INFO] 2026-08-17 15:46:15,452: publisherUpdate[/rosout] -> http://yanaibo-ThinkStation-P360-Tower:33285/ ['http://yanaibo-ThinkStation-P360-Tower:33625/', 'http://yanaibo-ThinkStation-P360-Tower:39681/']: sec=0.00, result=[1, '', 0]
+[rosmaster.master][INFO] 2026-08-17 15:46:15,452: publisherUpdate[/semantic_pcl/semantic_pcl] -> http://yanaibo-ThinkStation-P360-Tower:33625/ []
+[rosmaster.master][INFO] 2026-08-17 15:46:15,452: publisherUpdate[/semantic_pcl/semantic_pcl] -> http://yanaibo-ThinkStation-P360-Tower:33625/ []: sec=0.00, exception=[Errno 111] Connection refused
+[rosmaster.threadpool][ERROR] 2026-08-17 15:46:15,452: Traceback (most recent call last):
+  File "/opt/ros/noetic/lib/python3/dist-packages/rosmaster/threadpool.py", line 218, in run
+    result = cmd(*args)
+  File "/opt/ros/noetic/lib/python3/dist-packages/rosmaster/master_api.py", line 210, in publisher_update_task
+    ret = xmlrpcapi(api).publisherUpdate('/master', topic, pub_uris)
+  File "/usr/lib/python3.8/xmlrpc/client.py", line 1109, in __call__
+    return self.__send(self.__name, args)
+  File "/usr/lib/python3.8/xmlrpc/client.py", line 1450, in __request
+    response = self.__transport.request(
+  File "/usr/lib/python3.8/xmlrpc/client.py", line 1153, in request
+    return self.single_request(host, handler, request_body, verbose)
+  File "/usr/lib/python3.8/xmlrpc/client.py", line 1165, in single_request
+    http_conn = self.send_request(host, handler, request_body, verbose)
+  File "/usr/lib/python3.8/xmlrpc/client.py", line 1278, in send_request
+    self.send_content(connection, request_body)
+  File "/usr/lib/python3.8/xmlrpc/client.py", line 1308, in send_content
+    connection.endheaders(request_body)
+  File "/usr/lib/python3.8/http/client.py", line 1251, in endheaders
+    self._send_output(message_body, encode_chunked=encode_chunked)
+  File "/usr/lib/python3.8/http/client.py", line 1011, in _send_output
+    self.send(msg)
+  File "/usr/lib/python3.8/http/client.py", line 951, in send
+    self.connect()
+  File "/usr/lib/python3.8/http/client.py", line 922, in connect
+    self.sock = self._create_connection(
+  File "/usr/lib/python3.8/socket.py", line 808, in create_connection
+    raise err
+  File "/usr/lib/python3.8/socket.py", line 796, in create_connection
+    sock.connect(sa)
+ConnectionRefusedError: [Errno 111] Connection refused
+
+[rosmaster.master][INFO] 2026-08-17 15:46:15,453: publisherUpdate[/rosout] -> http://yanaibo-ThinkStation-P360-Tower:33285/ ['http://yanaibo-ThinkStation-P360-Tower:39681/']
+[rosmaster.master][INFO] 2026-08-17 15:46:15,453: publisherUpdate[/rosout] -> http://yanaibo-ThinkStation-P360-Tower:33285/ ['http://yanaibo-ThinkStation-P360-Tower:39681/']: sec=0.00, result=[1, '', 0]
+[rosmaster.master][INFO] 2026-08-17 15:46:15,453: publisherUpdate[/tf_static] -> http://yanaibo-ThinkStation-P360-Tower:33625/ []
+[rosmaster.master][INFO] 2026-08-17 15:46:15,453: publisherUpdate[/tf_static] -> http://yanaibo-ThinkStation-P360-Tower:33625/ []: sec=0.00, exception=[Errno 111] Connection refused
+[rosmaster.threadpool][ERROR] 2026-08-17 15:46:15,453: Traceback (most recent call last):
+  File "/opt/ros/noetic/lib/python3/dist-packages/rosmaster/threadpool.py", line 218, in run
+    result = cmd(*args)
+  File "/opt/ros/noetic/lib/python3/dist-packages/rosmaster/master_api.py", line 210, in publisher_update_task
+    ret = xmlrpcapi(api).publisherUpdate('/master', topic, pub_uris)
+  File "/usr/lib/python3.8/xmlrpc/client.py", line 1109, in __call__
+    return self.__send(self.__name, args)
+  File "/usr/lib/python3.8/xmlrpc/client.py", line 1450, in __request
+    response = self.__transport.request(
+  File "/usr/lib/python3.8/xmlrpc/client.py", line 1153, in request
+    return self.single_request(host, handler, request_body, verbose)
+  File "/usr/lib/python3.8/xmlrpc/client.py", line 1165, in single_request
+    http_conn = self.send_request(host, handler, request_body, verbose)
+  File "/usr/lib/python3.8/xmlrpc/client.py", line 1278, in send_request
+    self.send_content(connection, request_body)
+  File "/usr/lib/python3.8/xmlrpc/client.py", line 1308, in send_content
+    connection.endheaders(request_body)
+  File "/usr/lib/python3.8/http/client.py", line 1251, in endheaders
+    self._send_output(message_body, encode_chunked=encode_chunked)
+  File "/usr/lib/python3.8/http/client.py", line 1011, in _send_output
+    self.send(msg)
+  File "/usr/lib/python3.8/http/client.py", line 951, in send
+    self.connect()
+  File "/usr/lib/python3.8/http/client.py", line 922, in connect
+    self.sock = self._create_connection(
+  File "/usr/lib/python3.8/socket.py", line 808, in create_connection
+    raise err
+  File "/usr/lib/python3.8/socket.py", line 796, in create_connection
+    sock.connect(sa)
+ConnectionRefusedError: [Errno 111] Connection refused
+
+[rosmaster.master][INFO] 2026-08-17 15:46:15,453: publisherUpdate[/tf_static] -> http://yanaibo-ThinkStation-P360-Tower:39681/ []
+[rosmaster.master][INFO] 2026-08-17 15:46:15,453: publisherUpdate[/tf_static] -> http://yanaibo-ThinkStation-P360-Tower:39681/ []: sec=0.00, exception=[Errno 111] Connection refused
+[rosmaster.threadpool][ERROR] 2026-08-17 15:46:15,454: Traceback (most recent call last):
+  File "/opt/ros/noetic/lib/python3/dist-packages/rosmaster/threadpool.py", line 218, in run
+    result = cmd(*args)
+  File "/opt/ros/noetic/lib/python3/dist-packages/rosmaster/master_api.py", line 210, in publisher_update_task
+    ret = xmlrpcapi(api).publisherUpdate('/master', topic, pub_uris)
+  File "/usr/lib/python3.8/xmlrpc/client.py", line 1109, in __call__
+    return self.__send(self.__name, args)
+  File "/usr/lib/python3.8/xmlrpc/client.py", line 1450, in __request
+    response = self.__transport.request(
+  File "/usr/lib/python3.8/xmlrpc/client.py", line 1153, in request
+    return self.single_request(host, handler, request_body, verbose)
+  File "/usr/lib/python3.8/xmlrpc/client.py", line 1165, in single_request
+    http_conn = self.send_request(host, handler, request_body, verbose)
+  File "/usr/lib/python3.8/xmlrpc/client.py", line 1278, in send_request
+    self.send_content(connection, request_body)
+  File "/usr/lib/python3.8/xmlrpc/client.py", line 1308, in send_content
+    connection.endheaders(request_body)
+  File "/usr/lib/python3.8/http/client.py", line 1251, in endheaders
+    self._send_output(message_body, encode_chunked=encode_chunked)
+  File "/usr/lib/python3.8/http/client.py", line 1011, in _send_output
+    self.send(msg)
+  File "/usr/lib/python3.8/http/client.py", line 951, in send
+    self.connect()
+  File "/usr/lib/python3.8/http/client.py", line 922, in connect
+    self.sock = self._create_connection(
+  File "/usr/lib/python3.8/socket.py", line 808, in create_connection
+    raise err
+  File "/usr/lib/python3.8/socket.py", line 796, in create_connection
+    sock.connect(sa)
+ConnectionRefusedError: [Errno 111] Connection refused
+
+[rosmaster.master][INFO] 2026-08-17 15:46:15,454: publisherUpdate[/octomap_full] -> http://yanaibo-ThinkStation-P360-Tower:39681/ []
+[rosmaster.master][INFO] 2026-08-17 15:46:15,454: publisherUpdate[/octomap_full] -> http://yanaibo-ThinkStation-P360-Tower:39681/ []: sec=0.00, exception=[Errno 111] Connection refused
+[rosmaster.threadpool][ERROR] 2026-08-17 15:46:15,454: Traceback (most recent call last):
+  File "/opt/ros/noetic/lib/python3/dist-packages/rosmaster/threadpool.py", line 218, in run
+    result = cmd(*args)
+  File "/opt/ros/noetic/lib/python3/dist-packages/rosmaster/master_api.py", line 210, in publisher_update_task
+    ret = xmlrpcapi(api).publisherUpdate('/master', topic, pub_uris)
+  File "/usr/lib/python3.8/xmlrpc/client.py", line 1109, in __call__
+    return self.__send(self.__name, args)
+  File "/usr/lib/python3.8/xmlrpc/client.py", line 1450, in __request
+    response = self.__transport.request(
+  File "/usr/lib/python3.8/xmlrpc/client.py", line 1153, in request
+    return self.single_request(host, handler, request_body, verbose)
+  File "/usr/lib/python3.8/xmlrpc/client.py", line 1165, in single_request
+    http_conn = self.send_request(host, handler, request_body, verbose)
+  File "/usr/lib/python3.8/xmlrpc/client.py", line 1278, in send_request
+    self.send_content(connection, request_body)
+  File "/usr/lib/python3.8/xmlrpc/client.py", line 1308, in send_content
+    connection.endheaders(request_body)
+  File "/usr/lib/python3.8/http/client.py", line 1251, in endheaders
+    self._send_output(message_body, encode_chunked=encode_chunked)
+  File "/usr/lib/python3.8/http/client.py", line 1011, in _send_output
+    self.send(msg)
+  File "/usr/lib/python3.8/http/client.py", line 951, in send
+    self.connect()
+  File "/usr/lib/python3.8/http/client.py", line 922, in connect
+    self.sock = self._create_connection(
+  File "/usr/lib/python3.8/socket.py", line 808, in create_connection
+    raise err
+  File "/usr/lib/python3.8/socket.py", line 796, in create_connection
+    sock.connect(sa)
+ConnectionRefusedError: [Errno 111] Connection refused
+
+[rosmaster.master][INFO] 2026-08-17 15:46:15,454: publisherUpdate[/rosout] -> http://yanaibo-ThinkStation-P360-Tower:33285/ []
+[rosmaster.master][INFO] 2026-08-17 15:46:15,454: publisherUpdate[/rosout] -> http://yanaibo-ThinkStation-P360-Tower:33285/ []: sec=0.00, result=[1, '', 0]
+[rosmaster.master][INFO] 2026-08-17 15:46:15,655: -PUB [/rosout_agg] /rosout http://yanaibo-ThinkStation-P360-Tower:33285/
+[rosmaster.master][INFO] 2026-08-17 15:46:15,656: -SUB [/clock] /rosout http://yanaibo-ThinkStation-P360-Tower:33285/
+[rosmaster.master][INFO] 2026-08-17 15:46:15,656: -SUB [/rosout] /rosout http://yanaibo-ThinkStation-P360-Tower:33285/
+[rosmaster.master][INFO] 2026-08-17 15:46:15,657: -SERVICE [/rosout/get_loggers] /rosout rosrpc://yanaibo-ThinkStation-P360-Tower:40751
+[rosmaster.master][INFO] 2026-08-17 15:46:15,657: -SERVICE [/rosout/set_logger_level] /rosout rosrpc://yanaibo-ThinkStation-P360-Tower:40751
+[rosmaster.master][INFO] 2026-08-17 15:46:15,658: -CACHEDPARAM [/rosout/omit_topics] by /rosout
+[rosmaster.main][INFO] 2026-08-17 15:46:15,666: keyboard interrupt, will exit
+[rosmaster.main][INFO] 2026-08-17 15:46:15,666: stopping master...
+[rospy.core][INFO] 2026-08-17 15:46:15,666: signal_shutdown [atexit]

@@ -161,6 +161,25 @@ if(CATKIN_ENABLE_TESTING)
       ${catkin_LIBRARIES})
   endif()
 
+  catkin_add_gtest(local_voxel_policy_test
+    src/local_voxel_policy_test.cpp)
+  if(TARGET local_voxel_policy_test)
+    target_link_libraries(local_voxel_policy_test
+      ${catkin_LIBRARIES})
+  endif()
+
+  catkin_add_gtest(map_handler_dual_input_test
+    src/map_handler_dual_input_test.cpp
+    src/map_handler.cpp
+    src/utility.cpp)
+  if(TARGET map_handler_dual_input_test)
+    add_dependencies(map_handler_dual_input_test
+      ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS}
+      semantic_octomap_generate_messages_cpp)
+    target_link_libraries(map_handler_dual_input_test
+      ${catkin_LIBRARIES} ${PCL_LIBRARIES} ${OpenCV_LIBS})
+  endif()
+
   # Interactive integration test: run the node and then publish /octomap_full.
   add_executable(map_handler_test
     src/map_handler_test.cpp

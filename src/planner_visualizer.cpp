@@ -26,6 +26,8 @@ void DPVisualizer::Init(const ros::NodeHandle& nh) {
     viz_view_extend  = nh_.advertise<MarkerArray>("viz_viewpoint_extend_topic", 5);
     viz_static_global_pub_ =
         nh_.advertise<MarkerArray>("/viz_static_global_graph", 2);
+    viz_static_main_pub_ =
+        nh_.advertise<MarkerArray>("/viz_static_main_graph", 2);
     viz_dynamic_local_pub_ =
         nh_.advertise<MarkerArray>("/viz_dynamic_local_graph", 2);
     viz_search_graph_pub_ =
@@ -55,8 +57,8 @@ void DPVisualizer::VizNodes(const NodePtrStack& node_stack,
 }
 
 void DPVisualizer::VizSemanticGraphLayers(
-    const NodePtrStack& static_global, const NodePtrStack& dynamic_local,
-    const NodePtrStack& search_graph) {
+    const NodePtrStack& static_global, const NodePtrStack& static_main,
+    const NodePtrStack& dynamic_local, const NodePtrStack& search_graph) {
     const auto publish_layer = [this](
         const NodePtrStack& nodes, const ros::Publisher& publisher,
         const std::string& ns, const VizColor color,
@@ -97,6 +99,8 @@ void DPVisualizer::VizSemanticGraphLayers(
 
     publish_layer(static_global, viz_static_global_pub_, "static_global",
                   VizColor::BLUE, false);
+    publish_layer(static_main, viz_static_main_pub_, "static_main",
+                  VizColor::EMERALD, true);
     publish_layer(dynamic_local, viz_dynamic_local_pub_, "dynamic_local",
                   VizColor::MAGNA, false);
     publish_layer(search_graph, viz_search_graph_pub_, "search_graph",
@@ -351,7 +355,14 @@ void DPVisualizer::VizGraph(const NodePtrStack& graph) {
            corner_surf_marker, contour_align_marker, corner_helper_marker, boundary_node_marker, boundary_edge_marker,
            contour_clearance_marker, validated_route_marker,
            endpoint_excluded_route_marker, contour_static_reject_marker,
-           contour_dynamic_reject_marker, contour_vote_pending_marker;
+           contour_dynamic_reject_marker, contour_vote_pending_marker,
+           visibility_direction_reject_marker,
+           visibility_sparsified_marker,
+           visibility_static_reject_marker,
+           visibility_dynamic_reject_marker,
+           visibility_polygon_reject_marker,
+           visibility_terrain_reject_marker,
+           visibility_vote_pending_marker;
     nav_node_marker.type       = Marker::SPHERE_LIST;
     unfinal_node_marker.type   = Marker::SPHERE_LIST;
     near_node_marker.type      = Marker::SPHERE_LIST;
@@ -374,6 +385,13 @@ void DPVisualizer::VizGraph(const NodePtrStack& graph) {
     contour_static_reject_marker.type = Marker::LINE_LIST;
     contour_dynamic_reject_marker.type = Marker::LINE_LIST;
     contour_vote_pending_marker.type = Marker::LINE_LIST;
+    visibility_direction_reject_marker.type = Marker::LINE_LIST;
+    visibility_sparsified_marker.type = Marker::LINE_LIST;
+    visibility_static_reject_marker.type = Marker::LINE_LIST;
+    visibility_dynamic_reject_marker.type = Marker::LINE_LIST;
+    visibility_polygon_reject_marker.type = Marker::LINE_LIST;
+    visibility_terrain_reject_marker.type = Marker::LINE_LIST;
+    visibility_vote_pending_marker.type = Marker::LINE_LIST;
     corner_surf_marker.type    = Marker::LINE_LIST;
     corner_helper_marker.type  = Marker::CUBE_LIST;
     this->SetMarker(VizColor::WHITE,   "global_vertex",     0.5f,  0.5f,  nav_node_marker);
@@ -410,6 +428,20 @@ void DPVisualizer::VizGraph(const NodePtrStack& graph) {
                     0.90f, contour_dynamic_reject_marker);
     this->SetMarker(VizColor::WHITE, "contour_vote_pending", 0.10f,
                     0.35f, contour_vote_pending_marker);
+    this->SetMarker(VizColor::YELLOW, "visibility_direction_rejected", 0.10f,
+                    0.60f, visibility_direction_reject_marker);
+    this->SetMarker(VizColor::WHITE, "visibility_direction_sparsified", 0.10f,
+                    0.45f, visibility_sparsified_marker);
+    this->SetMarker(VizColor::ORANGE, "visibility_static_rejected", 0.14f,
+                    0.75f, visibility_static_reject_marker);
+    this->SetMarker(VizColor::RED, "visibility_dynamic_rejected", 0.16f,
+                    0.80f, visibility_dynamic_reject_marker);
+    this->SetMarker(VizColor::PURPLE, "visibility_polygon_rejected", 0.12f,
+                    0.65f, visibility_polygon_reject_marker);
+    this->SetMarker(VizColor::BLUE, "visibility_terrain_rejected", 0.12f,
+                    0.65f, visibility_terrain_reject_marker);
+    this->SetMarker(VizColor::WHITE, "visibility_vote_pending", 0.08f,
+                    0.30f, visibility_vote_pending_marker);
     /* Lambda Function */
     auto Draw_Contour_Align = [&](const NavNodePtr& node_ptr) {
         if (node_ptr->is_odom || !node_ptr->is_contour_match) return;
@@ -570,7 +602,31 @@ void DPVisualizer::VizGraph(const NodePtrStack& graph) {
     for (const auto& diagnostic :
          DynamicGraph::GetContourEdgeDiagnostics()) {
         Marker* marker = &contour_static_reject_marker;
-        if (diagnostic.reason == EdgeRejectReason::DYNAMIC_CLOUD_BLOCKED) {
+        if (diagnostic.mode == EdgeValidationMode::VISIBILITY) {
+            switch (diagnostic.reason) {
+                case EdgeRejectReason::DIRECTION_REJECTED:
+                    marker = &visibility_direction_reject_marker;
+                    break;
+                case EdgeRejectReason::DIRECTION_SPARSIFIED:
+                    marker = &visibility_sparsified_marker;
+                    break;
+                case EdgeRejectReason::STATIC_CLOUD_BLOCKED:
+                    marker = &visibility_static_reject_marker;
+                    break;
+                case EdgeRejectReason::DYNAMIC_CLOUD_BLOCKED:
+                    marker = &visibility_dynamic_reject_marker;
+                    break;
+                case EdgeRejectReason::TERRAIN_BLOCKED:
+                    marker = &visibility_terrain_reject_marker;
+                    break;
+                case EdgeRejectReason::VOTE_PENDING:
+                    marker = &visibility_vote_pending_marker;
+                    break;
+                default:
+                    marker = &visibility_polygon_reject_marker;
+                    break;
+            }
+        } else if (diagnostic.reason == EdgeRejectReason::DYNAMIC_CLOUD_BLOCKED) {
             marker = &contour_dynamic_reject_marker;
         } else if (diagnostic.reason == EdgeRejectReason::VOTE_PENDING) {
             marker = &contour_vote_pending_marker;
@@ -598,6 +654,13 @@ void DPVisualizer::VizGraph(const NodePtrStack& graph) {
     graph_marker_array.markers.push_back(contour_static_reject_marker);
     graph_marker_array.markers.push_back(contour_dynamic_reject_marker);
     graph_marker_array.markers.push_back(contour_vote_pending_marker);
+    graph_marker_array.markers.push_back(visibility_direction_reject_marker);
+    graph_marker_array.markers.push_back(visibility_sparsified_marker);
+    graph_marker_array.markers.push_back(visibility_static_reject_marker);
+    graph_marker_array.markers.push_back(visibility_dynamic_reject_marker);
+    graph_marker_array.markers.push_back(visibility_polygon_reject_marker);
+    graph_marker_array.markers.push_back(visibility_terrain_reject_marker);
+    graph_marker_array.markers.push_back(visibility_vote_pending_marker);
     graph_marker_array.markers.push_back(boundary_edge_marker);
     graph_marker_array.markers.push_back(odom_edge_marker);
     graph_marker_array.markers.push_back(traj_edge_marker);

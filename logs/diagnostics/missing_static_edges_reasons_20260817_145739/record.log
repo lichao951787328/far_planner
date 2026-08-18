@@ -1,0 +1,34 @@
+[WARN] [1786949862.882042388]: /use_sim_time set to true and no clock published.  Still waiting for valid time...
+[INFO] [1786949860.867478534]: Subscribing to /clock
+[INFO] [1786949860.868268657]: Subscribing to /far_global_path
+[INFO] [1786949860.868807136]: Subscribing to /fusion_localization
+[INFO] [1786949860.869332207]: Subscribing to /goal_point
+[INFO] [1786949860.869859494]: Subscribing to /semantic_graph_static_obstacles
+[INFO] [1786949860.870396759]: Subscribing to /viz_current_search_graph
+[INFO] [1786949860.870916552]: Subscribing to /viz_graph_topic
+[INFO] [1786949860.871422530]: Subscribing to /viz_static_global_graph
+[INFO] [1786949868.566177287, 1786670396.550642149]: Recording to '/home/yanaibo/mapless_navigation/far_planner/src/far_planner/far-planner-semantic-simple/logs/diagnostics/missing_static_edges_reasons_20260817_145739/rejection_diagnostics.bag'.
+Error in XmlRpcClient::writeRequest: write error (Connection refused).
+Error in XmlRpcDispatch::work: couldn't find source iterator
+Error in XmlRpcClient::writeRequest: write error (Connection refused).
+Error in XmlRpcDispatch::work: couldn't find source iterator
+Error in XmlRpcClient::writeRequest: write error (Connection refused).
+Error in XmlRpcDispatch::work: couldn't find source iterator
+Error in XmlRpcClient::writeRequest: write error (Connection refused).
+Error in XmlRpcDispatch::work: couldn't find source iterator
+Error in XmlRpcClient::writeRequest: write error (Connection refused).
+Error in XmlRpcDispatch::work: couldn't find source iterator
+Error in XmlRpcClient::writeRequest: write error (Connection refused).
+Error in XmlRpcDispatch::work: couldn't find source iterator
+Error in XmlRpcClient::writeRequest: write error (Connection refused).
+Error in XmlRpcDispatch::work: couldn't find source iterator
+Error in XmlRpcClient::writeRequest: write error (Connection refused).
+Error in XmlRpcDispatch::work: couldn't find source iterator
+Error in XmlRpcClient::writeRequest: write error (Connection refused).
+Error in XmlRpcDispatch::work: couldn't find source iterator
+Error in XmlRpcClient::writeRequest: write error (Connection refused).
+Error in XmlRpcDispatch::work: couldn't find source iterator
+Error in XmlRpcClient::writeRequest: write error (Connection refused).
+Error in XmlRpcDispatch::work: couldn't find source iterator
+Error in XmlRpcClient::writeRequest: write error (Connection refused).
+Error in XmlRpcDispatch::work: couldn't find source iterator

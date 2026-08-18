@@ -33,7 +33,8 @@ private:
     ros::Publisher viz_node_pub_, viz_path_pub_, nav_path_pub_;
     ros::Publisher viz_poly_pub_, viz_graph_pub_;
     ros::Publisher viz_contour_pub_, viz_map_pub_, viz_view_extend;
-    ros::Publisher viz_static_global_pub_, viz_dynamic_local_pub_;
+    ros::Publisher viz_static_global_pub_, viz_static_main_pub_;
+    ros::Publisher viz_dynamic_local_pub_;
     ros::Publisher viz_search_graph_pub_, viz_dynamic_blocked_pub_;
 
 public:
@@ -75,6 +76,7 @@ public:
 
     /** Publish source-separated semantic graph layers on independent topics. */
     void VizSemanticGraphLayers(const NodePtrStack& static_global,
+                                const NodePtrStack& static_main,
                                 const NodePtrStack& dynamic_local,
                                 const NodePtrStack& search_graph);
     void VizPointCloud(const ros::Publisher& viz_pub, 

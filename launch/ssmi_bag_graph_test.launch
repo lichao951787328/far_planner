@@ -22,17 +22,37 @@
   <arg name="bag_idle_timeout" default="5.0"/>
   <arg name="odom_timeout" default="3.0"/>
   <arg name="semantic_map_timeout" default="3.0"/>
+  <arg name="local_voxel_timeout" default="1.0"/>
+  <arg name="launch_local_voxel_map" default="true"/>
+  <arg name="local_voxel_config"
+       default="$(find local3d_semantic_voxel_map)/config/grids_points_voxel_map.yaml"/>
+  <!-- Final filtered pipeline. Until the local voxel package implements this
+       admission output, override semantic_input_topic:=/grids_points for a
+       compatibility smoke test. -->
+  <arg name="semantic_input_topic"
+       default="/local_3d_semantic_voxel_map/global_semantic_admission_grid"/>
 
   <param name="/use_sim_time" value="true"/>
 
-  <!-- /grids_points -> semantic point cloud -> first-cloud-relative map. -->
-  <include file="$(find semantic_octomap)/launch/semantic_octomap_grid.launch">
+  <!-- The local voxel node is the sole owner of map -> map_start. Its complete
+       0.10 m snapshot drives FAR contours; only its admitted global stream is
+       allowed to enter SemanticOcTree. -->
+  <include if="$(arg launch_local_voxel_map)"
+           file="$(find local3d_semantic_voxel_map)/launch/grids_points_voxel_map.launch">
+    <arg name="config" value="$(arg local_voxel_config)"/>
     <arg name="input_topic" value="/grids_points"/>
-    <arg name="output_topic" value="/semantic_pcl/semantic_pcl"/>
-    <arg name="world_frame_id" value="map"/>
+    <arg name="global_frame" value="map"/>
     <arg name="use_initial_pose_reference" value="true"/>
+    <arg name="reference_frame" value="map_start"/>
+    <arg name="rviz" value="false"/>
+  </include>
+
+  <include file="$(find semantic_octomap)/launch/semantic_octomap_grid.launch">
+    <arg name="input_topic" value="$(arg semantic_input_topic)"/>
+    <arg name="output_topic" value="/semantic_pcl/global_admitted"/>
+    <arg name="world_frame_id" value="map_start"/>
+    <arg name="use_initial_pose_reference" value="false"/>
     <arg name="reference_frame_id" value="map_start"/>
-    <arg name="obstacle_threshold" value="0.6"/>
     <arg name="rviz" value="false"/>
   </include>
 
@@ -44,6 +64,7 @@
     <param name="semantic_map_topic" value="/octomap_full"/>
     <param name="odom_timeout" value="$(arg odom_timeout)"/>
     <param name="semantic_map_timeout" value="$(arg semantic_map_timeout)"/>
+    <param name="local_voxel_timeout" value="$(arg local_voxel_timeout)"/>
     <remap from="odom_world" to="/fusion_localization"/>
     <remap from="goal_point" to="/goal_point"/>
   </node>
@@ -61,6 +82,8 @@
         output="screen" required="true">
     <param name="expected_frame" value="map_start"/>
     <param name="source_odom_topic" value="/fusion_localization"/>
+    <param name="local_voxel_topic"
+           value="/local_3d_semantic_voxel_map/voxel_cloud"/>
     <param name="auto_goal" value="$(arg auto_goal)"/>
     <param name="goal_x" value="$(arg goal_x)"/>
     <param name="goal_y" value="$(arg goal_y)"/>
@@ -76,6 +99,9 @@
     <!-- FAR's discretization-safe collision radius plus one 0.4 m semantic
          voxel, matching its contour-end exclusion for visibility routes. -->
     <param name="visibility_endpoint_exclusion" value="0.875"/>
+    <!-- Ignore a short edge-mask transient, but fail if the confirmed static
+         graph remains split for several published semantic snapshots. -->
+    <param name="static_component_failure_frames" value="5"/>
   </node>
 
   <node if="$(arg launch_rviz)" pkg="rviz" type="rviz"

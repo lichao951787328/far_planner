@@ -80,7 +80,8 @@ public:
     /* Match current contour with global navigation nodes */
     void MatchContourWithNavGraph(const NodePtrStack& global_nodes,
                                   const NodePtrStack& near_nodes,
-                                  CTNodeStack& new_convex_vertices);
+                                  CTNodeStack& new_convex_vertices,
+                                  float static_duplicate_radius = 0.5f);
 
     void ExtractGlobalContours();
 

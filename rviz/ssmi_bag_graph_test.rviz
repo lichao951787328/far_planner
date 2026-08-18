@@ -70,6 +70,26 @@ Visualization Manager:
       Color Transformer: FlatColor
       Color: 255; 0; 255
       Value: true
+    - Class: rviz/PointCloud2
+      Enabled: false
+      Name: Confirmed Global Static Obstacles
+      Topic: /semantic_global_confirmed_static_obstacles
+      Queue Size: 2
+      Size (Pixels): 4
+      Style: Points
+      Color Transformer: FlatColor
+      Color: 40; 90; 220
+      Value: false
+    - Class: rviz/PointCloud2
+      Enabled: false
+      Name: Exact Graph Static Collision Layer
+      Topic: /semantic_graph_static_obstacles
+      Queue Size: 2
+      Size (Pixels): 3
+      Style: Points
+      Color Transformer: FlatColor
+      Color: 255; 140; 0
+      Value: false
     - Class: rviz/Group
       Enabled: true
       Name: Graph
@@ -80,6 +100,12 @@ Visualization Manager:
           Name: Static Global Graph
           Queue Size: 10
           Value: true
+        - Class: rviz/MarkerArray
+          Enabled: false
+          Marker Topic: /viz_static_main_graph
+          Name: Searchable Static Main Component
+          Queue Size: 10
+          Value: false
         - Class: rviz/MarkerArray
           Enabled: true
           Marker Topic: /viz_current_search_graph

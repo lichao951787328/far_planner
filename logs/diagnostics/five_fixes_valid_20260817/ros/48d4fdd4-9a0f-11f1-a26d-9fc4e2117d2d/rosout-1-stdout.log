@@ -1,0 +1,4 @@
+logging to /home/yanaibo/mapless_navigation/far_planner/src/far_planner/far-planner-semantic-simple/logs/diagnostics/five_fixes_valid_20260817/ros/48d4fdd4-9a0f-11f1-a26d-9fc4e2117d2d/rosout.log
+re-publishing aggregated messages to /rosout_agg
+subscribed to /rosout
+Error in XmlRpcClient::writeRequest: write error (Connection refused).

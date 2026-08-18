@@ -188,6 +188,17 @@ void BuildDenseVoxelMap(const TreeType& tree,
     }
 }
 
+void BuildPointVoxelMap(
+    const PointCloudPtr& cloud, const float resolution,
+    std::unordered_map<uint64_t, PCLPoint>& voxel_map) {
+    voxel_map.clear();
+    if (!cloud) return;
+    voxel_map.reserve(cloud->size());
+    for (const auto& point : cloud->points) {
+        voxel_map[PersistentStaticKey(point, resolution)] = point;
+    }
+}
+
 }  // namespace
 
 std::shared_ptr<octomap::OcTree> MapHandler::local_terrain_support_octree_;
@@ -228,6 +239,7 @@ void MapHandler::Init(const MapHandlerParams& params) {
     terrain_neighbor_radius_ = semantic_params_.terrain_neighbor_radius > 0.0f
         ? semantic_params_.terrain_neighbor_radius : 1.0f;
     semantic_obs_cloud_.reset(new pcl::PointCloud<PCLPoint>());
+    confirmed_global_static_cloud_.reset(new pcl::PointCloud<PCLPoint>());
     persistent_static_obs_cloud_.reset(new pcl::PointCloud<PCLPoint>());
     semantic_terrain_support_cloud_.reset(new pcl::PointCloud<PCLPoint>());
     current_dynamic_obs_cloud_.reset(new pcl::PointCloud<PCLPoint>());
@@ -338,7 +350,8 @@ void MapHandler::RefreshLocalTerrainSupportOctomap() {
     // it must never delete the physical wall used by later visibility checks.
     // Maintain that static collision authority once per accepted semantic
     // snapshot, independently of the Graph topology.
-    this->UpdatePersistentStaticObstacleLayer();
+    this->UpdatePersistentStaticObstacleLayer(
+        semantic_obs_cloud_, static_cast<float>(source_resolution));
 
     dynamic_added_cloud_->clear();
     dynamic_removed_cloud_->clear();
@@ -402,6 +415,148 @@ void MapHandler::RefreshLocalTerrainSupportOctomap() {
     kdtree_terrain_clould_->setInputCloud(flat_terrain_cloud_);
 }
 
+void MapHandler::RefreshConfirmedGlobalStaticOctomap() {
+    if (!semantic_tree_snapshot_ || !is_init_) return;
+
+    const auto* semantic_tree =
+        dynamic_cast<const SemanticOctree*>(semantic_tree_snapshot_.get());
+    const auto* color_tree =
+        dynamic_cast<const octomap::ColorOcTree*>(semantic_tree_snapshot_.get());
+    if (!semantic_tree && !color_tree) {
+        if (confirmed_global_static_cloud_) {
+            confirmed_global_static_cloud_->clear();
+        }
+        return;
+    }
+
+    const double source_resolution = semantic_tree_snapshot_->getResolution();
+    const float horizontal_half_extent = semantic_params_.local_window_radius;
+    const float vertical_half_extent = std::max(
+        std::max(FARUtil::kTolerZ, FARUtil::kCellHeight * 2.0f),
+        FARUtil::vehicle_height + static_cast<float>(source_resolution));
+    const QueryBox local_box{
+        point3d(robot_pos_cache_.x - horizontal_half_extent,
+                robot_pos_cache_.y - horizontal_half_extent,
+                robot_pos_cache_.z - vertical_half_extent),
+        point3d(robot_pos_cache_.x + horizontal_half_extent,
+                robot_pos_cache_.y + horizontal_half_extent,
+                robot_pos_cache_.z + vertical_half_extent)};
+
+    if (semantic_tree) {
+        const auto get_semantic_color = [this](
+            const SemanticOctree::leaf_bbx_iterator& it,
+            ColorOcTreeNode::Color& color) {
+            const SemanticOcTreeNode* node = it.operator->();
+            return GetConfidentSemanticColor(
+                *node, semantic_params_.min_semantic_prob, color);
+        };
+        ExtractClassifiedCloudInBox(
+            *semantic_tree, local_box, obstacle_groups_, get_semantic_color,
+            confirmed_global_static_cloud_);
+    } else {
+        const auto get_color = [](
+            const octomap::ColorOcTree::leaf_bbx_iterator& it,
+            ColorOcTreeNode::Color& color) {
+            color = it->getColor();
+            return true;
+        };
+        ExtractClassifiedCloudInBox(
+            *color_tree, local_box, obstacle_groups_, get_color,
+            confirmed_global_static_cloud_);
+    }
+
+    // This is the only path that may extend persistent static collision
+    // memory in dual-input mode. Current local static geometry never enters
+    // this cache merely by being visible in a recent voxel snapshot.
+    this->UpdatePersistentStaticObstacleLayer(
+        confirmed_global_static_cloud_,
+        static_cast<float>(source_resolution));
+}
+
+void MapHandler::SetLocalVoxelSnapshot(
+    const PointCloudPtr& static_obstacles,
+    const PointCloudPtr& transient_obstacles,
+    const PointCloudPtr& terrain_support) {
+    if (!semantic_params_.use_local_voxel_map) return;
+
+    *semantic_obs_cloud_ = static_obstacles
+        ? *static_obstacles : PointCloud();
+    *current_dynamic_obs_cloud_ = transient_obstacles
+        ? *transient_obstacles : PointCloud();
+    *effective_dynamic_obs_cloud_ = *current_dynamic_obs_cloud_;
+    *semantic_terrain_support_cloud_ = terrain_support
+        ? *terrain_support : PointCloud();
+    FinalizeCloud(semantic_obs_cloud_);
+    FinalizeCloud(current_dynamic_obs_cloud_);
+    FinalizeCloud(effective_dynamic_obs_cloud_);
+    FinalizeCloud(semantic_terrain_support_cloud_);
+
+    const float resolution = std::max(
+        1e-3f, semantic_params_.local_voxel_resolution);
+    std::unordered_map<uint64_t, PCLPoint> current_static_voxels;
+    std::unordered_map<uint64_t, PCLPoint> current_transient_voxels;
+    BuildPointVoxelMap(semantic_obs_cloud_, resolution,
+                       current_static_voxels);
+    BuildPointVoxelMap(effective_dynamic_obs_cloud_, resolution,
+                       current_transient_voxels);
+
+    dynamic_added_cloud_->clear();
+    dynamic_removed_cloud_->clear();
+    for (const auto& entry : current_transient_voxels) {
+        if (previous_local_dynamic_voxels_.count(entry.first) == 0) {
+            dynamic_added_cloud_->points.push_back(entry.second);
+        }
+    }
+    for (const auto& entry : previous_local_dynamic_voxels_) {
+        if (current_transient_voxels.count(entry.first) == 0) {
+            dynamic_removed_cloud_->points.push_back(entry.second);
+        }
+    }
+    FinalizeCloud(dynamic_added_cloud_);
+    FinalizeCloud(dynamic_removed_cloud_);
+
+    changed_obs_cloud_->clear();
+    for (const auto& entry : current_static_voxels) {
+        if (previous_local_obs_voxels_.count(entry.first) == 0) {
+            changed_obs_cloud_->points.push_back(entry.second);
+        }
+    }
+    for (const auto& entry : previous_local_obs_voxels_) {
+        if (current_static_voxels.count(entry.first) == 0) {
+            changed_obs_cloud_->points.push_back(entry.second);
+        }
+    }
+    AppendCloud(dynamic_added_cloud_, changed_obs_cloud_);
+    AppendCloud(dynamic_removed_cloud_, changed_obs_cloud_);
+    FinalizeCloud(changed_obs_cloud_);
+    previous_local_obs_voxels_.swap(current_static_voxels);
+    previous_local_dynamic_voxels_.swap(current_transient_voxels);
+
+    collision_obs_cloud_->clear();
+    AppendCloud(semantic_obs_cloud_, collision_obs_cloud_);
+    AppendCloud(effective_dynamic_obs_cloud_, collision_obs_cloud_);
+    FinalizeCloud(collision_obs_cloud_);
+
+    if (!local_terrain_support_octree_ ||
+        std::abs(local_terrain_support_octree_->getResolution() - resolution) >
+            1e-6) {
+        local_terrain_support_octree_.reset(new octomap::OcTree(resolution));
+    }
+    local_terrain_support_octree_->clear();
+    for (const auto& point : semantic_terrain_support_cloud_->points) {
+        local_terrain_support_octree_->updateNode(
+            point3d(point.x, point.y, point.z), true);
+    }
+    local_terrain_support_octree_->prune();
+    if (semantic_terrain_support_cloud_->empty()) {
+        FARUtil::ClearKdTree(flat_terrain_cloud_, kdtree_terrain_clould_);
+    } else {
+        this->AssignFlatTerrainCloud(
+            semantic_terrain_support_cloud_, flat_terrain_cloud_);
+        kdtree_terrain_clould_->setInputCloud(flat_terrain_cloud_);
+    }
+}
+
 
 bool MapHandler::SetSemanticOctomap(const octomap_msgs::OctomapConstPtr& msg) {
     if (!msg) return false;
@@ -435,7 +590,13 @@ bool MapHandler::SetSemanticOctomap(const octomap_msgs::OctomapConstPtr& msg) {
     semantic_stamp_ = msg->header.stamp;
     semantic_frame_id_ = msg->header.frame_id;
     has_semantic_map_ = true;
-    if (is_init_) this->RefreshLocalTerrainSupportOctomap();
+    if (is_init_) {
+        if (semantic_params_.use_local_voxel_map) {
+            this->RefreshConfirmedGlobalStaticOctomap();
+        } else {
+            this->RefreshLocalTerrainSupportOctomap();
+        }
+    }
     return true;
 }
 
@@ -444,6 +605,7 @@ void MapHandler::ResetGripMapCloud() {
     semantic_stamp_ = ros::Time();
     semantic_frame_id_.clear();
     if (semantic_obs_cloud_) semantic_obs_cloud_->clear();
+    if (confirmed_global_static_cloud_) confirmed_global_static_cloud_->clear();
     if (persistent_static_obs_cloud_) persistent_static_obs_cloud_->clear();
     if (semantic_terrain_support_cloud_) semantic_terrain_support_cloud_->clear();
     if (current_dynamic_obs_cloud_) current_dynamic_obs_cloud_->clear();
@@ -538,7 +700,11 @@ void MapHandler::UpdateRobotPosition(const Point3D& odom_pos) {
     if (!is_init_) this->SetMapOrigin(odom_pos);
     robot_pos_cache_ = odom_pos;
     if (has_semantic_map_) {
-        this->RefreshLocalTerrainSupportOctomap();
+        if (semantic_params_.use_local_voxel_map) {
+            this->RefreshConfirmedGlobalStaticOctomap();
+        } else {
+            this->RefreshLocalTerrainSupportOctomap();
+        }
     }
 }
 
@@ -649,19 +815,42 @@ StaticNodeEvidence MapHandler::QueryStaticTreeEvidence(
         : StaticNodeEvidence::UNKNOWN;
 }
 
-void MapHandler::UpdatePersistentStaticObstacleLayer() {
+void MapHandler::UpdatePersistentStaticObstacleLayer(
+    const PointCloudPtr& current_static, const float source_resolution) {
     if (!persistent_static_obs_cloud_) {
         persistent_static_obs_cloud_.reset(new pcl::PointCloud<PCLPoint>());
     }
     const float resolution = std::max(1e-3f, FARUtil::kLeafSize);
+    const int samples_per_axis = std::max(
+        1, static_cast<int>(std::ceil(
+               std::max(resolution, source_resolution) / resolution)));
+    const float sample_span = samples_per_axis * resolution;
     std::unordered_set<uint64_t> current_keys;
-    if (semantic_obs_cloud_) {
-        current_keys.reserve(semantic_obs_cloud_->size());
-        for (const auto& point : semantic_obs_cloud_->points) {
-            const uint64_t key = PersistentStaticKey(point, resolution);
-            current_keys.insert(key);
-            persistent_static_obs_voxels_[key] =
-                PersistentStaticCellCenter(point, resolution);
+    if (current_static) {
+        current_keys.reserve(current_static->size() * samples_per_axis *
+                             samples_per_axis * samples_per_axis);
+        for (const auto& point : current_static->points) {
+            const float first_x = point.x - sample_span * 0.5f +
+                                  resolution * 0.5f;
+            const float first_y = point.y - sample_span * 0.5f +
+                                  resolution * 0.5f;
+            const float first_z = point.z - sample_span * 0.5f +
+                                  resolution * 0.5f;
+            for (int ix = 0; ix < samples_per_axis; ++ix) {
+                for (int iy = 0; iy < samples_per_axis; ++iy) {
+                    for (int iz = 0; iz < samples_per_axis; ++iz) {
+                        PCLPoint sample = point;
+                        sample.x = first_x + ix * resolution;
+                        sample.y = first_y + iy * resolution;
+                        sample.z = first_z + iz * resolution;
+                        const uint64_t key =
+                            PersistentStaticKey(sample, resolution);
+                        current_keys.insert(key);
+                        persistent_static_obs_voxels_[key] =
+                            PersistentStaticCellCenter(sample, resolution);
+                    }
+                }
+            }
         }
     }
 
@@ -720,8 +909,10 @@ StaticNodeEvidence MapHandler::QueryStaticNodeEvidence(
     const float horizontal_radius = std::max(
         resolution * 1.25f, FARUtil::kLeafSize);
     const float vertical_radius = FARUtil::vehicle_height + resolution;
-    if (semantic_obs_cloud_) {
-        for (const auto& sample : semantic_obs_cloud_->points) {
+    const PointCloudPtr& evidence_cloud = semantic_params_.use_local_voxel_map
+        ? persistent_static_obs_cloud_ : semantic_obs_cloud_;
+    if (evidence_cloud) {
+        for (const auto& sample : evidence_cloud->points) {
             if (std::hypot(sample.x - point.x, sample.y - point.y) <=
                     horizontal_radius &&
                 std::abs(sample.z - point.z) <= vertical_radius) {
@@ -764,7 +955,8 @@ void MapHandler::BuildLocalPlannerObstacleCloud(
     const PointCloudPtr& source, const PointCloudPtr& cloudOut) const {
     if (!cloudOut) return;
     cloudOut->clear();
-    if (!source || source->empty() || !semantic_tree_snapshot_ || !is_init_) {
+    if (!source || source->empty() || !is_init_ ||
+        (!semantic_params_.use_local_voxel_map && !semantic_tree_snapshot_)) {
         FinalizeCloud(cloudOut);
         return;
     }
@@ -779,8 +971,9 @@ void MapHandler::BuildLocalPlannerObstacleCloud(
     bool terrain_associated = false;
     const float ground_height = NearestTerrainHeightofNavPoint(
         robot_pos_cache_, terrain_associated);
-    const float source_resolution = static_cast<float>(
-        semantic_tree_snapshot_->getResolution());
+    const float source_resolution = semantic_params_.use_local_voxel_map
+        ? std::max(1e-3f, semantic_params_.local_voxel_resolution)
+        : static_cast<float>(semantic_tree_snapshot_->getResolution());
     const float source_half = source_resolution * 0.5f;
     // Keep any occupied voxel whose vertical interval intersects the robot's
     // swept body band. The terrain-analysis local planner then performs its

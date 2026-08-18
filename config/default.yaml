@@ -32,6 +32,11 @@ is_debug_output                         : false
 is_attempt_autoswitch                   : true  # Auto switch to attemptable navigation
 world_frame                             : map
 semantic_map_topic                      : octomap_full
+# Compatibility default: legacy deployments continue to derive their current
+# contours from SemanticOcTree. SSMI enables the dual-input mode below.
+use_local_voxel_map                     : false
+local_voxel_topic                       : /local_3d_semantic_voxel_map/voxel_cloud
+local_voxel_timeout                     : 0.5   # wall time since the last strictly newer acquisition; <=0 disables
 # Safety watchdogs use message receipt wall-time, so they remain effective
 # even when simulated ROS time is paused.
 odom_timeout                            : 3.0   # seconds; tolerates a slow graph-update cycle
@@ -51,6 +56,12 @@ MapHandler/terrain_neighbor_radius      : 1.0     # XY terrain-support radius (2
 MapHandler/local_planner_radius         : 10.0    # 10 m radius: about 20 m x 20 m local collision-map coverage
 MapHandler/local_planner_resolution     : 0.2     # Dense XY sampling resolution for occupied octree voxels
 MapHandler/local_planner_obstacle_intensity: 200.0 # Hard-obstacle value for static and dynamic layers
+MapHandler/local_voxel_resolution       : 0.10
+MapHandler/local_voxel_min_semantic_confidence: 0.55
+MapHandler/local_voxel_obstacle_cost_threshold: 0.60
+MapHandler/local_voxel_static_labels    : [2, 3, 4, 5, 6, 7, 8]
+MapHandler/local_voxel_terrain_labels   : [0, 1, 9]
+MapHandler/local_voxel_dynamic_labels   : [11, 12, 13, 14, 15, 16, 17, 18]
 # SemanticOcTree classification uses the normalized probability of its top-1
 # class. Values below this threshold are UNKNOWN and cannot add a classified
 # cloud point or provide EXPLICIT_FREE evidence. ColorOcTree has no semantic
@@ -133,11 +144,16 @@ Graph/filter_pool_size                  : 12
 Graph/static_update_radius              : 28.5    # Covers the corners of the +/-20 m square semantic window
 Graph/static_stitch_radius              : 28.5    # Keep/reconnect visible static corners across the complete local square
 Graph/dynamic_position_alpha            : 0.65    # Current-frame weight for matched dynamic routing vertices
+Graph/diagnostic_near_pair_radius       : 0.0     # Disabled normally; positive values publish rejected near-pair diagnostics
 Graph/static_confirm_frames             : 3       # Positive semantic observations before persistence
 Graph/static_remove_frames              : 3       # Consecutive local misses before true static deletion
 Graph/static_topology_remove_frames     : 5       # FAR-style recoverable contradictions; replacement also requires RANSAC-stable successors, a validated contour route and no static cut
+Graph/static_visibility_remove_frames   : 3       # First static failure blocks search; only this many consecutive failures delete visibility-edge history
+Graph/static_duplicate_radius           : 0.5     # Conservative same-class/same-direction duplicate suppression radius
 Graph/static_promotion_requires_finalized: true   # Do not persist a geometrically unstable contour corner
 Graph/static_promotion_requires_active_edge: true # Do not create permanent degree-zero static orphans
+Graph/static_promotion_requires_main_component: true # Promote only through reusable topology grown from the persisted confirmed main component
+Graph/static_promotion_requires_global_evidence: false # Dual-input mode overrides true; legacy current SemanticOcTree observations remain compatible
 
 # Same-current-contour edges search outward for the first fully collision-free
 # robot-centre segment. These values do not alter ordinary visibility edges.

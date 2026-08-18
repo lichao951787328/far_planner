@@ -518,14 +518,13 @@ margin_near_nodes_
 d_xy = sqrt((node.x - odom.x)^2 + (node.y - odom.y)^2)
 ```
 
-`ShouldPruneStartConnectionForRange()` 的规则如下：
+`ShouldPruneStartConnectionForRange()` 判断是否应该因为距离过远，删除机器人起点连接的规则如下：
 
-| 旧 odom 边的另一端 | 仅因距离超限而裁掉旧边的门限 |
+| 起点边另一端的节点类型 | 距离规则 |
 |---|---:|
-| `DYNAMIC_LOCAL` | `sensor_range` |
-| `STATIC_CANDIDATE` | `static_stitch_radius` |
-| `STATIC_GLOBAL` | 不仅因离开局部窗口而裁掉 |
-| 其他局部来源 | `static_stitch_radius` |
+| `STATIC_GLOBAL`全局静态节点 | 永远不因为距离删除 |
+| `DYNAMIC_LOCAL`当前动态节点 | 超过`dynamic_range`就删除 |
+| `STATIC_CANDIDATE`等局部节点 | 超过static_stitch_range 就删除 |
 
 `STATIC_GLOBAL` 是已经确认的全局静态知识，所以不会仅因机器人移动、节点离开当前语义方窗就立刻失去旧的 start 连接资格。不过这不是无条件永久保留旧边：本轮 `UpdateNavGraph()` 结束时，`UpdateOdomConnections()` 会清空 odom 的全部邻接，并根据最新的静态碰撞、动态碰撞、全局轮廓和地形重新验证。
 
@@ -692,6 +691,7 @@ abs(node.z - terrain_height - vehicle_height) < kTolerZ
 ##### 3.2.4.8 节点激活及 `extend_match_nodes_`
 
 通过扩展范围和外层地形门控后，函数排除 `IsOutsideGoal()` 节点，再调用：
+IsOutsideGoal不是“位于目标范围之外的节点”，而是“独立创建的临时目标节点”，典型节点是用户下发新目标后创建的 GOAL 节点。
 
 ```cpp
 if (IsActivateNavNode(node_ptr) || node_ptr->is_boundary)
@@ -1312,7 +1312,102 @@ ctnode.nav_node_id     = new_node.id
 
 **步骤 6：复检 near 节点通向局部范围外的历史 visibility 边。**
 
-每个 near 节点复制自己的旧 `connect_nodes`，对另一端不在 near、不是 odom、不是 `OutsideGoal`、且不是 contour 身份的边调用 `UpdateGraphEdge()`。验证失败的范围外节点进入 `outside_break_nodes`，后面会再与全部 near 节点尝试重连，避免仅因原锚点失效就丢掉本可由其他局部节点接续的外部图。
+这里的“局部范围外”准确地说是 `cnode->is_near_nodes == false`，不必然等价于“位于 40 m × 40 m 语义方窗之外”。静态节点是否进入 near 还受 `static_stitch_radius`、高度、active/boundary 和已知地形矛盾等门控影响。设当前 near 节点为 A，它已有一个非 near 历史邻居 B：
+
+```text
+机器人当前局部工作集
+        │
+        A_near ───────── B_outside
+                 已有历史邻接
+```
+
+函数先复制 `A->connect_nodes`，这样即使复检过程中删除邻接，也不会破坏正在遍历的容器。只有满足下面条件的旧连接才进入这一分支：
+
+```text
+A 不是 odom
+B 已经存在于 A.connect_nodes
+B 不是 odom
+B.is_near_nodes == false
+B 不是独立创建的临时 Goal，即 !IsOutsideGoal(B)
+A-B 不在 contour_connects 中
+```
+
+代码没有直接检查 `edge_state.source == STATIC_VISIBILITY`，而是通过排除 odom、goal 和 contour 身份来选取。因此正常语义主路径中的 `STATIC_VISIBILITY` 和部分 `STITCH` 关系都可能走这段逻辑；若同一 pair 同时具有 contour 身份，则在这里被跳过，交给 contour 拓扑和保存 route 的逻辑维护。
+
+对选中的 A-B 调用：
+
+```cpp
+UpdateGraphEdge(A, B, false);
+```
+
+第三个参数 `is_check_contour=false` 很关键：这次复检不要求 B 再次出现在当前轮廓中，也不检查 A、B 当前是否仍是轮廓相邻点，更不会因为 B 当前未观测就追加 contour 负票。它检查的是普通 visibility 结构能否继续成立，而不是重新证明历史 contour 身份。
+
+实际调用链如下：
+
+```text
+UpdateGraphEdge(A, B, false)
+    ├─ 判断 A-B 是否为持久静态 pair
+    ├─ IsValidConnect(...)
+    │   ├─ 凸角/柱体类型
+    │   ├─ 两端 reduced-visibility 方向约束
+    │   ├─ 静态点云和 Polygon 碰撞
+    │   ├─ terrain 条件
+    │   ├─ visibility 滑动投票
+    │   └─ 同方向是否已有更短连接
+    └─ ApplyValidatedGraphEdge(...)
+        ├─ 静态结构失败：删除 visibility 身份
+        ├─ 静态结构通过：保留或恢复该身份
+        └─ 对静态 pair 单独更新 dynamic_blocked
+```
+
+若 A、B 都是 `STATIC_CANDIDATE/STATIC_GLOBAL`，`UpdateGraphEdge()` 把它识别为持久静态 pair，并用：
+
+```cpp
+IsValidConnect(A, B, false, false);
+```
+
+执行结构验证。第四个参数 `include_dynamic=false` 表示动态障碍不能作为删除历史静态 visibility 身份的证据；静态结构通过后，`ApplyValidatedGraphEdge()` 再用最新动态层单独计算 `dynamic_blocked`。因此静态事实决定“这条边的身份是否存在”，动态事实只决定“本轮搜索能不能走”。
+
+`IsValidConnect()` 内部按下面顺序处理：
+
+1. `IsConvexConnect()` 要求两端都不是 `CONCAVE`；`CONVEX` 和 `PILLAR` 可以作为普通 visibility 端点。
+2. `IsInDirectConstraint()` 从两端分别检查连线是否位于该角点的 reduced-visibility 允许连接扇区。非 pillar 端点若朝障碍内部或被部分可视图方向规约排除，则本轮几何失败。
+3. `ValidateVisibilityEdgeGeometry()` 先把两端向各自自由侧投影。默认投影为 0.15 m，且不超过边长的 40%，用于避免端点所属障碍体素把自己的 incident edge 判成碰撞。典型跨范围边会进入 global-check 分支，优先使用持久 NavNode 的历史位置和表面方向。
+4. 投影线段沿持久静态碰撞点云做膨胀走廊检查。默认 `contour_grid_resolution=0.4 m`、`robot_collision_clearance=0.45 m` 时，采样步长约 0.30 m，实际 KD-tree 查询半径约 0.474 m；因此检查的不是零宽中心线。边中部同高度附近出现静态点即可得到 `STATIC_CLOUD_BLOCKED`。
+5. Polygon 分支检查历史 `global_contour_`、当前局部 Polygon、pillar 净空和 boundary contour。超出局部范围并不要求整条边被当前传感器重新看见；代码只会根据当前和历史已经知道的障碍拒绝它，从未观测的 UNKNOWN 区域不会自动变成碰撞。
+6. `IsOnTerrainConnect()` 拒绝已知的过陡连接和中点地形矛盾；边中点没有 terrain-support 时按 UNKNOWN 可通行。已知 terrain 失败还会积累独立的 `terrain_votes`。
+7. 若任一端是 `is_finalized && !is_contour_match` 的历史障碍节点，`IsPolyMatchedForConnect()` 不允许本轮为新 visibility 候选追加正票。这里必须区分“没有正票”和“追加负票”：B 仅仅未观测时，已有 `edge_votes` 保持不变；只有凸性、方向、静态碰撞或地形等实际检查失败时才追加 0 票。
+8. 普通静态 visibility 使用最大长度为 `connect_votes_size` 的滑动窗口，默认 8。每次有效追加 1，实际结构失败追加 0，判真条件是 `sum(votes) > floor(N/2)`。例如成熟窗口从 8 张正票开始，连续 1、2、3 次失败后仍分别有 7、6、5 张正票，第 4 次变成 4:4 时才翻转为失败。因此一个普通静态噪点通常不会在一帧内删除成熟 visibility 身份；但如果该噪点进入持久静态层且没有 `EXPLICIT_FREE` 清除，它可能在后续快照持续产生负票。
+9. 投票通过后仍执行 `IsSimilarConnectInDiection()`。如果从任一端看，同一很窄方向内已经存在更短的非 contour 边，则当前长边作为 partially reduced visibility graph 的冗余连接被拒绝。这个结果可以直接让本轮 `UpdateGraphEdge()` 返回结构无效，而不需要等待新的碰撞负票把窗口翻转。
+
+结构结果由 `ApplyValidatedGraphEdge()` 提交：
+
+```text
+结构通过
+    -> AddPolyEdge(A, B)，保留/恢复 visibility 身份
+    -> AddEdge(A, B)，保证双向 connect_nodes 和 edge_states
+    -> 静态 pair 再单独重算 dynamic_blocked
+
+结构失败
+    -> RemoveVisibilityEdge(A, B)
+    -> 先从 poly_connects 删除 visibility 身份
+    -> 若同一 pair 没有 contour/trajectory 身份，再对称 EraseEdge()
+    -> 不删除 A 或 B 节点
+```
+
+动态障碍是一个特殊结果：静态结构仍可保留，但 `dynamic_blocked=true` 时 `UpdateGraphEdge()` 返回 false，表示该边本轮不可搜索。因而下面的 `outside_break_nodes` 不只收集“静态身份已经删除”的 B，也会收集“原边仍存在但当前被动态 mask”的 B。
+
+随后代码在完成 near-near 候选更新后，让每个 `outside_break_nodes` 中的 B 与所有 near 节点 C 再次调用同一个 `UpdateGraphEdge(C, B, false)`：
+
+```text
+原入口：A_near ───────── B_outside  本轮不可用
+
+候选入口：C_near ─────── B_outside
+          D_near ─────── B_outside
+          ...
+```
+
+这是“尝试接回”，不是无条件 stitch。每个 C-B 仍需通过方向、持久静态碰撞、全局轮廓、terrain、visibility 投票、同方向稀疏化和动态层检查。尤其当 B 已 finalized 且当前未匹配轮廓时，它不能凭旧位置为一条全新候选积累正票；只有已有候选证据仍足够，或者 B 当前身份重新获得可靠支持时，替代入口才可能建立。整个过程也不会删除范围外节点 B，只是在维护它通向当前局部工作集的可用入口。
 
 与此同时，near 节点和 out-contour 节点若都匹配当前轮廓，会根据本帧是否仍为 contour 邻接记录正/负 contour vote。
 
@@ -1374,7 +1469,60 @@ pair 未被选择或结构无效
 
 **步骤 10：尝试恢复范围外断点。**
 
-前面收集的 `outside_break_nodes` 会再次与所有 near 节点调用 `UpdateGraphEdge()`，尝试换一个当前局部锚点接回历史图。每个候选仍需通过正常几何、投票和地形检查，并不是无条件 stitch。
+“范围外断点”不是 `NavNode` 的正式类型，也不是节点上的持久标志。它只是对本轮临时集合 `outside_break_nodes` 中节点的描述：某个范围外历史节点 B 原本通过 A-B 与当前 near 图连接，但前面复检这条跨范围边时，`UpdateGraphEdge(A, B, false)` 返回了 false，于是 B 被暂时记为“本轮失去可用局部入口的范围外端点”。
+
+```text
+当前 near 图                 历史全局图
+    A_near ─────── B_outside ─── E ─── F
+              原有跨范围入口
+```
+
+这里的 false 有两种不同含义：
+
+1. A-B 的静态几何、方向、terrain、visibility 投票或同方向稀疏化没有通过，`RemoveVisibilityEdge()` 已经删除其 visibility 身份；
+2. A-B 的静态身份仍然成立，但当前动态障碍把它设置为 `dynamic_blocked=true`，因此它只是在本轮搜索中不可用。
+
+所以进入 `outside_break_nodes` 不代表 B 被删除，也不一定代表 A-B 的静态边身份已经永久消失；它只说明原入口本轮不能承担“当前局部图通向 B 后方历史图”的连接作用。
+
+在 near-near 候选和局部邻接已经更新后，代码让每个这样的 B 与所有 near 节点 C 再调用同一个验证入口：
+
+```cpp
+for (const auto& near_node : near_nav_nodes_) {
+    for (const auto& outside_node : outside_break_nodes) {
+        UpdateGraphEdge(near_node, outside_node, false);
+    }
+}
+```
+
+对应的拓扑意图是：
+
+```text
+原入口本轮不可用：
+
+    A_near ─────×───── B_outside ─── 历史图
+
+尝试其他局部入口：
+
+    C_near ─────────── B_outside ─── 历史图
+    D_near ─────────── B_outside ─── 历史图
+```
+
+这不是无条件 stitch，也不是把 B 直接连到距离最近的 near 节点。每个 C-B 都要重新通过与步骤 6 相同的完整条件：
+
+- 两端角点/柱体类型和 reduced-visibility 方向允许；
+- 投影后的路线通过持久静态点云、全局轮廓和当前 Polygon 检查；
+- 已知 terrain 没有坡度或高度矛盾，UNKNOWN terrain 按当前策略允许；
+- visibility 历史投票达到门限；
+- 没有同方向更短的有效连接将其稀疏化；
+- 静态结构成立后，当前动态层没有把它 mask 为不可搜索。
+
+尤其要注意 finalized 历史节点的正票门控：如果 B 已经 `is_finalized=true`，但当前 `is_contour_match=false`，代码不会仅凭旧位置给一条全新的 C-B 候选追加正票。因此替代入口更可能在以下情况下恢复：C-B 以前已有候选投票、B 本帧重新获得可靠轮廓匹配、B 还没有进入 finalized 未匹配状态，或者原连接只是被动态障碍暂时屏蔽。
+
+步骤 10 只处理步骤 6 收集到的 B，不会枚举所有范围外全局节点。如果所有 C-B 都未通过，B 及其后方节点仍保存在全局维护图中，只是本轮可能不在机器人所在的可搜索连通分量里；以后机器人靠近、障碍消失或 B 重新得到当前观测支持时，仍可获得新的接回机会。
+
+因此，这一步更准确的标题可以理解为：
+
+> **尝试为本轮失去可用入口的范围外历史节点寻找新的 near 锚点。**
 
 **步骤 11：对所有静态边统一应用最新静态 route 检查和动态 mask。**
 
@@ -1462,23 +1610,19 @@ node.observed_in_semantic_snapshot
 
 `QueryStaticNodeEvidence()` 使用与语义提取一致的轴对齐方窗；位于方窗外直接返回 `UNKNOWN`，不会因为当前局部地图没包含该节点就把它当成 free。
 
-**步骤 2：计算候选晋升所需的两个额外 gate。**
+**步骤 2：检查候选晋升所需的三个额外准入条件。**
 
-除了语义观测帧数，默认还要求：
+除了达到语义观测帧数，默认还要满足下面三个条件：
 
-```text
-finalization_ready:
-    static_promotion_requires_finalized=false
-    或 node.is_finalized=true
+1. **节点自身的几何位置和墙面方向已经稳定。** 新静态角点刚出现时，位置和两侧墙面方向可能随轮廓简化、栅格量化和传感器噪声抖动。代码会收集多帧样本并进行稳定化；只有节点被标记为“已经定型”后，才允许它从临时候选晋升为永久全局静态节点。配置项 `static_promotion_requires_finalized` 控制是否启用这道门槛：默认启用；关闭后，即使节点尚未完成多帧几何稳定化，也不再因为这一项阻止晋升。
+2. **节点已经通过一条当前可用的非查询边接入可复用导航拓扑。** 默认要求该节点至少连接一个可以参加图搜索的真实图节点，而且这条边当前静态有效、没有被动态障碍或拓扑状态屏蔽。只连到机器人当前位置 odom 或临时目标 goal 不算，因为这两类查询边会随当前位置和目标变化反复删除、重建，不能证明这个静态角点已经可靠接入全局图。配置项 `static_promotion_requires_active_edge` 控制是否启用这道门槛：默认启用；关闭后，没有这种可复用活动边也不会阻止晋升。
+3. **节点必须接入持久的确认静态主分量。** 已有主图时，晋升事务直接从 `staticMainNodeIds_` 出发，只允许经过确认静态节点，以及本帧也已经同时满足观测数、定型和类型条件的待晋升候选；不能借用 odom、goal、动态节点或尚未成熟的候选当临时桥。当前 odom 是否还能直视旧节点不会阻断地图继续向前扩展。配置项 `static_promotion_requires_main_component` 默认启用。首次建立静态图时，仍只选择一个由 odom 当前锚定、至少包含两点的成熟候选分量作为启动主图，不能用单个孤点启动。
 
-edge_ready:
-    static_promotion_requires_active_edge=false
-    或至少存在一条 active、可搜索、非 odom/goal incident edge
-```
+此外，普通 `CONCAVE` 轮廓采样只保留为障碍几何，不创建或晋升为持久导航顶点；只有 `CONVEX`、`PILLAR` 或明确 boundary 节点可进入持久路由拓扑。
 
-只连接 odom 或 goal 不能证明节点属于可复用静态拓扑，因为这两类查询边每次都会重建。
+因此，默认策略不是“看见足够多帧就直接永久保存”，而是同时要求：节点类型可用于绕障、几何已经稳定、拥有当前活动的真实图边，并且整批候选能原子地接入机器人可达主图。这样可以避免把位置仍在抖动的角点、普通凹墙采样或候选孤岛写入永久全局静态图。
 
-当前 `default.yaml` 的 `static_confirm_frames=3`，但默认又要求 finalized；`node_finalize_thred=6` 使用严格 `>`，所以普通静态候选往往至少积累 7 个一致位置/方向样本后才能晋升。使用 `ssmi_bag_graph_test.launch` 时，`ssmi_bag.yaml` 会把 `static_confirm_frames` 覆盖为 5，但 finalized gate 通常仍是更慢的约束。
+当前 `default.yaml` 要求静态角点至少被有效观察 3 帧；不过默认还要求节点完成位置和墙面方向稳定化。由于 `node_finalize_thred=6` 采用严格大于门限的判断，普通静态候选往往至少要积累 7 个相互一致的位置/方向样本才能真正晋升。使用 `ssmi_bag_graph_test.launch` 时，`ssmi_bag.yaml` 会把最低有效观测数改成 5 帧，但实际晋升通常仍取决于更慢的几何稳定化过程。
 
 **步骤 3：`AdvanceStaticNodeLifecycle()` 推进静态状态机。**
 
@@ -1486,7 +1630,7 @@ edge_ready:
 
 | 当前情况 | 计数变化 | 动作 |
 |---|---|---|
-| 本帧 observed | `static_missed_count=0`；`static_seen_count+1`，最多到 confirm 门限 | 候选达到 seen 门限且两个 promotion gate 都通过时晋升 |
+| 本帧 observed | `static_missed_count=0`；`static_seen_count+1`，最多到确认门限 | 候选达到最低有效观测数，并且上述两个额外准入条件都满足时晋升 |
 | 未 observed、位于 `static_update_radius` 内、证据为 `EXPLICIT_FREE` | `static_missed_count+1` | 达到 `static_remove_frames` 后加入待删除集合 |
 | 未 observed、位于 update radius 内、证据为 `UNKNOWN/STATIC_OCCUPIED` | `static_missed_count=0` | 保留，不把遮挡或未知当删除证据 |
 | 未 observed 的候选越过 `static_stitch_radius` | 无需等待 free miss | 删除未确认候选，防止局部候选无限滞留 |
@@ -1504,6 +1648,8 @@ edge_ready:
 达到普通删除条件的节点此时只放入 `remove_nodes`，暂不立即从图删除；达到晋升条件的节点放入 `promote_nodes`，并在生命周期函数中把 source 改为 `STATIC_GLOBAL`。
 
 **步骤 4：先提交成熟静态候选晋升。**
+
+晋升按一批事务计算。代码先找出本帧所有非拓扑门槛都已满足的候选，再从当前主分量沿活动静态边扩展；只有这次扩展实际覆盖到的候选才一起晋升。若 A 通往主图必须经过尚未成熟的 B，A、B 本帧都不晋升；等 B 也成熟后整条链才能一起提交。
 
 每个 `promote_node` 从 `staticCandidateGraphNodes_` 移到 `globalGraphNodes_`。随后按当前边身份重标 incident edge source：
 
@@ -2573,7 +2719,9 @@ sum(votes) > floor(N / 2)
 
 因此当前轮廓中明确观测的节点 pair 可以很快建立；纯历史 pair 至少积累若干帧再稳定。
 
-这里还有一个重要区别：普通 visibility 边一次静态几何失败时，代码先追加一张 0 票；只要历史窗口多数仍为真，旧 visibility 边仍可能暂时 active。等投票翻转后，才删除 visibility 身份。这个行为不同于 contour-follow 已保存 route 的 `static_valid=false` 即时屏蔽，也不同于 odom/goal 查询边的逐次直接重建。
+对已经存在的静态—静态普通 visibility 边，当前策略把“搜索安全”和“历史身份删除”分开：一次静态几何失败会立即令 `static_valid=false`，所以本帧搜索绝不会继续使用这条边；但 visibility 身份和邻接记录先保留，并累计 `static_visibility_misses`。只有连续失败达到 `static_visibility_remove_frames`（默认 3 帧）才真正删除。中间任一帧静态几何恢复会立即重新激活边并把计数清零。
+
+`VOTE_PENDING` 和 `DIRECTION_SPARSIFIED` 不是物理碰撞证据。它们可以阻止创建一条全新的边，但不会删除已经验证过的历史静态 visibility 边；当前几何重新通过时，已有边可以直接恢复。
 
 ### 9.7 同方向稀疏化
 
@@ -2826,11 +2974,12 @@ globalGraphNodes_ + staticCandidateGraphNodes_
 
 ### 11.7 visibility 身份什么时候真正删除
 
-visibility 身份没有 contour 边那套 `current_contour_misses` 成熟事务。它在参加本轮结构复检时，出现以下结果会由 `RemoveVisibilityEdge()` 移除：
+静态 visibility 身份现在具有独立的连续物理失败计数。它在参加本轮结构复检时按以下规则处理：
 
-1. 几何、持久静态碰撞、Polygon、地形或投票验证未通过；
-2. near-near pair 虽然结构可行，但同方向存在更近的有效 visibility 候选，未进入 `selected_pairs`；
-3. near-outside 历史 visibility 复检失败。
+1. 静态点云、Polygon、可靠轮廓或 terrain 证明 route 物理失败：第一帧立即不可搜索，连续达到 `static_visibility_remove_frames` 后删除身份；
+2. 后续物理验证通过：立即恢复，失败计数清零；
+3. 仅因投票尚未成熟或被同方向更近候选稀疏化：已有静态历史边保留，不作为删除证据；
+4. 动态障碍只设置 `dynamic_blocked`，不删除静态身份。
 
 删除动作分两层：
 
@@ -2969,6 +3118,8 @@ max(clearance, 1.5 * observation_tolerance) = 1.2 m
 - goal 边在每次规划查询中由 `UpdateGoalNavNodeConnects()` 重建，不作为持久静态拓扑证据；
 - 静态候选晋升时，只连接 odom/goal 也不能满足“已经接入可复用静态图”的 active-edge gate。
 
+确认静态节点断开主分量后不会立即丢失：它仍留在匹配历史中，等待后续边恢复或新 stitch 把它接回；但断开期间不作为 odom/goal 锚点，也不进入发布给规划器的搜索图。每次语义提交会选择与上一主图重叠最多的活动静态分量作为主分量，边重新接通后历史节点会自动重新并入。最终搜索图还会在“已允许节点集合”内从 odom 再做一次可达性裁剪，不能借一个已过滤历史节点把其后节点误发布成孤岛。
+
 ### 11.12 一个完整例子：机器人离开后再返回
 
 假设静态全局节点 A、B 在机器人附近建立了一条 contour-follow 边：
@@ -3086,8 +3237,11 @@ neighbor 节点可搜索
 | `Graph/static_confirm_frames` | 3 | 候选晋升的语义观测下限 |
 | `Graph/static_remove_frames` | 3 | 明确 free 的节点删除门限；也是 contour 边矛盾成熟门限 |
 | `Graph/static_topology_remove_frames` | 5 | 旧角点被当前直墙内部否定的成熟门限 |
+| `Graph/static_visibility_remove_frames` | 3 | 普通静态 visibility 边连续物理失败后的真正删除门限；首帧即屏蔽 |
+| `Graph/static_duplicate_radius` | 0.5 m | 同类型、同方向且视线相容的极近静态重复点抑制半径 |
 | `Graph/static_promotion_requires_finalized` | true | 晋升前要求 RANSAC 定型 |
 | `Graph/static_promotion_requires_active_edge` | true | 晋升前要求非查询 active incident edge |
+| `Graph/static_promotion_requires_main_component` | true | 晋升批次必须接入持久确认静态主分量；odom 仅参与首次启动 |
 
 ### 13.4 语义地图和地形参数
 
@@ -3238,7 +3392,8 @@ STATIC_CANDIDATE + transient
 - `DG contour-follow edges`：active 数和 not_adjacent、clipped、static_cloud、self_polygon、other_static、dynamic、terrain、offset、vote 拒绝数；
 - `DG start connections`：候选、接受数、无拓扑孤儿、各类拒绝；
 - `GP goal connections`：goal 候选和拒绝；
-- `DG static promotion gate`：晋升、等待 finalized、等待 active edge；
+- `DG static promotion gate`：晋升、等待 finalized、active edge、路由类型和主分量；
+- `DG static main component`：当前活动主分量大小、仅保留作匹配历史的断开节点数和 odom 锚点数；
 - `DG static topology replacement`：矛盾、删除、等待替代、割点保护；
 - `DG contour edge replacement`：成熟、删除、物理阻挡、等待替代；
 - `MH persistent static collision layer`：持久体素数和明确 free 删除数。
@@ -3260,9 +3415,9 @@ STATIC_CANDIDATE + transient
 3. 新节点是否被范围/terrain gate 拒绝；
 4. 是否只有查询边而没有非查询 incident edge；
 5. edge diagnostic 的 reject reason；
-6. `static_valid`、`dynamic_blocked`、`current_contour_misses`；
+6. `static_valid`、`dynamic_blocked`、`current_contour_misses`、`static_visibility_misses`；
 7. 是否因同方向更近节点被 visibility 稀疏化；
-8. 是否仍是 candidate，且未通过 finalized/active-edge 晋升 gate。
+8. 是否仍是 candidate，且未通过 finalized/active-edge/routing-type/main-component 晋升 gate。
 
 ---
 

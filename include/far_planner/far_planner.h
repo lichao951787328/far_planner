@@ -7,6 +7,7 @@
 #include "contour_graph.h"
 #include "graph_planner.h"
 #include "map_handler.h"
+#include "local_voxel_policy.h"
 #include "planner_visualizer.h"
 #include "scan_handler.h"
 #include "graph_msger.h"
@@ -34,11 +35,14 @@ struct FARMasterParams {
     bool  is_attempt_autoswitch;
     float odom_timeout;
     float semantic_map_timeout;
+    bool  use_local_voxel_map;
+    float local_voxel_timeout;
     float odom_connection_update_distance;
     bool enable_goal_recording;
     std::string goal_record_file;
     std::string world_frame;
     std::string semantic_map_topic;
+    std::string local_voxel_topic;
 };
 
 class FARMaster {
@@ -54,11 +58,12 @@ private:
     ros::NodeHandle private_nh_;
     ros::Subscriber reset_graph_sub_, update_command_sub_;
     ros::Subscriber odom_sub_, waypoint_sub_;
-    ros::Subscriber semantic_map_sub_;
+    ros::Subscriber semantic_map_sub_, local_voxel_sub_;
     ros::Subscriber read_command_sub_, save_command_sub_; // only use for terminal formatting
     ros::Publisher  goal_pub_, boundary_pub_;
     ros::Publisher  dynamic_obs_pub_, surround_obs_debug_;
     ros::Publisher  graph_static_obs_pub_;
+    ros::Publisher  global_confirmed_static_obs_pub_;
     ros::Publisher  local_planner_static_obs_pub_;
     ros::Publisher  local_planner_dynamic_obs_pub_;
     ros::Publisher  surround_obs_before_dyremove_debug_, surround_obs_after_dyremove_debug_;
@@ -87,8 +92,8 @@ private:
     // goal so /far_global_path can end at the point the operator requested.
     bool has_commanded_goal_ = false;
     Point3D commanded_goal_;
-    // A semantic snapshot has changed the obstacle/terrain inputs but its
-    // contour and visibility-graph update has not completed yet.
+    // A current obstacle snapshot has changed the local contour/terrain
+    // inputs but its visibility-graph update has not completed yet.
     bool semantic_graph_dirty_ = false;
     // The ROS timer only records demand.  Planning, freshness checks and stop
     // publication are serialized by Loop() after spinOnce() has drained the
@@ -103,8 +108,11 @@ private:
     bool timeout_stop_active_ = false;
     ros::WallTime last_odom_receipt_;
     ros::WallTime last_semantic_map_receipt_;
+    ros::WallTime last_local_voxel_receipt_;
     ros::Time last_odom_stamp_;
     ros::Time last_semantic_map_stamp_;
+    ros::Time last_local_voxel_stamp_;
+    bool has_local_voxel_snapshot_ = false;
     std::ofstream goal_record_stream_;
     std::uint64_t goal_record_sequence_ = 0;
     std::uint64_t goal_record_session_sequence_ = 0;
@@ -120,6 +128,7 @@ private:
     PointCloudPtr collision_obs_ptr_;
     PointCloudPtr current_static_obs_ptr_;
     PointCloudPtr persistent_static_obs_ptr_;
+    PointCloudPtr graph_static_collision_obs_ptr_;
     PointCloudPtr effective_dynamic_obs_ptr_;
     PointCloudPtr dynamic_added_ptr_;
     PointCloudPtr dynamic_removed_ptr_;
@@ -160,6 +169,7 @@ private:
     GraphPlannerParams  gp_params_;
     ContourGraphParams  cg_params_;
     MapHandlerParams    map_params_;
+    LocalVoxelPolicyParams local_voxel_policy_params_;
     ScanHandlerParams   scan_params_;
     GraphMsgerParams    msger_parmas_;
     
@@ -192,7 +202,11 @@ private:
     /* Callback Functions */
     void OdomCallBack(const nav_msgs::OdometryConstPtr& msg);
     void SemanticMapCallBack(const octomap_msgs::OctomapConstPtr& msg);
+    void LocalVoxelMapCallBack(const sensor_msgs::PointCloud2ConstPtr& msg);
     void UpdatePlannerCloudsFromSemanticMap();
+    void UpdatePlannerCloudsFromLocalVoxelMap();
+    void UpdatePlannerCloudsFromCurrentLayers();
+    bool GlobalStaticEvidenceIsFresh() const;
 
     bool PreconditionCheck();
     bool DataIsFresh(std::string* reason = nullptr) const;

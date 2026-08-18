@@ -6,6 +6,9 @@
 
 world_frame                             : map_start
 semantic_map_topic                      : /octomap_full
+use_local_voxel_map                     : true
+local_voxel_topic                       : /local_3d_semantic_voxel_map/voxel_cloud
+local_voxel_timeout                     : 1.0
 enable_goal_recording                   : false
 
 # Accept a fused SemanticOcTree class only when its normalized top-1
@@ -18,7 +21,17 @@ MapHandler/semantic_min_probability     : 0.55
 # Match the upstream Semantic OctoMap resolution.  This remains independent
 # from MapHandler/local_planner_resolution, which controls dense collision
 # samples for downstream consumers.
-contour_grid_resolution                 : 0.4
+contour_grid_resolution                 : 0.2
+sensor_range                            : 9.0
+terrain_range                           : 9.0
+MapHandler/semantic_local_window_radius : 9.0
+MapHandler/local_planner_radius         : 9.0
+MapHandler/local_voxel_resolution       : 0.10
+MapHandler/local_voxel_min_semantic_confidence: 0.55
+MapHandler/local_voxel_obstacle_cost_threshold: 0.60
+MapHandler/local_voxel_static_labels    : [2, 3, 4, 5, 6, 7, 8]
+MapHandler/local_voxel_terrain_labels   : [0, 1, 9]
+MapHandler/local_voxel_dynamic_labels   : [11, 12, 13, 14, 15, 16, 17, 18]
 
 # Keep the validated robot geometry unchanged during the data-adapter test.
 vehicle_height                          : 0.5
@@ -30,10 +43,19 @@ Util/robot_collision_clearance          : 0.45
 Graph/static_confirm_frames             : 5
 Graph/static_promotion_requires_finalized: true
 Graph/static_promotion_requires_active_edge: true
+# Candidate chains grow from the persisted main graph; current odom visibility
+# is required only for the first bootstrap, not for later map expansion.
+Graph/static_promotion_requires_main_component: true
+Graph/static_promotion_requires_global_evidence: true
+Graph/static_visibility_remove_frames   : 3
+Graph/static_duplicate_radius           : 0.4
+# Record why geometrically close visibility candidates are not selected. The
+# marker-only diagnostic does not change graph construction or edge voting.
+Graph/diagnostic_near_pair_radius: 3.0
 
-# Cityscapes labels 2..8 emitted by grid_semantic_adapter_node.  Unknown
-# high-traversability points are remapped upstream to wall (label 3), so they
-# are also captured by this list.
+# Cityscapes labels 2..8 emitted by grid_semantic_adapter_node. Unknown or
+# low-confidence high-traversability voxels stay in FAR's transient safety
+# layer and are deliberately excluded from this confirmed-static list.
 MapHandler/obstacle_groups:
   - {name: building,      rgb: [70, 70, 70]}
   - {name: wall,          rgb: [102, 102, 156]}
