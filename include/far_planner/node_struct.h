@@ -72,6 +72,7 @@ enum class EdgeRejectReason {
     NOT_CURRENT_ADJACENT,
     UNREACHABLE,
     DIRECTION_REJECTED,
+    DIRECTION_SPARSIFIED,
     STATIC_CLOUD_BLOCKED,
     DYNAMIC_CLOUD_BLOCKED,
     POLYGON_BLOCKED,
@@ -98,6 +99,10 @@ struct GraphEdgeState {
     Point3D route_end;
     float route_cost = 0.0f;
     int current_contour_misses = 0;
+    // Consecutive physical failures of an ordinary static visibility edge.
+    // The edge is masked on the first failure, but its identity is retained
+    // until this counter reaches the configured removal threshold.
+    int static_visibility_misses = 0;
 
     bool IsActive() const {
         return static_valid && !dynamic_blocked && !topology_blocked && active;
@@ -138,6 +143,43 @@ inline void ApplyContourStaticValidationObservation(
     state.active = true;
 }
 
+/** Ordinary visibility edges use a two-stage failure policy: one bad static
+ * observation blocks search immediately, while only consecutive bad
+ * observations authorize deleting the accumulated edge identity. */
+inline bool ApplyVisibilityStaticValidationObservation(
+    GraphEdgeState& state, const bool route_is_statically_valid,
+    const int remove_after_misses) {
+    state.active = true;
+    state.static_valid = route_is_statically_valid;
+    if (route_is_statically_valid) {
+        state.static_visibility_misses = 0;
+        return false;
+    }
+    state.static_visibility_misses = std::min(
+        std::max(1, remove_after_misses),
+        state.static_visibility_misses + 1);
+    return state.static_visibility_misses >=
+           std::max(1, remove_after_misses);
+}
+
+inline bool IsStaticGeometryRejectReason(const EdgeRejectReason reason) {
+    return reason == EdgeRejectReason::STATIC_CLOUD_BLOCKED ||
+           reason == EdgeRejectReason::POLYGON_BLOCKED ||
+           reason == EdgeRejectReason::SELF_POLYGON_BLOCKED ||
+           reason == EdgeRejectReason::OTHER_STATIC_BLOCKED ||
+           reason == EdgeRejectReason::CLIPPED_CONTOUR ||
+           reason == EdgeRejectReason::TERRAIN_BLOCKED;
+}
+
+/** These outcomes are topology-selection/vote state, not a current physical
+ * obstacle. They may prevent creating a brand-new edge, but must not erase an
+ * already validated static visibility edge. */
+inline bool IsRecoverableStaticVisibilitySelectionReason(
+    const EdgeRejectReason reason) {
+    return reason == EdgeRejectReason::VOTE_PENDING ||
+           reason == EdgeRejectReason::DIRECTION_SPARSIFIED;
+}
+
 struct EdgeValidationResult {
     bool valid = false;
     bool dynamic_blocked = false;
@@ -173,6 +215,7 @@ struct EdgeRejectionStats {
                 ++unreachable;
                 break;
             case EdgeRejectReason::DIRECTION_REJECTED:
+            case EdgeRejectReason::DIRECTION_SPARSIFIED:
                 ++direction_rejected;
                 break;
             case EdgeRejectReason::STATIC_CLOUD_BLOCKED:
@@ -361,6 +404,15 @@ inline bool IsGraphQueryEndpoint(const NavNode& node) {
            node.source == GraphNodeSource::GOAL;
 }
 
+/** Only obstacle corners whose free-space side can be used by visibility
+ * search may enter persistent static topology. Ordinary concave contour
+ * samples remain obstacle evidence, not routing vertices. */
+inline bool IsPersistentStaticRoutingVertex(const NavNode& node) {
+    return !node.is_transient_contour_endpoint &&
+           (node.is_boundary || node.free_direct == NodeFreeDirect::CONVEX ||
+            node.free_direct == NodeFreeDirect::PILLAR);
+}
+
 /** Unknown semantic terrain is traversable for every graph edge by policy. */
 inline bool RequiresKnownTerrainForGraphConnection(
     const NavNode& first, const NavNode& second) {
@@ -374,6 +426,13 @@ enum class GraphLifecycleAction {
     PROMOTE_STATIC,
     REMOVE
 };
+
+inline bool IsStaticPromotionEvidenceReady(
+    const StaticNodeEvidence evidence,
+    const bool require_global_evidence) {
+    return !require_global_evidence ||
+           evidence == StaticNodeEvidence::STATIC_OCCUPIED;
+}
 
 inline bool IsGraphNodeSearchEligible(const NavNode& node) {
     if (node.is_merged || node.is_navpoint || node.topology_blocked ||
@@ -462,12 +521,27 @@ inline bool IsGraphEdgeSearchEligible(const NavNode& from,
            to_state->second.IsActive();
 }
 
+/** A persistent corner without a usable obstacle-graph edge becomes a
+ * permanent orphan in the global graph.  Odom and goal edges are deliberately
+ * ignored: they are rebuilt for each query and cannot prove that the corner
+ * belongs to reusable map topology. */
+inline bool HasActiveSearchEligibleIncidentEdge(const NavNode& node) {
+    for (const auto& neighbor : node.connect_nodes) {
+        if (neighbor && !IsGraphQueryEndpoint(*neighbor) &&
+            IsGraphEdgeSearchEligible(node, *neighbor)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 /** Pure lifecycle policy shared by production code and regression tests. */
 inline GraphLifecycleAction AdvanceStaticNodeLifecycle(
     NavNode& node, const bool observed,
     const StaticNodeEvidence evidence, const float robot_distance,
     const float update_radius, const float stitch_radius,
-    const int confirm_frames, const int remove_frames) {
+    const int confirm_frames, const int remove_frames,
+    const bool promotion_ready = true) {
     const bool is_static = node.source == GraphNodeSource::STATIC_CANDIDATE ||
                            node.source == GraphNodeSource::STATIC_GLOBAL;
     if (!is_static) return GraphLifecycleAction::KEEP;
@@ -484,7 +558,8 @@ inline GraphLifecycleAction AdvanceStaticNodeLifecycle(
         node.static_seen_count = std::min(
             std::max(1, confirm_frames), node.static_seen_count + 1);
         if (node.source == GraphNodeSource::STATIC_CANDIDATE &&
-            node.static_seen_count >= std::max(1, confirm_frames)) {
+            node.static_seen_count >= std::max(1, confirm_frames) &&
+            promotion_ready) {
             node.source = GraphNodeSource::STATIC_GLOBAL;
             return GraphLifecycleAction::PROMOTE_STATIC;
         }
@@ -510,6 +585,179 @@ inline GraphLifecycleAction AdvanceStaticNodeLifecycle(
 
 typedef std::shared_ptr<NavNode> NavNodePtr;
 typedef std::pair<NavNodePtr, NavNodePtr> NavEdge;
+
+/** Collect the active component reachable from a graph endpoint. Query edges
+ * may be excluded when the caller needs reusable obstacle topology rather
+ * than a connection that exists only for the current robot/goal query. */
+inline std::unordered_set<std::size_t> ActiveReachableNodeIds(
+    const NavNodePtr& start, const bool reusable_edges_only) {
+    std::unordered_set<std::size_t> visited;
+    if (!start || !IsGraphNodeSearchEligible(*start)) return visited;
+    std::vector<NavNodePtr> pending{start};
+    visited.insert(start->id);
+    while (!pending.empty()) {
+        const NavNodePtr current = pending.back();
+        pending.pop_back();
+        for (const auto& neighbor : current->connect_nodes) {
+            if (!neighbor || visited.count(neighbor->id) ||
+                (reusable_edges_only &&
+                 (IsGraphQueryEndpoint(*current) ||
+                  IsGraphQueryEndpoint(*neighbor))) ||
+                !IsGraphEdgeSearchEligible(*current, *neighbor)) {
+                continue;
+            }
+            visited.insert(neighbor->id);
+            pending.push_back(neighbor);
+        }
+    }
+    return visited;
+}
+
+/** Reachability inside an already selected graph snapshot. This second-stage
+ * traversal is necessary when persistent matching history is intentionally
+ * excluded: a path may not borrow a filtered node and leave its descendants
+ * as an apparent island in the published search graph. */
+inline std::unordered_set<std::size_t> ActiveReachableNodeIdsWithin(
+    const NavNodePtr& start,
+    const std::unordered_set<std::size_t>& allowed_ids) {
+    std::unordered_set<std::size_t> visited;
+    if (!start || !allowed_ids.count(start->id) ||
+        !IsGraphNodeSearchEligible(*start)) {
+        return visited;
+    }
+    std::vector<NavNodePtr> pending{start};
+    visited.insert(start->id);
+    while (!pending.empty()) {
+        const NavNodePtr current = pending.back();
+        pending.pop_back();
+        for (const auto& neighbor : current->connect_nodes) {
+            if (!neighbor || !allowed_ids.count(neighbor->id) ||
+                visited.count(neighbor->id) ||
+                !IsGraphEdgeSearchEligible(*current, *neighbor)) {
+                continue;
+            }
+            visited.insert(neighbor->id);
+            pending.push_back(neighbor);
+        }
+    }
+    return visited;
+}
+
+/** Static promotion cannot depend on a dynamic object or on odom/goal query
+ * edges. This traversal follows only active, reusable static routing nodes. */
+inline std::unordered_set<std::size_t> ActiveStaticRoutingReachableNodeIds(
+    const NavNodePtr& start) {
+    std::unordered_set<std::size_t> visited;
+    const auto is_static_routing = [](const NavNodePtr& node) {
+        return node &&
+            (node->source == GraphNodeSource::STATIC_CANDIDATE ||
+             node->source == GraphNodeSource::STATIC_GLOBAL) &&
+            IsPersistentStaticRoutingVertex(*node) &&
+            IsGraphNodeSearchEligible(*node);
+    };
+    if (!is_static_routing(start)) return visited;
+    std::vector<NavNodePtr> pending{start};
+    visited.insert(start->id);
+    while (!pending.empty()) {
+        const NavNodePtr current = pending.back();
+        pending.pop_back();
+        for (const auto& neighbor : current->connect_nodes) {
+            if (!is_static_routing(neighbor) ||
+                visited.count(neighbor->id) ||
+                !IsGraphEdgeSearchEligible(*current, *neighbor)) {
+                continue;
+            }
+            visited.insert(neighbor->id);
+            pending.push_back(neighbor);
+        }
+    }
+    return visited;
+}
+
+/** Build the static component that can be committed atomically this frame.
+ * Confirmed globals are always allowed, while a candidate may be traversed
+ * only when it independently passed every non-topological promotion gate.
+ * This prevents a mature candidate from borrowing an unready candidate as a
+ * temporary bridge to the confirmed graph. */
+inline std::unordered_set<std::size_t>
+ActiveTransactionalStaticRoutingNodeIds(
+    const std::vector<NavNodePtr>& starts,
+    const std::unordered_set<std::size_t>& eligible_candidate_ids) {
+    std::unordered_set<std::size_t> visited;
+    const auto is_allowed = [&eligible_candidate_ids](
+        const NavNodePtr& node) {
+        if (!node || !IsPersistentStaticRoutingVertex(*node) ||
+            !IsGraphNodeSearchEligible(*node)) {
+            return false;
+        }
+        if (node->source == GraphNodeSource::STATIC_GLOBAL) return true;
+        return node->source == GraphNodeSource::STATIC_CANDIDATE &&
+               eligible_candidate_ids.count(node->id) > 0;
+    };
+    std::vector<NavNodePtr> pending;
+    for (const auto& start : starts) {
+        if (is_allowed(start) && visited.insert(start->id).second) {
+            pending.push_back(start);
+        }
+    }
+    while (!pending.empty()) {
+        const NavNodePtr current = pending.back();
+        pending.pop_back();
+        for (const auto& neighbor : current->connect_nodes) {
+            if (!is_allowed(neighbor) || visited.count(neighbor->id) ||
+                !IsGraphEdgeSearchEligible(*current, *neighbor)) {
+                continue;
+            }
+            visited.insert(neighbor->id);
+            pending.push_back(neighbor);
+        }
+    }
+    return visited;
+}
+
+/** Grow one atomic promotion transaction from the persisted static main
+ * component.  Once a confirmed graph exists, map growth is anchored by its
+ * reusable topology rather than by a transient odom visibility edge. */
+inline std::unordered_set<std::size_t>
+PersistentMainTransactionNodeIds(
+    const std::vector<NavNodePtr>& confirmed_nodes,
+    const std::unordered_set<std::size_t>& persistent_main_ids,
+    const std::unordered_set<std::size_t>& eligible_candidate_ids) {
+    std::vector<NavNodePtr> main_seeds;
+    main_seeds.reserve(persistent_main_ids.size());
+    for (const auto& node : confirmed_nodes) {
+        if (node && node->source == GraphNodeSource::STATIC_GLOBAL &&
+            persistent_main_ids.count(node->id)) {
+            main_seeds.push_back(node);
+        }
+    }
+    return ActiveTransactionalStaticRoutingNodeIds(
+        main_seeds, eligible_candidate_ids);
+}
+
+inline bool HasActiveStaticRoutingPathToAny(
+    const NavNodePtr& start,
+    const std::unordered_set<std::size_t>& target_ids) {
+    if (!start || target_ids.empty()) return false;
+    const std::unordered_set<std::size_t> reachable =
+        ActiveStaticRoutingReachableNodeIds(start);
+    for (const std::size_t id : target_ids) {
+        if (reachable.count(id)) return true;
+    }
+    return false;
+}
+
+inline bool HasActiveReusablePathToAny(
+    const NavNodePtr& start,
+    const std::unordered_set<std::size_t>& target_ids) {
+    if (!start || target_ids.empty()) return false;
+    const std::unordered_set<std::size_t> reachable =
+        ActiveReachableNodeIds(start, true);
+    for (const std::size_t id : target_ids) {
+        if (reachable.count(id)) return true;
+    }
+    return false;
+}
 
 inline bool ShouldCommitStaticCornerReplacement(
     const bool contradiction_mature, const bool replacement_topology_stable,

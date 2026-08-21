@@ -17,6 +17,8 @@
           output="screen">
         <rosparam command="load"
                   file="$(find far_planner)/config/$(arg config).yaml"/>
+        <!-- This historical harness contains no high-resolution local map. -->
+        <param name="input_mode" value="global_semantic_compat"/>
         <param name="world_frame" value="world"/>
         <param name="semantic_map_topic" value="/far_test/octomap_full"/>
         <param name="main_run_freq" value="5.0"/>

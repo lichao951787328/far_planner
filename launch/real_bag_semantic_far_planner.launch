@@ -1,0 +1,25 @@
+<?xml version="1.0"?>
+<launch>
+  <!-- FAR-only recorded-data entry point. Start the local semantic voxel map
+       and SemanticOcTree pipeline separately; this file does not modify or
+       launch packages outside the current repository. -->
+  <arg name="odometryTopic" default="/fusion_localization"/>
+  <arg name="localSemanticMapTopic"
+       default="/local_3d_semantic_voxel_map/voxel_cloud"/>
+  <arg name="globalStaticMapTopic" default="/octomap_full"/>
+  <arg name="launchRviz" default="true"/>
+  <arg name="rvizConfig" default="navigation_demo"/>
+
+  <include file="$(find far_planner)/launch/semantic_far_planner.launch">
+    <arg name="config" value="real_bag_semantic"/>
+    <arg name="usePoseAdapter" value="false"/>
+    <arg name="odometryTopic" value="$(arg odometryTopic)"/>
+    <arg name="worldFrameId" value="map_start"/>
+    <arg name="semanticMapTopic" value="$(arg globalStaticMapTopic)"/>
+    <arg name="localSemanticMapTopic" value="$(arg localSemanticMapTopic)"/>
+    <arg name="localSemanticMapTimeout" value="1.0"/>
+    <arg name="launchRviz" value="$(arg launchRviz)"/>
+    <arg name="rvizConfig" value="$(arg rvizConfig)"/>
+    <arg name="launchRobotModel" value="false"/>
+  </include>
+</launch>

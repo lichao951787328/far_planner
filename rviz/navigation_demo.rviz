@@ -304,6 +304,24 @@ Visualization Manager:
           Value: true
         - Class: rviz/MarkerArray
           Enabled: true
+          Marker Topic: /viz_static_main_graph
+          Name: Searchable Static Main Component
+          Namespaces:
+            static_main_edges: true
+            static_main_nodes: true
+          Queue Size: 20
+          Value: true
+        - Class: rviz/MarkerArray
+          Enabled: false
+          Marker Topic: /viz_search_graph
+          Name: Robot-Reachable Search Graph
+          Namespaces:
+            search_graph_edges: true
+            search_graph_nodes: true
+          Queue Size: 20
+          Value: false
+        - Class: rviz/MarkerArray
+          Enabled: true
           Marker Topic: /viz_graph_topic
           Name: Current Merged Graph
           Namespaces:

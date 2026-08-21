@@ -12,13 +12,40 @@
 #include <XmlRpcValue.h>
 
 #include <chrono>
+#include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <ctime>
 #include <iomanip>
+#include <limits>
 #include <sstream>
+#include <unordered_set>
 #include <vector>
 
 namespace {
+
+bool ParseSemanticKey(const XmlRpc::XmlRpcValue& value, uint32_t& key) {
+  if (value.getType() == XmlRpc::XmlRpcValue::TypeInt) {
+    const int parsed = static_cast<int>(value);
+    if (parsed < 0) return false;
+    key = static_cast<uint32_t>(parsed);
+    return true;
+  }
+  if (value.getType() != XmlRpc::XmlRpcValue::TypeString) return false;
+  const std::string text = static_cast<std::string>(value);
+  try {
+    std::size_t consumed = 0;
+    const unsigned long long parsed = std::stoull(text, &consumed, 0);
+    if (consumed != text.size() ||
+        parsed > std::numeric_limits<uint32_t>::max()) {
+      return false;
+    }
+    key = static_cast<uint32_t>(parsed);
+    return true;
+  } catch (const std::exception&) {
+    return false;
+  }
+}
 
 bool ParseSemanticGroups(const ros::NodeHandle& private_nh,
                          const std::string& parameter,
@@ -43,7 +70,7 @@ bool ParseSemanticGroups(const ros::NodeHandle& private_nh,
         entry["name"].getType() != XmlRpc::XmlRpcValue::TypeString ||
         entry["rgb"].getType() != XmlRpc::XmlRpcValue::TypeArray ||
         entry["rgb"].size() != 3) {
-      ROS_ERROR("FARMaster: invalid entry %d in ~%s; expected {name, rgb: [r,g,b]}.",
+      ROS_ERROR("FARMaster: invalid entry %d in ~%s; expected {name, rgb: [r,g,b], optional label/labels}.",
                 i, parameter.c_str());
       return false;
     }
@@ -62,10 +89,200 @@ bool ParseSemanticGroups(const ros::NodeHandle& private_nh,
     const uint32_t key = (static_cast<uint32_t>(rgb[0]) << 16) |
                          (static_cast<uint32_t>(rgb[1]) << 8) |
                          static_cast<uint32_t>(rgb[2]);
-    parsed.emplace_back(static_cast<std::string>(entry["name"]), key);
+    SemanticClassGroup group(static_cast<std::string>(entry["name"]), key);
+    if (entry.hasMember("label")) {
+      uint32_t label = 0;
+      if (!ParseSemanticKey(entry["label"], label)) {
+        ROS_ERROR("FARMaster: label in entry %d of ~%s must be a nonnegative integer or a quoted hexadecimal value.",
+                  i, parameter.c_str());
+        return false;
+      }
+      group.labels.push_back(label);
+    }
+    if (entry.hasMember("labels")) {
+      XmlRpc::XmlRpcValue& labels = entry["labels"];
+      if (labels.getType() != XmlRpc::XmlRpcValue::TypeArray) {
+        ROS_ERROR("FARMaster: labels in entry %d of ~%s must be a list.",
+                  i, parameter.c_str());
+        return false;
+      }
+      for (int label_index = 0; label_index < labels.size(); ++label_index) {
+        uint32_t label = 0;
+        if (!ParseSemanticKey(labels[label_index], label)) {
+          ROS_ERROR("FARMaster: invalid labels[%d] in entry %d of ~%s.",
+                    label_index, i, parameter.c_str());
+          return false;
+        }
+        group.labels.push_back(label);
+      }
+    }
+    std::sort(group.labels.begin(), group.labels.end());
+    group.labels.erase(std::unique(group.labels.begin(), group.labels.end()),
+                       group.labels.end());
+    parsed.push_back(group);
   }
   groups.swap(parsed);
   return true;
+}
+
+void AppendSemanticGroupsToLocalPolicy(
+    const std::vector<SemanticClassGroup>& groups,
+    std::vector<uint32_t>& labels, std::vector<uint32_t>& rgb_keys) {
+  for (const auto& group : groups) {
+    labels.insert(labels.end(), group.labels.begin(), group.labels.end());
+    rgb_keys.push_back(group.rgb_key);
+  }
+  const auto sort_unique = [](std::vector<uint32_t>& values) {
+    std::sort(values.begin(), values.end());
+    values.erase(std::unique(values.begin(), values.end()), values.end());
+  };
+  sort_unique(labels);
+  sort_unique(rgb_keys);
+}
+
+bool SemanticRoleSetsAreDisjoint(
+    const std::vector<uint32_t>& first,
+    const std::vector<uint32_t>& second) {
+  std::unordered_set<uint32_t> keys(first.begin(), first.end());
+  for (const uint32_t key : second) {
+    if (keys.count(key)) return false;
+  }
+  return true;
+}
+
+bool ParseLocalVoxelLabels(const ros::NodeHandle& private_nh,
+                           const std::string& parameter,
+                           std::vector<uint32_t>& labels) {
+  XmlRpc::XmlRpcValue value;
+  if (!private_nh.getParam(parameter, value)) return true;
+  if (value.getType() != XmlRpc::XmlRpcValue::TypeArray) {
+    ROS_ERROR("FARMaster: ~%s must be a YAML list of nonnegative integers.",
+              parameter.c_str());
+    return false;
+  }
+  std::vector<uint32_t> parsed;
+  parsed.reserve(value.size());
+  for (int i = 0; i < value.size(); ++i) {
+    if (value[i].getType() != XmlRpc::XmlRpcValue::TypeInt) {
+      ROS_ERROR("FARMaster: entry %d in ~%s is not an integer.",
+                i, parameter.c_str());
+      return false;
+    }
+    const int label = static_cast<int>(value[i]);
+    if (label < 0) {
+      ROS_ERROR("FARMaster: entry %d in ~%s is negative.",
+                i, parameter.c_str());
+      return false;
+    }
+    parsed.push_back(static_cast<uint32_t>(label));
+  }
+  std::sort(parsed.begin(), parsed.end());
+  parsed.erase(std::unique(parsed.begin(), parsed.end()), parsed.end());
+  labels.swap(parsed);
+  return true;
+}
+
+struct PointCloudFieldView {
+  bool valid = false;
+  uint32_t offset = 0;
+  uint8_t datatype = 0;
+  uint32_t byte_width = 0;
+};
+
+uint32_t PointCloudDatatypeWidth(const uint8_t datatype) {
+  switch (datatype) {
+    case sensor_msgs::PointField::INT8:
+    case sensor_msgs::PointField::UINT8:
+      return 1;
+    case sensor_msgs::PointField::INT16:
+    case sensor_msgs::PointField::UINT16:
+      return 2;
+    case sensor_msgs::PointField::INT32:
+    case sensor_msgs::PointField::UINT32:
+    case sensor_msgs::PointField::FLOAT32:
+      return 4;
+    case sensor_msgs::PointField::FLOAT64:
+      return 8;
+    default:
+      return 0;
+  }
+}
+
+PointCloudFieldView FindPointCloudField(
+    const sensor_msgs::PointCloud2& cloud, const std::string& name) {
+  for (const auto& field : cloud.fields) {
+    if (field.name == name) {
+      const uint32_t byte_width = PointCloudDatatypeWidth(field.datatype);
+      const bool fits_point = field.count > 0 && byte_width > 0 &&
+          field.offset <= cloud.point_step &&
+          byte_width <= cloud.point_step - field.offset;
+      return PointCloudFieldView{
+          fits_point, field.offset, field.datatype, byte_width};
+    }
+  }
+  return PointCloudFieldView();
+}
+
+template <typename T>
+T ReadPointCloudRaw(const uint8_t* data) {
+  T output;
+  std::memcpy(&output, data, sizeof(T));
+  return output;
+}
+
+bool ReadPointCloudNumber(const uint8_t* point,
+                          const PointCloudFieldView& field,
+                          double& output) {
+  if (!field.valid) return false;
+  const uint8_t* data = point + field.offset;
+  switch (field.datatype) {
+    case sensor_msgs::PointField::INT8:
+      output = ReadPointCloudRaw<int8_t>(data); return true;
+    case sensor_msgs::PointField::UINT8:
+      output = ReadPointCloudRaw<uint8_t>(data); return true;
+    case sensor_msgs::PointField::INT16:
+      output = ReadPointCloudRaw<int16_t>(data); return true;
+    case sensor_msgs::PointField::UINT16:
+      output = ReadPointCloudRaw<uint16_t>(data); return true;
+    case sensor_msgs::PointField::INT32:
+      output = ReadPointCloudRaw<int32_t>(data); return true;
+    case sensor_msgs::PointField::UINT32:
+      output = ReadPointCloudRaw<uint32_t>(data); return true;
+    case sensor_msgs::PointField::FLOAT32:
+      output = ReadPointCloudRaw<float>(data); return true;
+    case sensor_msgs::PointField::FLOAT64:
+      output = ReadPointCloudRaw<double>(data); return true;
+    default:
+      return false;
+  }
+}
+
+bool ReadPointCloudRgbKey(const uint8_t* point,
+                          const PointCloudFieldView& field,
+                          uint32_t& rgb_key) {
+  if (!field.valid) return false;
+  const uint8_t* data = point + field.offset;
+  uint32_t packed = 0;
+  switch (field.datatype) {
+    case sensor_msgs::PointField::FLOAT32:
+    case sensor_msgs::PointField::UINT32:
+    case sensor_msgs::PointField::INT32:
+      // PCL stores packed RGB in the bit pattern of FLOAT32. Numeric float
+      // conversion would destroy that pattern, so copy the four bytes.
+      packed = ReadPointCloudRaw<uint32_t>(data);
+      break;
+    default:
+      return false;
+  }
+  rgb_key = packed & 0x00ffffffu;
+  return true;
+}
+
+void FinalizePointCloud(const PointCloudPtr& cloud) {
+  if (!cloud) return;
+  cloud->width = static_cast<uint32_t>(cloud->size());
+  cloud->height = 1;
+  cloud->is_dense = true;
 }
 
 void PublishSeconds(const ros::Publisher& publisher, const ros::WallDuration& duration) {
@@ -154,6 +371,13 @@ void FARMaster::Init() {
   // DEBUG Publisher
   dynamic_obs_pub_     = nh.advertise<sensor_msgs::PointCloud2>("FAR_dynamic_obs_debug",1);
   surround_obs_debug_  = nh.advertise<sensor_msgs::PointCloud2>("FAR_obs_debug",1);
+  // Expose the exact persistent-global plus current-local static cloud used
+  // by Graph edge validation. The local-planner cloud below is deliberately
+  // denser and therefore is not equivalent for reproducing Graph clearance.
+  graph_static_obs_pub_ =
+      nh.advertise<sensor_msgs::PointCloud2>("semantic_graph_static_obstacles", 1);
+  global_confirmed_static_obs_pub_ = nh.advertise<sensor_msgs::PointCloud2>(
+      "semantic_global_confirmed_static_obstacles", 1);
   local_planner_static_obs_pub_ =
       nh.advertise<sensor_msgs::PointCloud2>("semantic_local_static_obstacles", 1);
   local_planner_dynamic_obs_pub_ =
@@ -168,6 +392,21 @@ void FARMaster::Init() {
   this->InitializeGoalRecorder();
 
   semantic_map_sub_   = nh.subscribe(master_params_.semantic_map_topic, 1, &FARMaster::SemanticMapCallBack, this);
+  if (master_params_.use_local_voxel_map) {
+    local_voxel_sub_ = nh.subscribe(
+        master_params_.local_semantic_map_topic, 1,
+        &FARMaster::LocalVoxelMapCallBack, this);
+    ROS_INFO("FARMaster input mode=%s profile=%s: local semantic snapshots=%s, "
+             "global static evidence=%s.",
+             master_params_.input_mode.c_str(),
+             master_params_.semantic_profile.c_str(),
+             master_params_.local_semantic_map_topic.c_str(),
+             master_params_.semantic_map_topic.c_str());
+  } else {
+    ROS_WARN("FARMaster input mode=global_semantic_compat: /octomap_full owns "
+             "both current contours and global evidence; this mode is for "
+             "legacy bags only.");
+  }
 
   /*init path generation thred callback*/
   // 在这设置了全局地图规划器的循环频率，默认是5hz，但是调用默认参数后是2.5hz。
@@ -192,6 +431,7 @@ void FARMaster::Init() {
   is_planner_running_ = false;
   is_graph_init_      = false;
   has_pending_route_goal_ = false;
+  has_commanded_goal_ = false;
   is_reset_env_       = false;
   is_stop_update_     = false;
   semantic_graph_dirty_ = false;
@@ -201,8 +441,11 @@ void FARMaster::Init() {
   timeout_stop_active_ = false;
   last_odom_receipt_ = ros::WallTime();
   last_semantic_map_receipt_ = ros::WallTime();
+  last_local_voxel_receipt_ = ros::WallTime();
   last_odom_stamp_ = ros::Time();
   last_semantic_map_stamp_ = ros::Time();
+  last_local_voxel_stamp_ = ros::Time();
+  has_local_voxel_snapshot_ = false;
 
   // allocate memory to pointers
   new_vertices_ptr_     = PointCloudPtr(new pcl::PointCloud<PCLPoint>());
@@ -215,6 +458,8 @@ void FARMaster::Init() {
   collision_obs_ptr_       = PointCloudPtr(new pcl::PointCloud<PCLPoint>());
   current_static_obs_ptr_  = PointCloudPtr(new pcl::PointCloud<PCLPoint>());
   persistent_static_obs_ptr_ = PointCloudPtr(new pcl::PointCloud<PCLPoint>());
+  graph_static_collision_obs_ptr_ =
+      PointCloudPtr(new pcl::PointCloud<PCLPoint>());
   effective_dynamic_obs_ptr_ = PointCloudPtr(new pcl::PointCloud<PCLPoint>());
   dynamic_added_ptr_       = PointCloudPtr(new pcl::PointCloud<PCLPoint>());
   dynamic_removed_ptr_     = PointCloudPtr(new pcl::PointCloud<PCLPoint>());
@@ -255,6 +500,7 @@ void FARMaster::Init() {
 
 void FARMaster::ResetEnvironmentAndGraph() {
   this->ResetInternalValues();
+  has_commanded_goal_ = false;
   if (!FARUtil::IsDebug) { // Terminal Output
     printf("\033[A"), printf("\033[A"), printf("\033[2K");
     std::cout<< "\033[1;31m V-Graph Resetting...\033[0m\n" << std::endl;
@@ -272,6 +518,9 @@ void FARMaster::ResetEnvironmentAndGraph() {
   if (collision_obs_ptr_) collision_obs_ptr_->clear();
   if (current_static_obs_ptr_) current_static_obs_ptr_->clear();
   if (persistent_static_obs_ptr_) persistent_static_obs_ptr_->clear();
+  if (graph_static_collision_obs_ptr_) {
+    graph_static_collision_obs_ptr_->clear();
+  }
   if (effective_dynamic_obs_ptr_) effective_dynamic_obs_ptr_->clear();
   if (dynamic_added_ptr_) dynamic_added_ptr_->clear();
   if (dynamic_removed_ptr_) dynamic_removed_ptr_->clear();
@@ -279,6 +528,10 @@ void FARMaster::ResetEnvironmentAndGraph() {
   if (local_planner_dynamic_obs_ptr_) local_planner_dynamic_obs_ptr_->clear();
   is_cloud_init_ = false;
   last_semantic_map_receipt_ = ros::WallTime();
+  last_local_voxel_receipt_ = ros::WallTime();
+  last_semantic_map_stamp_ = ros::Time();
+  last_local_voxel_stamp_ = ros::Time();
+  has_local_voxel_snapshot_ = false;
   /* Stop the robot if it is moving */
   goal_waypoint_stamped_.header.stamp = ros::Time::now();
   goal_waypoint_stamped_.point = FARUtil::Point3DToGeoMsgPoint(robot_pos_);
@@ -296,10 +549,36 @@ bool FARMaster::DataIsFresh(std::string* reason) const {
     if (reason) *reason = "odometry input timed out";
     return false;
   }
-  if (master_params_.semantic_map_timeout > 0.0f &&
-      !last_semantic_map_receipt_.isZero() &&
-      (now - last_semantic_map_receipt_).toSec() > master_params_.semantic_map_timeout) {
-    if (reason) *reason = "semantic octomap input timed out";
+  if (master_params_.use_local_voxel_map) {
+    if (!has_local_voxel_snapshot_) {
+      if (reason) *reason = "waiting for the first local voxel snapshot";
+      return false;
+    }
+    if (master_params_.local_voxel_timeout > 0.0f &&
+        (!last_local_voxel_receipt_.isZero() &&
+         (now - last_local_voxel_receipt_).toSec() >
+             master_params_.local_voxel_timeout)) {
+      if (reason) *reason = "local voxel input timed out in wall time";
+      return false;
+    }
+  } else if (master_params_.semantic_map_timeout > 0.0f &&
+             !last_semantic_map_receipt_.isZero() &&
+             (now - last_semantic_map_receipt_).toSec() >
+                 master_params_.semantic_map_timeout) {
+      if (reason) *reason = "semantic octomap input timed out";
+      return false;
+  }
+  return true;
+}
+
+bool FARMaster::GlobalStaticEvidenceIsFresh() const {
+  if (!map_handler_.HasSemanticMap() ||
+      last_semantic_map_receipt_.isZero()) {
+    return false;
+  }
+  if (master_params_.semantic_map_timeout <= 0.0f) return true;
+  if ((ros::WallTime::now() - last_semantic_map_receipt_).toSec() >
+      master_params_.semantic_map_timeout) {
     return false;
   }
   return true;
@@ -327,7 +606,8 @@ bool FARMaster::PreconditionCheck() {
   }
   if (timeout_stop_active_) {
     timeout_stop_active_ = false;
-    ROS_INFO("FARMaster: odometry and semantic map inputs are fresh again; planning may resume.");
+    ROS_INFO("FARMaster: required odometry and local obstacle inputs are fresh "
+             "again; planning may resume.");
   }
   return true;
 }
@@ -344,7 +624,19 @@ void FARMaster::Loop() {
       continue;
     }
     /* Process callback functions */
-    ros::spinOnce(); 
+    ros::spinOnce();
+    // A callback can detect a rosbag epoch rewind (or receive an explicit
+    // reset command). Never run one planner iteration against the old graph
+    // after that request has been raised.
+    if (is_reset_env_) {
+      this->ResetEnvironmentAndGraph();
+      is_reset_env_ = false;
+      if (FARUtil::IsDebug) {
+        ROS_WARN("****************** Graph and Env Reset ******************");
+      }
+      loop_rate.sleep();
+      continue;
+    }
     if (!this->PreconditionCheck()) {
       loop_rate.sleep();
       continue;
@@ -367,6 +659,7 @@ void FARMaster::Loop() {
     // A new semantic snapshot owns the expensive contour/topology rebuild.
     // Between snapshots, robot motion only refreshes transient start edges.
     if (!semantic_graph_dirty_) {
+      bool publish_graph_snapshot = false;
       if (is_graph_init_ && odom_connections_dirty_) {
         graph_manager_.UpdateOdomConnections();
         nav_graph_ = graph_manager_.GetNavGraph();
@@ -376,14 +669,26 @@ void FARMaster::Loop() {
         has_odom_connection_position_ = true;
         odom_connections_dirty_ = false;
         planning_requested_ = true;
-        planner_viz_.VizGraph(nav_graph_);
-        planner_viz_.VizSemanticGraphLayers(
-            graph_manager_.GetStaticGraphNodes(),
-            graph_manager_.GetDynamicLocalNodes(), nav_graph_);
+        publish_graph_snapshot = true;
       }
       if (planning_requested_ && is_graph_init_) {
         planning_requested_ = false;
         this->ExecutePlanningCycle();
+        publish_graph_snapshot = true;
+      }
+      if (publish_graph_snapshot) {
+        // Goal and odom edges are a transient query layer. Publish only after
+        // ExecutePlanningCycle has rebuilt them against this obstacle cloud,
+        // otherwise RViz/monitors observe a stale edge with a new map.
+        planner_viz_.VizPointCloud(graph_static_obs_pub_,
+                                   graph_static_collision_obs_ptr_);
+        planner_viz_.VizPointCloud(global_confirmed_static_obs_pub_,
+                                   persistent_static_obs_ptr_);
+        planner_viz_.VizGraph(nav_graph_);
+        planner_viz_.VizSemanticGraphLayers(
+            graph_manager_.GetStaticGraphNodes(),
+            graph_manager_.GetStaticMainGraphNodes(),
+            graph_manager_.GetDynamicLocalNodes(), nav_graph_);
       }
       PublishSeconds(main_loop_time_pub_, ros::WallTime::now() - loop_start);
       loop_rate.sleep();
@@ -442,7 +747,9 @@ void FARMaster::Loop() {
     // 先缩小到局部相关节点，再做轮廓与导航图匹配，减少无关计算、提升稳定性和速度。
     // MatchContourWithNavGraph() 是把当前帧提取出来的轮廓点，和全局导航图里的近邻节点做匹配的函数。它的输入是两组节点：global_nodes 是全局导航图，near_nodes 是前面筛出来的局部近邻节点；输出是 new_convex_vertices，也就是这帧里“没被现有导航节点匹配上、需要当成新顶点处理”的轮廓点。
     // 它的作用就是“先拿局部轮廓去对齐已有图节点，剩下的才当作新顶点候选”。这一步是增量建图的关键：不是直接把所有轮廓都变成新节点，而是先复用已有导航节点，减少重复顶点和错误建图。
-    contour_graph_.MatchContourWithNavGraph(matching_graph, near_nav_graph_, new_ctnodes_);
+    contour_graph_.MatchContourWithNavGraph(
+        matching_graph, near_nav_graph_, new_ctnodes_,
+        graph_params_.static_duplicate_radius);
     graph_manager_.FinalizeDynamicGraphUpdate();
     if (master_params_.is_visual_opencv) {
       FARUtil::ConvertCTNodeStackToPCL(new_ctnodes_, new_vertices_ptr_);
@@ -465,6 +772,10 @@ void FARMaster::Loop() {
     graph_manager_.UpdateNavGraph(new_nodes_, is_stop_update_, clear_nodes_);
     graph_manager_.CommitSemanticGraphUpdate(
         [this](const Point3D& point) {
+          if (graph_params_.static_promotion_requires_global_evidence &&
+              !this->GlobalStaticEvidenceIsFresh()) {
+            return StaticNodeEvidence::UNKNOWN;
+          }
           return map_handler_.QueryStaticNodeEvidence(point);
         });
     runtimer_.data = FARUtil::Timer.end_time("Total V-Graph Update", is_graph_init_) / 1000.f; // Unit: second
@@ -503,10 +814,6 @@ void FARMaster::Loop() {
     planner_viz_.VizNodes(clear_nodes_, "clear_nodes", VizColor::ORANGE);
     planner_viz_.VizNodes(graph_manager_.GetOutContourNodes(), "out_contour", VizColor::YELLOW);
     planner_viz_.VizPoint3D(FARUtil::free_odom_p, "free_odom_position", VizColor::ORANGE, 1.0);
-    planner_viz_.VizGraph(nav_graph_);
-    planner_viz_.VizSemanticGraphLayers(
-        graph_manager_.GetStaticGraphNodes(),
-        graph_manager_.GetDynamicLocalNodes(), nav_graph_);
     planner_viz_.VizContourGraph(ContourGraph::contour_graph_);
     planner_viz_.VizGlobalPolygons(ContourGraph::global_contour_, ContourGraph::unmatched_contour_);
 
@@ -537,6 +844,18 @@ void FARMaster::Loop() {
       planning_requested_ = false;
       this->ExecutePlanningCycle();
     }
+    // Keep the collision cloud and graph geometry in the same post-planning
+    // snapshot. In particular, no GOAL_CONNECT edge from the preceding map
+    // may be visualized as if it belonged to the newly rebuilt map.
+    planner_viz_.VizPointCloud(graph_static_obs_pub_,
+                               graph_static_collision_obs_ptr_);
+    planner_viz_.VizPointCloud(global_confirmed_static_obs_pub_,
+                               persistent_static_obs_ptr_);
+    planner_viz_.VizGraph(nav_graph_);
+    planner_viz_.VizSemanticGraphLayers(
+        graph_manager_.GetStaticGraphNodes(),
+        graph_manager_.GetStaticMainGraphNodes(),
+        graph_manager_.GetDynamicLocalNodes(), nav_graph_);
     PublishSeconds(main_loop_time_pub_, ros::WallTime::now() - loop_start);
     loop_rate.sleep();
   }
@@ -629,7 +948,8 @@ void FARMaster::ExecutePlanningCycle() {
       is_planner_running_ = true;
       planner_viz_.VizPoint3D(waypoint, "waypoint", VizColor::MAGNA, 1.5);
       planner_viz_.VizPoint3D(current_free_goal, "free_goal", VizColor::GREEN, 1.5);
-      planner_viz_.VizPath(global_path, is_current_free_nav);
+      planner_viz_.VizPath(global_path, is_current_free_nav,
+                           has_commanded_goal_ ? &commanded_goal_ : nullptr);
     } else if (is_retry_wait) {
       // The current static+dynamic Graph has no route. Stop safely without
       // deleting the commanded destination; a later freshly rebuilt Graph
@@ -929,6 +1249,33 @@ void FARMaster::LoadROSParams() {
   private_nh_.param<bool>(master_prefix  + "is_attempt_autoswitch", master_params_.is_attempt_autoswitch, true);
   private_nh_.param<float>(master_prefix + "odom_timeout",          master_params_.odom_timeout, 3.0f);
   private_nh_.param<float>(master_prefix + "semantic_map_timeout",  master_params_.semantic_map_timeout, 3.0f);
+  private_nh_.param<std::string>(master_prefix + "input_mode",
+                                 master_params_.input_mode,
+                                 "local_semantic_with_global_static");
+  private_nh_.param<std::string>(master_prefix + "semantic_profile",
+                                 master_params_.semantic_profile,
+                                 "gazebo");
+  if (master_params_.input_mode ==
+      "local_semantic_with_global_static") {
+    master_params_.use_local_voxel_map = true;
+  } else if (master_params_.input_mode == "global_semantic_compat") {
+    master_params_.use_local_voxel_map = false;
+  } else {
+    ROS_FATAL("FARMaster: unsupported input_mode '%s'; expected "
+              "local_semantic_with_global_static or global_semantic_compat.",
+              master_params_.input_mode.c_str());
+    master_params_.use_local_voxel_map = false;
+    ros::shutdown();
+  }
+  if (!private_nh_.getParam(master_prefix + "local_semantic_map_timeout",
+                            master_params_.local_voxel_timeout)) {
+    // Compatibility alias used by feature/local-voxel-global-static-split.
+    private_nh_.param<float>(master_prefix + "local_voxel_timeout",
+                             master_params_.local_voxel_timeout, 0.5f);
+  }
+  private_nh_.param<float>(
+      master_prefix + "input_time_rewind_reset_threshold",
+      master_params_.input_time_rewind_reset_threshold, 1.0f);
   private_nh_.param<float>(master_prefix + "odom_connection_update_distance",
                            master_params_.odom_connection_update_distance,
                            0.2f);
@@ -942,7 +1289,20 @@ void FARMaster::LoadROSParams() {
                                  master_params_.goal_record_file,
                                  std::string());
   private_nh_.param<std::string>(master_prefix + "world_frame",     master_params_.world_frame, "map");
-  private_nh_.param<std::string>(master_prefix + "semantic_map_topic", master_params_.semantic_map_topic, "octomap_full");
+  if (!private_nh_.getParam(master_prefix + "global_static_map_topic",
+                            master_params_.semantic_map_topic)) {
+    // Compatibility alias used by semantic_simple and its older bag tests.
+    private_nh_.param<std::string>(master_prefix + "semantic_map_topic",
+                                   master_params_.semantic_map_topic,
+                                   "octomap_full");
+  }
+  if (!private_nh_.getParam(master_prefix + "local_semantic_map_topic",
+                            master_params_.local_semantic_map_topic)) {
+    // Compatibility alias for the first dual-input implementation.
+    private_nh_.param<std::string>(master_prefix + "local_voxel_topic",
+                                   master_params_.local_semantic_map_topic,
+                                   "/local_3d_semantic_voxel_map/voxel_cloud");
+  }
   master_params_.terrain_range = std::min(master_params_.terrain_range, master_params_.sensor_range);
 
   // map handler params
@@ -965,6 +1325,11 @@ void FARMaster::LoadROSParams() {
   private_nh_.param<float>(map_prefix + "local_planner_obstacle_intensity",
                   map_params_.semantic_params.local_planner_obstacle_intensity,
                   200.0f);
+  map_params_.semantic_params.use_local_voxel_map =
+      master_params_.use_local_voxel_map;
+  private_nh_.param<float>(map_prefix + "local_voxel_resolution",
+                  map_params_.semantic_params.local_voxel_resolution,
+                  0.10f);
   private_nh_.param<bool>(map_prefix + "semantic_top1_only",
                           map_params_.semantic_params.use_top1_only, true);
   private_nh_.param<float>(map_prefix + "semantic_min_probability",
@@ -979,6 +1344,78 @@ void FARMaster::LoadROSParams() {
     ROS_FATAL("FARMaster: semantic class parameters are invalid; refusing to continue.");
     ros::shutdown();
   }
+  private_nh_.param<float>(map_prefix + "local_voxel_min_semantic_confidence",
+      local_voxel_policy_params_.minimum_semantic_confidence, 0.55f);
+  private_nh_.param<float>(map_prefix + "local_voxel_obstacle_cost_threshold",
+      local_voxel_policy_params_.obstacle_cost_threshold, 0.60f);
+  const bool local_static_labels_ok = ParseLocalVoxelLabels(
+      private_nh_, map_prefix + "local_voxel_static_labels",
+      local_voxel_policy_params_.static_labels);
+  const bool local_terrain_labels_ok = ParseLocalVoxelLabels(
+      private_nh_, map_prefix + "local_voxel_terrain_labels",
+      local_voxel_policy_params_.terrain_labels);
+  const bool local_dynamic_labels_ok = ParseLocalVoxelLabels(
+      private_nh_, map_prefix + "local_voxel_dynamic_labels",
+      local_voxel_policy_params_.dynamic_labels);
+  if (!local_static_labels_ok || !local_terrain_labels_ok ||
+      !local_dynamic_labels_ok) {
+    ROS_FATAL("FARMaster: local voxel semantic label parameters are invalid.");
+    ros::shutdown();
+  }
+  AppendSemanticGroupsToLocalPolicy(
+      map_params_.obstacle_groups, local_voxel_policy_params_.static_labels,
+      local_voxel_policy_params_.static_rgb_keys);
+  AppendSemanticGroupsToLocalPolicy(
+      map_params_.terrain_support_groups,
+      local_voxel_policy_params_.terrain_labels,
+      local_voxel_policy_params_.terrain_rgb_keys);
+  AppendSemanticGroupsToLocalPolicy(
+      map_params_.dynamic_obstacle_groups,
+      local_voxel_policy_params_.dynamic_labels,
+      local_voxel_policy_params_.dynamic_rgb_keys);
+  const bool labels_disjoint =
+      SemanticRoleSetsAreDisjoint(
+          local_voxel_policy_params_.static_labels,
+          local_voxel_policy_params_.terrain_labels) &&
+      SemanticRoleSetsAreDisjoint(
+          local_voxel_policy_params_.static_labels,
+          local_voxel_policy_params_.dynamic_labels) &&
+      SemanticRoleSetsAreDisjoint(
+          local_voxel_policy_params_.terrain_labels,
+          local_voxel_policy_params_.dynamic_labels);
+  const bool colors_disjoint =
+      SemanticRoleSetsAreDisjoint(
+          local_voxel_policy_params_.static_rgb_keys,
+          local_voxel_policy_params_.terrain_rgb_keys) &&
+      SemanticRoleSetsAreDisjoint(
+          local_voxel_policy_params_.static_rgb_keys,
+          local_voxel_policy_params_.dynamic_rgb_keys) &&
+      SemanticRoleSetsAreDisjoint(
+          local_voxel_policy_params_.terrain_rgb_keys,
+          local_voxel_policy_params_.dynamic_rgb_keys);
+  if (!labels_disjoint || !colors_disjoint) {
+    ROS_FATAL("FARMaster: semantic profile '%s' maps the same label or RGB "
+              "to multiple canonical roles.",
+              master_params_.semantic_profile.c_str());
+    ros::shutdown();
+  }
+  ROS_INFO("FARMaster semantic profile '%s': static=%zu labels/%zu colors, "
+           "terrain=%zu/%zu, dynamic=%zu/%zu.",
+           master_params_.semantic_profile.c_str(),
+           local_voxel_policy_params_.static_labels.size(),
+           local_voxel_policy_params_.static_rgb_keys.size(),
+           local_voxel_policy_params_.terrain_labels.size(),
+           local_voxel_policy_params_.terrain_rgb_keys.size(),
+           local_voxel_policy_params_.dynamic_labels.size(),
+           local_voxel_policy_params_.dynamic_rgb_keys.size());
+  local_voxel_policy_params_.minimum_semantic_confidence = std::max(
+      0.0f, std::min(1.0f,
+                     local_voxel_policy_params_.minimum_semantic_confidence));
+  local_voxel_policy_params_.obstacle_cost_threshold = std::max(
+      0.0f, std::min(1.0f,
+                     local_voxel_policy_params_.obstacle_cost_threshold));
+  map_params_.semantic_params.local_voxel_resolution = std::max(
+      1e-3f, map_params_.semantic_params.local_voxel_resolution);
   map_params_.sensor_range     = master_params_.sensor_range;
 
   // utility params
@@ -1049,12 +1486,28 @@ void FARMaster::LoadROSParams() {
                            graph_params_.static_stitch_radius, 28.5f);
   private_nh_.param<float>(graph_prefix  + "dynamic_position_alpha",
                            graph_params_.dynamic_position_alpha, 0.65f);
+  private_nh_.param<float>(graph_prefix  + "diagnostic_near_pair_radius",
+                           graph_params_.diagnostic_near_pair_radius, 0.0f);
   private_nh_.param<int>(graph_prefix    + "static_confirm_frames",
                          graph_params_.static_confirm_frames, 3);
   private_nh_.param<int>(graph_prefix    + "static_remove_frames",
                          graph_params_.static_remove_frames, 3);
   private_nh_.param<int>(graph_prefix    + "static_topology_remove_frames",
                          graph_params_.static_topology_remove_frames, 5);
+  private_nh_.param<int>(graph_prefix    + "static_visibility_remove_frames",
+                         graph_params_.static_visibility_remove_frames, 3);
+  private_nh_.param<float>(graph_prefix  + "static_duplicate_radius",
+                           graph_params_.static_duplicate_radius, 0.5f);
+  private_nh_.param<bool>(graph_prefix   + "static_promotion_requires_finalized",
+                          graph_params_.static_promotion_requires_finalized, true);
+  private_nh_.param<bool>(graph_prefix   + "static_promotion_requires_active_edge",
+                          graph_params_.static_promotion_requires_active_edge, true);
+  private_nh_.param<bool>(graph_prefix   + "static_promotion_requires_main_component",
+                          graph_params_.static_promotion_requires_main_component,
+                          true);
+  private_nh_.param<bool>(graph_prefix   + "static_promotion_requires_global_evidence",
+                          graph_params_.static_promotion_requires_global_evidence,
+                          master_params_.use_local_voxel_map);
   private_nh_.param<float>(graph_prefix  + "connect_angle_thred",       graph_params_.kConnectAngleThred, 10.0);
   private_nh_.param<float>(graph_prefix  + "dirs_filter_margin",        graph_params_.filter_dirs_margin, 10.0);
   graph_params_.filter_pos_margin        = FARUtil::kNavClearDist;
@@ -1066,10 +1519,16 @@ void FARMaster::LoadROSParams() {
       graph_params_.static_update_radius, graph_params_.static_stitch_radius);
   graph_params_.dynamic_position_alpha = std::max(
       0.0f, std::min(1.0f, graph_params_.dynamic_position_alpha));
+  graph_params_.diagnostic_near_pair_radius = std::max(
+      0.0f, graph_params_.diagnostic_near_pair_radius);
   graph_params_.static_confirm_frames = std::max(1, graph_params_.static_confirm_frames);
   graph_params_.static_remove_frames = std::max(1, graph_params_.static_remove_frames);
   graph_params_.static_topology_remove_frames = std::max(
       1, graph_params_.static_topology_remove_frames);
+  graph_params_.static_visibility_remove_frames = std::max(
+      1, graph_params_.static_visibility_remove_frames);
+  graph_params_.static_duplicate_radius = std::max(
+      0.0f, graph_params_.static_duplicate_radius);
   // The semantic query window and contour raster are axis-aligned squares.
   // Static Graph maintenance therefore needs the square's diagonal radius,
   // plus a small contour/voxel projection allowance at its boundary.  Using
@@ -1158,6 +1617,12 @@ void FARMaster::OdomCallBack(const nav_msgs::OdometryConstPtr& msg) {
     FARUtil::map_origin = robot_pos_;
     if (map_handler_.HasSemanticMap()) {
       map_handler_.UpdateRobotPosition(robot_pos_);
+    }
+    if (master_params_.use_local_voxel_map) {
+      if (has_local_voxel_snapshot_) {
+        this->UpdatePlannerCloudsFromLocalVoxelMap();
+      }
+    } else if (map_handler_.HasSemanticMap()) {
       this->UpdatePlannerCloudsFromSemanticMap();
     }
   }
@@ -1167,6 +1632,36 @@ void FARMaster::OdomCallBack(const nav_msgs::OdometryConstPtr& msg) {
 
 void FARMaster::SemanticMapCallBack(const octomap_msgs::OctomapConstPtr& msg) {
   if (!msg) return;
+  if (is_reset_env_) return;
+  if (master_params_.use_local_voxel_map) {
+    if (msg->header.stamp.isZero()) {
+      ROS_ERROR_THROTTLE(
+          2.0, "FARMaster: confirmed-global octomap has a zero stamp.");
+      return;
+    }
+    if (!last_semantic_map_stamp_.isZero() &&
+        msg->header.stamp <= last_semantic_map_stamp_) {
+      if (msg->header.stamp < last_semantic_map_stamp_) {
+        const double rewind =
+            (last_semantic_map_stamp_ - msg->header.stamp).toSec();
+        if (master_params_.input_time_rewind_reset_threshold >= 0.0f &&
+            rewind >= master_params_.input_time_rewind_reset_threshold) {
+          ROS_WARN("FARMaster: confirmed-global time rewound by %.3f s; "
+                   "requesting an atomic graph/map reset for the new input epoch.",
+                   rewind);
+          is_reset_env_ = true;
+          return;
+        }
+        ROS_WARN_THROTTLE(
+            2.0, "FARMaster: dropping out-of-order confirmed-global octomap "
+                 "(%.6f < %.6f).",
+            msg->header.stamp.toSec(), last_semantic_map_stamp_.toSec());
+      }
+      // Repetition of a latched global tree is not a new confirmation event
+      // and must not keep the promotion-evidence watchdog alive.
+      return;
+    }
+  }
 
   const ros::WallTime callback_start = ros::WallTime::now();
   const ros::WallTime snapshot_start = ros::WallTime::now();
@@ -1185,6 +1680,16 @@ void FARMaster::SemanticMapCallBack(const octomap_msgs::OctomapConstPtr& msg) {
     return;
   }
 
+  if (master_params_.use_local_voxel_map) {
+    // The global tree may refresh static evidence and persistent collision
+    // memory, but it never owns current contours. The next fresh local voxel
+    // snapshot atomically rebuilds the graph against both layers.
+    planning_requested_ = true;
+    PublishSeconds(semantic_callback_time_pub_,
+                   ros::WallTime::now() - callback_start);
+    return;
+  }
+
   const ros::WallTime planner_update_start = ros::WallTime::now();
   this->UpdatePlannerCloudsFromSemanticMap();
   PublishSeconds(semantic_update_time_pub_,
@@ -1193,17 +1698,200 @@ void FARMaster::SemanticMapCallBack(const octomap_msgs::OctomapConstPtr& msg) {
                  ros::WallTime::now() - callback_start);
 }
 
+void FARMaster::LocalVoxelMapCallBack(
+    const sensor_msgs::PointCloud2ConstPtr& msg) {
+  if (!master_params_.use_local_voxel_map || !msg) return;
+  if (is_reset_env_) return;
+  if (msg->is_bigendian) {
+    ROS_ERROR_THROTTLE(
+        2.0, "FARMaster: big-endian local voxel PointCloud2 is unsupported.");
+    return;
+  }
+  if (msg->header.stamp.isZero()) {
+    ROS_ERROR_THROTTLE(
+        2.0, "FARMaster: local voxel snapshot has a zero acquisition stamp.");
+    return;
+  }
+  if (!last_local_voxel_stamp_.isZero() &&
+      msg->header.stamp <= last_local_voxel_stamp_) {
+    if (msg->header.stamp < last_local_voxel_stamp_) {
+      const double rewind =
+          (last_local_voxel_stamp_ - msg->header.stamp).toSec();
+      if (master_params_.input_time_rewind_reset_threshold >= 0.0f &&
+          rewind >= master_params_.input_time_rewind_reset_threshold) {
+        ROS_WARN("FARMaster: local semantic-map time rewound by %.3f s; "
+                 "requesting an atomic graph/map reset for the new input epoch.",
+                 rewind);
+        is_reset_env_ = true;
+        return;
+      }
+      ROS_WARN_THROTTLE(
+          2.0, "FARMaster: dropping out-of-order local voxel snapshot "
+               "(%.6f < %.6f).",
+          msg->header.stamp.toSec(), last_local_voxel_stamp_.toSec());
+    }
+    // A latched/timer publication of the same sensor snapshot must not
+    // refresh wall-time freshness or increment Graph observation counters.
+    return;
+  }
+
+  const PointCloudFieldView x_field = FindPointCloudField(*msg, "x");
+  const PointCloudFieldView y_field = FindPointCloudField(*msg, "y");
+  const PointCloudFieldView z_field = FindPointCloudField(*msg, "z");
+  const PointCloudFieldView label_field = FindPointCloudField(*msg, "label");
+  PointCloudFieldView rgb_field = FindPointCloudField(*msg, "rgb");
+  if (!rgb_field.valid) rgb_field = FindPointCloudField(*msg, "rgba");
+  const PointCloudFieldView confidence_field =
+      FindPointCloudField(*msg, "semantic_confidence");
+  PointCloudFieldView cost_field =
+      FindPointCloudField(*msg, "traversability");
+  if (!cost_field.valid) cost_field = FindPointCloudField(*msg, "intensity");
+  if (!x_field.valid || !y_field.valid || !z_field.valid) {
+    ROS_ERROR_THROTTLE(
+        2.0, "FARMaster: local voxel snapshot requires x/y/z fields.");
+    return;
+  }
+  if (!label_field.valid && !rgb_field.valid) {
+    ROS_ERROR_THROTTLE(
+        2.0, "FARMaster: local semantic snapshot requires label or packed "
+             "rgb/rgba for profile classification.");
+    return;
+  }
+
+  tf::StampedTransform cloud_to_world;
+  const bool transform_required = msg->header.frame_id.empty() ||
+      !FARUtil::IsSameFrameID(
+          msg->header.frame_id, master_params_.world_frame);
+  if (msg->header.frame_id.empty()) {
+    ROS_ERROR_THROTTLE(
+        2.0, "FARMaster: local voxel snapshot has an empty frame_id.");
+    return;
+  }
+  if (transform_required) {
+    try {
+      tf_listener_->waitForTransform(
+          master_params_.world_frame, msg->header.frame_id,
+          msg->header.stamp, ros::Duration(0.2));
+      tf_listener_->lookupTransform(
+          master_params_.world_frame, msg->header.frame_id,
+          msg->header.stamp, cloud_to_world);
+    } catch (const tf::TransformException& ex) {
+      ROS_WARN_THROTTLE(
+          2.0, "FARMaster: local voxel TF lookup failed: %s", ex.what());
+      return;
+    }
+  }
+
+  PointCloudPtr static_obstacles(new PointCloud());
+  PointCloudPtr transient_obstacles(new PointCloud());
+  PointCloudPtr terrain_support(new PointCloud());
+  const size_t point_count =
+      static_cast<size_t>(msg->width) * static_cast<size_t>(msg->height);
+  static_obstacles->reserve(point_count / 3 + 1);
+  transient_obstacles->reserve(point_count / 6 + 1);
+  terrain_support->reserve(point_count / 2 + 1);
+  size_t invalid_points = 0;
+
+  for (uint32_t row = 0; row < msg->height; ++row) {
+    for (uint32_t column = 0; column < msg->width; ++column) {
+      const size_t offset = static_cast<size_t>(row) * msg->row_step +
+                            static_cast<size_t>(column) * msg->point_step;
+      if (offset + msg->point_step > msg->data.size()) {
+        ROS_ERROR_THROTTLE(
+            2.0, "FARMaster: malformed local voxel PointCloud2 buffer.");
+        return;
+      }
+      const uint8_t* raw = msg->data.data() + offset;
+      double x = 0.0, y = 0.0, z = 0.0;
+      if (!ReadPointCloudNumber(raw, x_field, x) ||
+          !ReadPointCloudNumber(raw, y_field, y) ||
+          !ReadPointCloudNumber(raw, z_field, z) ||
+          !std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z)) {
+        ++invalid_points;
+        continue;
+      }
+
+      double label_value = 0.0;
+      const bool has_label = ReadPointCloudNumber(
+          raw, label_field, label_value) && std::isfinite(label_value) &&
+          label_value >= 0.0 &&
+          label_value <= std::numeric_limits<uint32_t>::max();
+      const uint32_t label = has_label
+          ? static_cast<uint32_t>(label_value) : 0u;
+      uint32_t rgb_key = 0u;
+      const bool has_rgb = ReadPointCloudRgbKey(raw, rgb_field, rgb_key);
+      double confidence_value = 1.0;
+      if (confidence_field.valid &&
+          (!ReadPointCloudNumber(raw, confidence_field, confidence_value) ||
+           !std::isfinite(confidence_value))) {
+        confidence_value = 0.0;
+      }
+      double cost_value = 0.0;
+      const bool has_cost = ReadPointCloudNumber(
+          raw, cost_field, cost_value) && std::isfinite(cost_value);
+      const LocalVoxelLayer layer = ClassifyLocalVoxel(
+          label, has_label, rgb_key, has_rgb,
+          static_cast<float>(confidence_value), has_cost,
+          static_cast<float>(cost_value), local_voxel_policy_params_);
+      if (layer == LocalVoxelLayer::IGNORE) continue;
+
+      tf::Vector3 position(x, y, z);
+      if (transform_required) position = cloud_to_world * position;
+      PCLPoint point;
+      point.x = position.x();
+      point.y = position.y();
+      point.z = position.z();
+      point.intensity = has_cost ? static_cast<float>(cost_value) : 0.0f;
+      if (layer == LocalVoxelLayer::STATIC_OBSTACLE) {
+        static_obstacles->push_back(point);
+      } else if (layer == LocalVoxelLayer::TRANSIENT_OBSTACLE) {
+        transient_obstacles->push_back(point);
+      } else if (layer == LocalVoxelLayer::TERRAIN_SUPPORT) {
+        terrain_support->push_back(point);
+      }
+    }
+  }
+  FinalizePointCloud(static_obstacles);
+  FinalizePointCloud(transient_obstacles);
+  FinalizePointCloud(terrain_support);
+
+  map_handler_.SetLocalVoxelSnapshot(
+      static_obstacles, transient_obstacles, terrain_support);
+  last_local_voxel_stamp_ = msg->header.stamp;
+  last_local_voxel_receipt_ = ros::WallTime::now();
+  has_local_voxel_snapshot_ = true;
+  if (is_odom_init_) this->UpdatePlannerCloudsFromLocalVoxelMap();
+  ROS_INFO_THROTTLE(
+      2.0, "FAR local voxel snapshot: static=%zu transient=%zu terrain=%zu "
+           "invalid=%zu stamp=%.6f",
+      static_obstacles->size(), transient_obstacles->size(),
+      terrain_support->size(), invalid_points, msg->header.stamp.toSec());
+}
+
 void FARMaster::UpdatePlannerCloudsFromSemanticMap() {
   // The original FAR incremental pipeline now sees the effective static plus
   // dynamic collision view. Dynamic add/remove events enter the changed-point
   // KD-tree, so their contour vertices and affected connections are rebuilt
   // locally instead of becoming permanent global-map structure.
+  this->UpdatePlannerCloudsFromCurrentLayers();
+}
+
+void FARMaster::UpdatePlannerCloudsFromLocalVoxelMap() {
+  this->UpdatePlannerCloudsFromCurrentLayers();
+}
+
+void FARMaster::UpdatePlannerCloudsFromCurrentLayers() {
   map_handler_.GetSurroundObsCloud(FARUtil::surround_obs_cloud_);
   map_handler_.GetCurrentStaticObsCloud(current_static_obs_ptr_);
   map_handler_.GetPersistentStaticObsCloud(persistent_static_obs_ptr_);
   map_handler_.GetCollisionObsCloud(collision_obs_ptr_);
   map_handler_.GetEffectiveDynamicObsCloud(effective_dynamic_obs_ptr_);
-  ContourGraph::SetLocalCollisionCloud(persistent_static_obs_ptr_,
+  *graph_static_collision_obs_ptr_ = *persistent_static_obs_ptr_;
+  if (master_params_.use_local_voxel_map && current_static_obs_ptr_) {
+    *graph_static_collision_obs_ptr_ += *current_static_obs_ptr_;
+  }
+  FinalizePointCloud(graph_static_collision_obs_ptr_);
+  ContourGraph::SetLocalCollisionCloud(graph_static_collision_obs_ptr_,
                                        effective_dynamic_obs_ptr_);
   map_handler_.GetDynamicAddedCloud(dynamic_added_ptr_);
   map_handler_.GetDynamicRemovedCloud(dynamic_removed_ptr_);
@@ -1222,8 +1910,8 @@ void FARMaster::UpdatePlannerCloudsFromSemanticMap() {
                             FARUtil::kNewDecayTime);
   FARUtil::UpdateKdTrees(FARUtil::stack_new_cloud_);
 
-  // A valid semantic snapshot is sufficient to start FAR, including a valid
-  // empty-obstacle scene.
+  // A valid current-obstacle snapshot is sufficient to start FAR, including
+  // a valid empty-obstacle scene.
   is_cloud_init_ = true;
 
   planner_viz_.VizPointCloud(new_PCL_pub_, FARUtil::stack_new_cloud_);
@@ -1279,6 +1967,8 @@ void FARMaster::WaypointCallBack(const geometry_msgs::PointStamped& route_goal) 
 }
 
 void FARMaster::ApplyWorldGoal(const Point3D& goal_p) {
+  commanded_goal_ = goal_p;
+  has_commanded_goal_ = true;
   graph_planner_.UpdateGoal(goal_p);
   // A new destination starts a new search snapshot. Revalidate start edges
   // first, then plan; no previous path or waypoint is reused.
@@ -1491,6 +2181,7 @@ DynamicGraphParams DynamicGraph::dg_params_;
 NodePtrStack DynamicGraph::globalGraphNodes_;
 NodePtrStack DynamicGraph::staticCandidateGraphNodes_;
 NodePtrStack DynamicGraph::dynamicLocalGraphNodes_;
+std::unordered_set<std::size_t> DynamicGraph::staticMainNodeIds_;
 std::size_t  DynamicGraph::id_tracker_;
 std::unordered_map<std::size_t, NavNodePtr> DynamicGraph::idx_node_map_;
 std::unordered_map<NavNodePtr, std::pair<int, std::unordered_set<NavNodePtr>>> DynamicGraph::out_contour_nodes_map_;

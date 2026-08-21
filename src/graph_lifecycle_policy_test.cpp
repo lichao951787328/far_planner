@@ -18,7 +18,6 @@ NavNode MakeNode(const GraphNodeSource source) {
     node.free_direct = NodeFreeDirect::UNKNOW;
     return node;
 }
-
 NavNodePtr MakeNodePtr(const std::size_t id,
                        const GraphNodeSource source) {
     NavNodePtr node = std::make_shared<NavNode>(MakeNode(source));
@@ -92,6 +91,179 @@ TEST(GraphLifecyclePolicy, StaticCandidateNeedsThreeObservations) {
                   5.0f, 12.0f, 15.0f, 3, 3));
     EXPECT_EQ(GraphNodeSource::STATIC_GLOBAL, node.source);
     EXPECT_TRUE(IsGraphNodeSearchEligible(node));
+}
+
+TEST(GraphLifecyclePolicy, StaticCandidateWaitsForPromotionReadiness) {
+    NavNode node = MakeNode(GraphNodeSource::STATIC_CANDIDATE);
+    for (int frame = 0; frame < 3; ++frame) {
+        EXPECT_EQ(GraphLifecycleAction::KEEP,
+                  AdvanceStaticNodeLifecycle(
+                      node, true, StaticNodeEvidence::STATIC_OCCUPIED,
+                      5.0f, 12.0f, 15.0f, 3, 3, false));
+    }
+    EXPECT_EQ(GraphNodeSource::STATIC_CANDIDATE, node.source);
+    EXPECT_EQ(3, node.static_seen_count);
+
+    EXPECT_EQ(GraphLifecycleAction::PROMOTE_STATIC,
+              AdvanceStaticNodeLifecycle(
+                  node, true, StaticNodeEvidence::STATIC_OCCUPIED,
+                  5.0f, 12.0f, 15.0f, 3, 3, true));
+    EXPECT_EQ(GraphNodeSource::STATIC_GLOBAL, node.source);
+}
+
+TEST(GraphLifecyclePolicy, GlobalEvidenceGateRejectsUnknownOrFree) {
+    EXPECT_TRUE(IsStaticPromotionEvidenceReady(
+        StaticNodeEvidence::STATIC_OCCUPIED, true));
+    EXPECT_FALSE(IsStaticPromotionEvidenceReady(
+        StaticNodeEvidence::UNKNOWN, true));
+    EXPECT_FALSE(IsStaticPromotionEvidenceReady(
+        StaticNodeEvidence::EXPLICIT_FREE, true));
+    EXPECT_TRUE(IsStaticPromotionEvidenceReady(
+        StaticNodeEvidence::UNKNOWN, false));
+}
+
+TEST(GraphLifecyclePolicy, ActiveIncidentEdgeMustBeSearchEligible) {
+    NavNodePtr candidate =
+        MakeNodePtr(101, GraphNodeSource::STATIC_CANDIDATE);
+    NavNodePtr neighbor =
+        MakeNodePtr(102, GraphNodeSource::STATIC_GLOBAL);
+    EXPECT_FALSE(HasActiveSearchEligibleIncidentEdge(*candidate));
+
+    ConnectActiveStaticEdge(candidate, neighbor);
+    EXPECT_TRUE(HasActiveSearchEligibleIncidentEdge(*candidate));
+
+    candidate->edge_states[neighbor->id].static_valid = false;
+    neighbor->edge_states[candidate->id].static_valid = false;
+    EXPECT_FALSE(HasActiveSearchEligibleIncidentEdge(*candidate));
+}
+
+TEST(GraphLifecyclePolicy, QueryEdgeCannotPromoteStaticOrphan) {
+    NavNodePtr candidate =
+        MakeNodePtr(103, GraphNodeSource::STATIC_CANDIDATE);
+    NavNodePtr odom = MakeNodePtr(104, GraphNodeSource::ODOM);
+    ConnectActiveStaticEdge(candidate, odom);
+
+    EXPECT_TRUE(IsGraphEdgeSearchEligible(*candidate, *odom));
+    EXPECT_FALSE(HasActiveSearchEligibleIncidentEdge(*candidate));
+}
+
+TEST(GraphLifecyclePolicy, OrdinaryConcaveIsNotPersistentRoutingVertex) {
+    NavNode concave = MakeNode(GraphNodeSource::STATIC_CANDIDATE);
+    concave.free_direct = NodeFreeDirect::CONCAVE;
+    EXPECT_FALSE(IsPersistentStaticRoutingVertex(concave));
+
+    NavNode convex = concave;
+    convex.free_direct = NodeFreeDirect::CONVEX;
+    EXPECT_TRUE(IsPersistentStaticRoutingVertex(convex));
+
+    NavNode pillar = concave;
+    pillar.free_direct = NodeFreeDirect::PILLAR;
+    EXPECT_TRUE(IsPersistentStaticRoutingVertex(pillar));
+
+    NavNode explicit_boundary = concave;
+    explicit_boundary.is_boundary = true;
+    EXPECT_TRUE(IsPersistentStaticRoutingVertex(explicit_boundary));
+}
+
+TEST(GraphLifecyclePolicy, StaticMainComponentPathCannotBorrowQueryOrDynamicNode) {
+    NavNodePtr candidate =
+        MakeNodePtr(111, GraphNodeSource::STATIC_CANDIDATE);
+    NavNodePtr confirmed =
+        MakeNodePtr(112, GraphNodeSource::STATIC_GLOBAL);
+    NavNodePtr odom = MakeNodePtr(113, GraphNodeSource::ODOM);
+    NavNodePtr dynamic =
+        MakeNodePtr(114, GraphNodeSource::DYNAMIC_LOCAL);
+    candidate->free_direct = NodeFreeDirect::CONVEX;
+    confirmed->free_direct = NodeFreeDirect::CONVEX;
+    dynamic->free_direct = NodeFreeDirect::CONVEX;
+    std::unordered_set<std::size_t> anchors{confirmed->id};
+
+    ConnectActiveStaticEdge(candidate, odom);
+    ConnectActiveStaticEdge(odom, confirmed);
+    EXPECT_FALSE(HasActiveStaticRoutingPathToAny(candidate, anchors));
+
+    ConnectActiveStaticEdge(candidate, dynamic);
+    ConnectActiveStaticEdge(dynamic, confirmed);
+    EXPECT_FALSE(HasActiveStaticRoutingPathToAny(candidate, anchors));
+
+    ConnectActiveStaticEdge(candidate, confirmed);
+    EXPECT_TRUE(HasActiveStaticRoutingPathToAny(candidate, anchors));
+}
+
+TEST(GraphLifecyclePolicy, PromotionTransactionCannotBorrowUnreadyCandidate) {
+    NavNodePtr confirmed =
+        MakeNodePtr(115, GraphNodeSource::STATIC_GLOBAL);
+    NavNodePtr unready_bridge =
+        MakeNodePtr(116, GraphNodeSource::STATIC_CANDIDATE);
+    NavNodePtr ready_leaf =
+        MakeNodePtr(117, GraphNodeSource::STATIC_CANDIDATE);
+    confirmed->free_direct = NodeFreeDirect::CONVEX;
+    unready_bridge->free_direct = NodeFreeDirect::CONVEX;
+    ready_leaf->free_direct = NodeFreeDirect::CONVEX;
+    ConnectActiveStaticEdge(confirmed, unready_bridge);
+    ConnectActiveStaticEdge(unready_bridge, ready_leaf);
+
+    const auto without_bridge = ActiveTransactionalStaticRoutingNodeIds(
+        {confirmed}, {ready_leaf->id});
+    EXPECT_TRUE(without_bridge.count(confirmed->id));
+    EXPECT_FALSE(without_bridge.count(unready_bridge->id));
+    EXPECT_FALSE(without_bridge.count(ready_leaf->id));
+
+    const auto atomic_chain = ActiveTransactionalStaticRoutingNodeIds(
+        {confirmed}, {unready_bridge->id, ready_leaf->id});
+    EXPECT_TRUE(atomic_chain.count(confirmed->id));
+    EXPECT_TRUE(atomic_chain.count(unready_bridge->id));
+    EXPECT_TRUE(atomic_chain.count(ready_leaf->id));
+}
+
+TEST(GraphLifecyclePolicy,
+     PersistentMainPromotionExpansionDoesNotRequireCurrentOdomEdge) {
+    NavNodePtr main = MakeNodePtr(121, GraphNodeSource::STATIC_GLOBAL);
+    NavNodePtr detached = MakeNodePtr(122, GraphNodeSource::STATIC_GLOBAL);
+    NavNodePtr attached_candidate =
+        MakeNodePtr(123, GraphNodeSource::STATIC_CANDIDATE);
+    NavNodePtr detached_candidate =
+        MakeNodePtr(124, GraphNodeSource::STATIC_CANDIDATE);
+    main->free_direct = NodeFreeDirect::CONVEX;
+    detached->free_direct = NodeFreeDirect::CONVEX;
+    attached_candidate->free_direct = NodeFreeDirect::CONVEX;
+    detached_candidate->free_direct = NodeFreeDirect::CONVEX;
+    ConnectActiveStaticEdge(main, attached_candidate);
+    ConnectActiveStaticEdge(detached, detached_candidate);
+
+    const std::vector<NavNodePtr> confirmed{main, detached};
+    const std::unordered_set<std::size_t> persistent_main_ids{main->id};
+    const std::unordered_set<std::size_t> ready_candidates{
+        attached_candidate->id, detached_candidate->id};
+    const auto transaction = PersistentMainTransactionNodeIds(
+        confirmed, persistent_main_ids, ready_candidates);
+
+    EXPECT_TRUE(transaction.count(main->id));
+    EXPECT_TRUE(transaction.count(attached_candidate->id));
+    EXPECT_FALSE(transaction.count(detached->id));
+    EXPECT_FALSE(transaction.count(detached_candidate->id));
+}
+
+TEST(GraphLifecyclePolicy, PublishedReachabilityCannotBorrowFilteredHistory) {
+    NavNodePtr odom = MakeNodePtr(118, GraphNodeSource::ODOM);
+    NavNodePtr detached_history =
+        MakeNodePtr(119, GraphNodeSource::STATIC_GLOBAL);
+    NavNodePtr local_leaf =
+        MakeNodePtr(120, GraphNodeSource::STATIC_CANDIDATE);
+    detached_history->free_direct = NodeFreeDirect::CONVEX;
+    local_leaf->free_direct = NodeFreeDirect::CONVEX;
+    ConnectActiveStaticEdge(odom, detached_history);
+    ConnectActiveStaticEdge(detached_history, local_leaf);
+
+    const auto full = ActiveReachableNodeIds(odom, false);
+    ASSERT_TRUE(full.count(local_leaf->id));
+
+    const std::unordered_set<std::size_t> published_ids{
+        odom->id, local_leaf->id};
+    const auto published =
+        ActiveReachableNodeIdsWithin(odom, published_ids);
+    EXPECT_TRUE(published.count(odom->id));
+    EXPECT_FALSE(published.count(local_leaf->id));
 }
 
 TEST(GraphLifecyclePolicy, CroppedContourEndpointNeverBecomesGlobalHistory) {
@@ -384,6 +556,54 @@ TEST(GraphLifecyclePolicy, OneBadGeometryFrameBlocksButDoesNotEraseHistory) {
     ApplyContourStaticValidationObservation(state, true);
     EXPECT_TRUE(state.IsActive());
     EXPECT_TRUE(state.has_clearance_geometry);
+}
+
+TEST(GraphLifecyclePolicy, VisibilityFailureBlocksImmediatelyAndDeletesAfterThree) {
+    GraphEdgeState state;
+    state.source = GraphEdgeSource::STATIC_VISIBILITY;
+    state.validation_mode = EdgeValidationMode::VISIBILITY;
+
+    EXPECT_FALSE(ApplyVisibilityStaticValidationObservation(
+        state, false, 3));
+    EXPECT_FALSE(state.IsActive());
+    EXPECT_EQ(1, state.static_visibility_misses);
+    EXPECT_FALSE(ApplyVisibilityStaticValidationObservation(
+        state, false, 3));
+    EXPECT_EQ(2, state.static_visibility_misses);
+    EXPECT_TRUE(ApplyVisibilityStaticValidationObservation(
+        state, false, 3));
+    EXPECT_EQ(3, state.static_visibility_misses);
+}
+
+TEST(GraphLifecyclePolicy, VisibilityGoodFrameRestoresRetainedEdge) {
+    GraphEdgeState state;
+    ApplyVisibilityStaticValidationObservation(state, false, 3);
+    ASSERT_FALSE(state.IsActive());
+    EXPECT_FALSE(ApplyVisibilityStaticValidationObservation(
+        state, true, 3));
+    EXPECT_TRUE(state.IsActive());
+    EXPECT_EQ(0, state.static_visibility_misses);
+}
+
+TEST(GraphLifecyclePolicy, VisibilityDebounceAppliesOnlyToStaticGeometry) {
+    EXPECT_TRUE(IsStaticGeometryRejectReason(
+        EdgeRejectReason::STATIC_CLOUD_BLOCKED));
+    EXPECT_TRUE(IsStaticGeometryRejectReason(
+        EdgeRejectReason::POLYGON_BLOCKED));
+    EXPECT_TRUE(IsStaticGeometryRejectReason(
+        EdgeRejectReason::TERRAIN_BLOCKED));
+    EXPECT_FALSE(IsStaticGeometryRejectReason(
+        EdgeRejectReason::DYNAMIC_CLOUD_BLOCKED));
+    EXPECT_FALSE(IsStaticGeometryRejectReason(
+        EdgeRejectReason::DIRECTION_SPARSIFIED));
+    EXPECT_FALSE(IsStaticGeometryRejectReason(
+        EdgeRejectReason::VOTE_PENDING));
+    EXPECT_TRUE(IsRecoverableStaticVisibilitySelectionReason(
+        EdgeRejectReason::VOTE_PENDING));
+    EXPECT_TRUE(IsRecoverableStaticVisibilitySelectionReason(
+        EdgeRejectReason::DIRECTION_SPARSIFIED));
+    EXPECT_FALSE(IsRecoverableStaticVisibilitySelectionReason(
+        EdgeRejectReason::STATIC_CLOUD_BLOCKED));
 }
 
 TEST(GraphLifecyclePolicy, ContourEdgeRemovalNeedsConfirmedStaticBypass) {

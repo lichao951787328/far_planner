@@ -18,6 +18,7 @@ void DPVisualizer::Init(const ros::NodeHandle& nh) {
     // Rviz Publisher
     viz_node_pub_    = nh_.advertise<Marker>("viz_node_topic", 5);
     viz_path_pub_    = nh_.advertise<Marker>("viz_path_topic", 5);
+    nav_path_pub_    = nh_.advertise<nav_msgs::Path>("far_global_path", 5);
     viz_poly_pub_    = nh_.advertise<MarkerArray>("viz_poly_topic", 5);
     viz_graph_pub_   = nh_.advertise<MarkerArray>("viz_graph_topic", 5);
     viz_contour_pub_ = nh_.advertise<MarkerArray>("viz_contour_topic", 5);
@@ -25,6 +26,8 @@ void DPVisualizer::Init(const ros::NodeHandle& nh) {
     viz_view_extend  = nh_.advertise<MarkerArray>("viz_viewpoint_extend_topic", 5);
     viz_static_global_pub_ =
         nh_.advertise<MarkerArray>("/viz_static_global_graph", 2);
+    viz_static_main_pub_ =
+        nh_.advertise<MarkerArray>("/viz_static_main_graph", 2);
     viz_dynamic_local_pub_ =
         nh_.advertise<MarkerArray>("/viz_dynamic_local_graph", 2);
     viz_search_graph_pub_ =
@@ -32,7 +35,6 @@ void DPVisualizer::Init(const ros::NodeHandle& nh) {
     viz_dynamic_blocked_pub_ =
         nh_.advertise<MarkerArray>("/viz_dynamic_blocked_edges", 2);
 }
-
 void DPVisualizer::VizNodes(const NodePtrStack& node_stack, 
                             const std::string& ns,
                             const VizColor& color,
@@ -54,8 +56,8 @@ void DPVisualizer::VizNodes(const NodePtrStack& node_stack,
 }
 
 void DPVisualizer::VizSemanticGraphLayers(
-    const NodePtrStack& static_global, const NodePtrStack& dynamic_local,
-    const NodePtrStack& search_graph) {
+    const NodePtrStack& static_global, const NodePtrStack& static_main,
+    const NodePtrStack& dynamic_local, const NodePtrStack& search_graph) {
     const auto publish_layer = [this](
         const NodePtrStack& nodes, const ros::Publisher& publisher,
         const std::string& ns, const VizColor color,
@@ -96,6 +98,8 @@ void DPVisualizer::VizSemanticGraphLayers(
 
     publish_layer(static_global, viz_static_global_pub_, "static_global",
                   VizColor::BLUE, false);
+    publish_layer(static_main, viz_static_main_pub_, "static_main",
+                  VizColor::EMERALD, true);
     publish_layer(dynamic_local, viz_dynamic_local_pub_, "dynamic_local",
                   VizColor::MAGNA, false);
     publish_layer(search_graph, viz_search_graph_pub_, "search_graph",
@@ -149,14 +153,38 @@ void DPVisualizer::VizPoint3D(const Point3D& point,
     viz_node_pub_.publish(node_marker);
 }
 
-void DPVisualizer::VizPath(const NodePtrStack& global_path, const bool& is_free_nav) {
+void DPVisualizer::VizPath(const NodePtrStack& global_path,
+                           const bool& is_free_nav,
+                           const Point3D* commanded_goal) {
     Marker path_marker;
     path_marker.type = Marker::LINE_STRIP;
     const VizColor color = is_free_nav ? VizColor::GREEN : VizColor::BLUE;
     this->SetMarker(color, "global_path", 0.75f, 0.9f, path_marker);
+
+    nav_msgs::Path path_message;
+    path_message.header.frame_id = FARUtil::worldFrameId;
+    path_message.header.stamp = ros::Time::now();
+    const auto append_path_point = [&path_marker, &path_message](
+        const Point3D& point) {
+        const geometry_msgs::Point message_point =
+            FARUtil::Point3DToGeoMsgPoint(point);
+        if (!path_marker.points.empty()) {
+            const geometry_msgs::Point& previous = path_marker.points.back();
+            const double dx = previous.x - message_point.x;
+            const double dy = previous.y - message_point.y;
+            const double dz = previous.z - message_point.z;
+            if (dx * dx + dy * dy + dz * dz <= 1e-10) return;
+        }
+        path_marker.points.push_back(message_point);
+        geometry_msgs::PoseStamped pose;
+        pose.header = path_message.header;
+        pose.pose.position = message_point;
+        pose.pose.orientation.w = 1.0;
+        path_message.poses.push_back(pose);
+    };
+
     if (!global_path.empty() && global_path.front()) {
-        path_marker.points.push_back(FARUtil::Point3DToGeoMsgPoint(
-            global_path.front()->position));
+        append_path_point(global_path.front()->position);
     }
     for (std::size_t index = 1; index < global_path.size(); ++index) {
         const NavNodePtr& previous = global_path[index - 1];
@@ -167,15 +195,20 @@ void DPVisualizer::VizPath(const NodePtrStack& global_path, const bool& is_free_
             state->second.validation_mode ==
                 EdgeValidationMode::CONTOUR_FOLLOW &&
             state->second.has_clearance_geometry) {
-            path_marker.points.push_back(FARUtil::Point3DToGeoMsgPoint(
-                state->second.route_start));
-            path_marker.points.push_back(FARUtil::Point3DToGeoMsgPoint(
-                state->second.route_end));
+            append_path_point(state->second.route_start);
+            append_path_point(state->second.route_end);
         }
-        path_marker.points.push_back(
-            FARUtil::Point3DToGeoMsgPoint(current->position));
+        append_path_point(current->position);
+    }
+    // Preserve the exact operator command as the terminal pose.  Normally it
+    // equals the Graph goal.  If FAR temporarily adjusted the goal onto nearby
+    // terrain, keeping both poses makes that distinction observable to tests
+    // and downstream consumers instead of silently changing the command.
+    if (commanded_goal && !global_path.empty()) {
+        append_path_point(*commanded_goal);
     }
     viz_path_pub_.publish(path_marker);
+    nav_path_pub_.publish(path_message);
 }
 
 void DPVisualizer::VizViewpointExtend(const NavNodePtr& ori_nav_ptr, const Point3D& extend_point) {
@@ -319,8 +352,16 @@ void DPVisualizer::VizGraph(const NodePtrStack& graph) {
     Marker nav_node_marker, unfinal_node_marker, near_node_marker, covered_node_marker, internav_node_marker, frontier_node_marker,
            edge_marker, visual_edge_marker, contour_edge_marker, free_edge_marker, odom_edge_marker, goal_edge_marker, traj_edge_marker,
            corner_surf_marker, contour_align_marker, corner_helper_marker, boundary_node_marker, boundary_edge_marker,
-           contour_clearance_marker, contour_static_reject_marker,
-           contour_dynamic_reject_marker, contour_vote_pending_marker;
+           contour_clearance_marker, validated_route_marker,
+           endpoint_excluded_route_marker, contour_static_reject_marker,
+           contour_dynamic_reject_marker, contour_vote_pending_marker,
+           visibility_direction_reject_marker,
+           visibility_sparsified_marker,
+           visibility_static_reject_marker,
+           visibility_dynamic_reject_marker,
+           visibility_polygon_reject_marker,
+           visibility_terrain_reject_marker,
+           visibility_vote_pending_marker;
     nav_node_marker.type       = Marker::SPHERE_LIST;
     unfinal_node_marker.type   = Marker::SPHERE_LIST;
     near_node_marker.type      = Marker::SPHERE_LIST;
@@ -338,9 +379,18 @@ void DPVisualizer::VizGraph(const NodePtrStack& graph) {
     traj_edge_marker.type      = Marker::LINE_LIST;
     boundary_edge_marker.type  = Marker::LINE_LIST;
     contour_clearance_marker.type = Marker::LINE_LIST;
+    validated_route_marker.type = Marker::LINE_LIST;
+    endpoint_excluded_route_marker.type = Marker::LINE_LIST;
     contour_static_reject_marker.type = Marker::LINE_LIST;
     contour_dynamic_reject_marker.type = Marker::LINE_LIST;
     contour_vote_pending_marker.type = Marker::LINE_LIST;
+    visibility_direction_reject_marker.type = Marker::LINE_LIST;
+    visibility_sparsified_marker.type = Marker::LINE_LIST;
+    visibility_static_reject_marker.type = Marker::LINE_LIST;
+    visibility_dynamic_reject_marker.type = Marker::LINE_LIST;
+    visibility_polygon_reject_marker.type = Marker::LINE_LIST;
+    visibility_terrain_reject_marker.type = Marker::LINE_LIST;
+    visibility_vote_pending_marker.type = Marker::LINE_LIST;
     corner_surf_marker.type    = Marker::LINE_LIST;
     corner_helper_marker.type  = Marker::CUBE_LIST;
     this->SetMarker(VizColor::WHITE,   "global_vertex",     0.5f,  0.5f,  nav_node_marker);
@@ -366,12 +416,31 @@ void DPVisualizer::VizGraph(const NodePtrStack& graph) {
     this->SetMarker(VizColor::YELLOW,  "vertices_matches",  0.1f,  0.75f, contour_align_marker);
     this->SetMarker(VizColor::GREEN, "contour_clearance_edge", 0.28f,
                     0.95f, contour_clearance_marker);
+    this->SetMarker(VizColor::PURPLE, "validated_route_edge", 0.18f,
+                    0.75f, validated_route_marker);
+    this->SetMarker(VizColor::PURPLE,
+                    "validated_route_edge_endpoint_excluded", 0.12f,
+                    0.45f, endpoint_excluded_route_marker);
     this->SetMarker(VizColor::ORANGE, "contour_static_rejected", 0.18f,
                     0.85f, contour_static_reject_marker);
     this->SetMarker(VizColor::RED, "contour_dynamic_blocked", 0.22f,
                     0.90f, contour_dynamic_reject_marker);
     this->SetMarker(VizColor::WHITE, "contour_vote_pending", 0.10f,
                     0.35f, contour_vote_pending_marker);
+    this->SetMarker(VizColor::YELLOW, "visibility_direction_rejected", 0.10f,
+                    0.60f, visibility_direction_reject_marker);
+    this->SetMarker(VizColor::WHITE, "visibility_direction_sparsified", 0.10f,
+                    0.45f, visibility_sparsified_marker);
+    this->SetMarker(VizColor::ORANGE, "visibility_static_rejected", 0.14f,
+                    0.75f, visibility_static_reject_marker);
+    this->SetMarker(VizColor::RED, "visibility_dynamic_rejected", 0.16f,
+                    0.80f, visibility_dynamic_reject_marker);
+    this->SetMarker(VizColor::PURPLE, "visibility_polygon_rejected", 0.12f,
+                    0.65f, visibility_polygon_reject_marker);
+    this->SetMarker(VizColor::BLUE, "visibility_terrain_rejected", 0.12f,
+                    0.65f, visibility_terrain_reject_marker);
+    this->SetMarker(VizColor::WHITE, "visibility_vote_pending", 0.08f,
+                    0.30f, visibility_vote_pending_marker);
     /* Lambda Function */
     auto Draw_Contour_Align = [&](const NavNodePtr& node_ptr) {
         if (node_ptr->is_odom || !node_ptr->is_contour_match) return;
@@ -397,6 +466,23 @@ void DPVisualizer::VizGraph(const NodePtrStack& graph) {
                 node_ptr->invalid_boundary.find(cnode->id) != node_ptr->invalid_boundary.end()) 
             {
                 continue;
+            }
+            const auto state = node_ptr->edge_states.find(cnode->id);
+            if (node_ptr->id < cnode->id &&
+                state != node_ptr->edge_states.end() &&
+                state->second.IsActive() &&
+                state->second.has_clearance_geometry) {
+                Marker* route_marker = &endpoint_excluded_route_marker;
+                if (state->second.validation_mode ==
+                        EdgeValidationMode::CONTOUR_FOLLOW ||
+                    state->second.source == GraphEdgeSource::ODOM_CONNECT ||
+                    state->second.source == GraphEdgeSource::GOAL_CONNECT) {
+                    route_marker = &validated_route_marker;
+                }
+                route_marker->points.push_back(
+                    FARUtil::Point3DToGeoMsgPoint(state->second.route_start));
+                route_marker->points.push_back(
+                    FARUtil::Point3DToGeoMsgPoint(state->second.route_end));
             }
             p2 = FARUtil::Point3DToGeoMsgPoint(cnode->position);
             edge_marker.points.push_back(p1);
@@ -515,7 +601,31 @@ void DPVisualizer::VizGraph(const NodePtrStack& graph) {
     for (const auto& diagnostic :
          DynamicGraph::GetContourEdgeDiagnostics()) {
         Marker* marker = &contour_static_reject_marker;
-        if (diagnostic.reason == EdgeRejectReason::DYNAMIC_CLOUD_BLOCKED) {
+        if (diagnostic.mode == EdgeValidationMode::VISIBILITY) {
+            switch (diagnostic.reason) {
+                case EdgeRejectReason::DIRECTION_REJECTED:
+                    marker = &visibility_direction_reject_marker;
+                    break;
+                case EdgeRejectReason::DIRECTION_SPARSIFIED:
+                    marker = &visibility_sparsified_marker;
+                    break;
+                case EdgeRejectReason::STATIC_CLOUD_BLOCKED:
+                    marker = &visibility_static_reject_marker;
+                    break;
+                case EdgeRejectReason::DYNAMIC_CLOUD_BLOCKED:
+                    marker = &visibility_dynamic_reject_marker;
+                    break;
+                case EdgeRejectReason::TERRAIN_BLOCKED:
+                    marker = &visibility_terrain_reject_marker;
+                    break;
+                case EdgeRejectReason::VOTE_PENDING:
+                    marker = &visibility_vote_pending_marker;
+                    break;
+                default:
+                    marker = &visibility_polygon_reject_marker;
+                    break;
+            }
+        } else if (diagnostic.reason == EdgeRejectReason::DYNAMIC_CLOUD_BLOCKED) {
             marker = &contour_dynamic_reject_marker;
         } else if (diagnostic.reason == EdgeRejectReason::VOTE_PENDING) {
             marker = &contour_vote_pending_marker;
@@ -538,9 +648,18 @@ void DPVisualizer::VizGraph(const NodePtrStack& graph) {
     graph_marker_array.markers.push_back(goal_edge_marker);
     graph_marker_array.markers.push_back(contour_edge_marker);
     graph_marker_array.markers.push_back(contour_clearance_marker);
+    graph_marker_array.markers.push_back(validated_route_marker);
+    graph_marker_array.markers.push_back(endpoint_excluded_route_marker);
     graph_marker_array.markers.push_back(contour_static_reject_marker);
     graph_marker_array.markers.push_back(contour_dynamic_reject_marker);
     graph_marker_array.markers.push_back(contour_vote_pending_marker);
+    graph_marker_array.markers.push_back(visibility_direction_reject_marker);
+    graph_marker_array.markers.push_back(visibility_sparsified_marker);
+    graph_marker_array.markers.push_back(visibility_static_reject_marker);
+    graph_marker_array.markers.push_back(visibility_dynamic_reject_marker);
+    graph_marker_array.markers.push_back(visibility_polygon_reject_marker);
+    graph_marker_array.markers.push_back(visibility_terrain_reject_marker);
+    graph_marker_array.markers.push_back(visibility_vote_pending_marker);
     graph_marker_array.markers.push_back(boundary_edge_marker);
     graph_marker_array.markers.push_back(odom_edge_marker);
     graph_marker_array.markers.push_back(traj_edge_marker);

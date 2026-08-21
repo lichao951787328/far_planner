@@ -17,7 +17,9 @@ is_pub_boundary                         : false
 is_debug_output                         : false
 is_attempt_autoswitch                   : true  # Auto switch to attemptable navigation
 world_frame                             : map
-semantic_map_topic                      : octomap_full
+input_mode                              : global_semantic_compat
+semantic_profile                       : matterport_legacy
+global_static_map_topic                 : /octomap_full
 odom_timeout                            : 3.0   # seconds; tolerates a slow graph-update cycle
 semantic_map_timeout                    : 3.0   # seconds; <= 0 disables the check
 odom_connection_update_distance         : 0.2   # Unit: meter
@@ -74,6 +76,14 @@ Graph/dynamic_position_alpha            : 0.65
 Graph/static_confirm_frames             : 3
 Graph/static_remove_frames              : 3
 Graph/static_topology_remove_frames     : 5       # Replacement is committed only after stable successor topology passes connectivity protection
+Graph/static_visibility_remove_frames   : 3
+Graph/static_duplicate_radius           : 0.5
+Graph/static_promotion_requires_finalized: true
+Graph/static_promotion_requires_active_edge: true
+Graph/static_promotion_requires_main_component: true
+# Compatibility mode has no independent global confirmation stream.
+Graph/static_promotion_requires_global_evidence: false
+Graph/diagnostic_near_pair_radius       : 0.0
 
 ContourGraph/projection_min             : 0.15
 ContourGraph/projection_step            : 0.075

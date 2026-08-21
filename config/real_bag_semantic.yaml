@@ -1,0 +1,57 @@
+# Recorded-data profile. Load after default.yaml; only source-specific values
+# live here so graph policy stays identical between Gazebo and rosbag runs.
+
+world_frame                             : map_start
+input_mode                              : local_semantic_with_global_static
+semantic_profile                       : cityscapes_recorded
+global_static_map_topic                 : /octomap_full
+local_semantic_map_topic                : /local_3d_semantic_voxel_map/voxel_cloud
+local_semantic_map_timeout              : 1.0
+enable_goal_recording                   : false
+
+contour_grid_resolution                 : 0.2
+sensor_range                            : 9.0
+terrain_range                           : 9.0
+MapHandler/semantic_local_window_radius : 9.0
+MapHandler/local_planner_radius         : 9.0
+MapHandler/local_voxel_resolution       : 0.10
+MapHandler/local_voxel_min_semantic_confidence: 0.55
+MapHandler/local_voxel_obstacle_cost_threshold: 0.60
+
+# A recorded-data corner is persistent only after it is mature, connected to
+# the persistent main component, and confirmed by the global static map.
+Graph/static_confirm_frames             : 5
+Graph/static_promotion_requires_finalized: true
+Graph/static_promotion_requires_active_edge: true
+Graph/static_promotion_requires_main_component: true
+Graph/static_promotion_requires_global_evidence: true
+Graph/static_visibility_remove_frames   : 3
+Graph/static_duplicate_radius           : 0.4
+Graph/diagnostic_near_pair_radius       : 3.0
+
+# One canonical table drives both local PointCloud2 label/RGB classification
+# and SemanticOcTree RGB classification. Dynamic labels never enter the
+# persistent layer, even when their traversability cost is high.
+MapHandler/obstacle_groups:
+  - {name: building,      label: 2, rgb: [70, 70, 70]}
+  - {name: wall,          label: 3, rgb: [102, 102, 156]}
+  - {name: fence,         label: 4, rgb: [190, 153, 153]}
+  - {name: pole,          label: 5, rgb: [153, 153, 153]}
+  - {name: traffic_light, label: 6, rgb: [250, 170, 30]}
+  - {name: traffic_sign,  label: 7, rgb: [220, 220, 0]}
+  - {name: vegetation,    label: 8, rgb: [107, 142, 35]}
+
+MapHandler/terrain_support_groups:
+  - {name: road,     label: 0, rgb: [128, 64, 128]}
+  - {name: sidewalk, label: 1, rgb: [244, 35, 232]}
+  - {name: terrain,  label: 9, rgb: [152, 251, 152]}
+
+MapHandler/dynamic_obstacle_groups:
+  - {name: person,     label: 11, rgb: [220, 20, 60]}
+  - {name: rider,      label: 12, rgb: [255, 0, 0]}
+  - {name: car,        label: 13, rgb: [0, 0, 142]}
+  - {name: truck,      label: 14, rgb: [0, 0, 70]}
+  - {name: bus,        label: 15, rgb: [0, 60, 100]}
+  - {name: train,      label: 16, rgb: [0, 80, 100]}
+  - {name: motorcycle, label: 17, rgb: [0, 0, 230]}
+  - {name: bicycle,    label: 18, rgb: [119, 11, 32]}

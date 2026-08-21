@@ -20,6 +20,9 @@ struct SemanticClassGroup {
         : name(group_name), rgb_key(key) {}
     std::string name;
     uint32_t rgb_key = 0;
+    // Optional local-map labels belonging to the same canonical role. Gazebo
+    // profiles use packed RGB labels; recorded-data profiles use integer IDs.
+    std::vector<uint32_t> labels;
 };
 
 struct SemanticMapParams {
@@ -30,7 +33,14 @@ struct SemanticMapParams {
     float local_planner_radius = 5.0f;
     float local_planner_resolution = 0.2f;
     float local_planner_obstacle_intensity = 200.0f;
-    bool  use_top1_only = true;
+    // When enabled, current contour/terrain geometry is supplied by an
+    // independent high-resolution, time-decaying voxel snapshot. The
+    // SemanticOcTree then remains only confirmed global static evidence.
+    bool  use_local_voxel_map = false;
+    float local_voxel_resolution = 0.10f;
+    bool  use_top1_only = true;  // Multi-class output is not implemented.
+    // Normalized SemanticOcTree top-1 probability required for classification.
+    // A rejected occupied voxel is UNKNOWN, including for static-clearance evidence.
     float min_semantic_prob = 0.55f;
 };
 
@@ -67,6 +77,10 @@ public:
     // 仅在消息被成功验证并替换当前快照时返回 true。
     bool SetSemanticOctomap(const octomap_msgs::OctomapConstPtr& msg);
     bool HasSemanticMap() const { return has_semantic_map_; }
+    /** Replace all current local layers atomically from one voxel snapshot. */
+    void SetLocalVoxelSnapshot(const PointCloudPtr& static_obstacles,
+                               const PointCloudPtr& transient_obstacles,
+                               const PointCloudPtr& terrain_support);
     void SetMapOrigin(const Point3D& robot_pos);
 
     void UpdateRobotPosition(const Point3D& odom_pos);
@@ -137,10 +151,10 @@ public:
     void UpdateFreeCloudGrid(const PointCloudPtr& freeCloudIn);
     void UpdateTerrainHeightGrid(const PointCloudPtr& freeCloudIn, const PointCloudPtr& terrainHeightOut);
 
-    /** Effective local obstacle view used by contour extraction and Graph updates.
-     *  Includes persistent static semantics and dynamic obstacles from the
-     *  latest local snapshot; every addition/removal also enters the
-     *  incremental changed-obstacle pipeline.
+    /** Effective current obstacle view used only by contour extraction.
+     *  It contains current local static and transient obstacles, never the
+     *  historical global collision cache. Every current-layer change also
+     *  enters the incremental changed-obstacle pipeline.
      */
     void GetSurroundObsCloud(const PointCloudPtr& obsCloudOut);
     /** Static obstacle voxels in the current semantic local window. */
@@ -161,9 +175,9 @@ public:
     StaticNodeEvidence QueryStaticNodeEvidence(const Point3D& point) const;
     /** Current static obstacles plus dynamic obstacles in the latest local snapshot. */
     void GetCollisionObsCloud(const PointCloudPtr& obsCloudOut) const;
-    /** Dynamic obstacles currently reported occupied by the semantic octree. */
+    /** Transient obstacles in the current local snapshot. */
     void GetCurrentDynamicObsCloud(const PointCloudPtr& obsCloudOut) const;
-    /** Dynamic obstacles in the latest local semantic-map snapshot. */
+    /** Effective transient obstacles in the latest current-layer snapshot. */
     void GetEffectiveDynamicObsCloud(const PointCloudPtr& obsCloudOut) const;
     /** Dense 2.5D static collision layer consumed by the trajectory local planner. */
     void GetLocalPlannerStaticObsCloud(const PointCloudPtr& cloudOut) const;
@@ -210,7 +224,9 @@ public:
 
 private:
     void RefreshLocalTerrainSupportOctomap();
-    void UpdatePersistentStaticObstacleLayer();
+    void RefreshConfirmedGlobalStaticOctomap();
+    void UpdatePersistentStaticObstacleLayer(
+        const PointCloudPtr& current_static, float resolution);
     StaticNodeEvidence QueryStaticTreeEvidence(const Point3D& point) const;
     void BuildLocalPlannerObstacleCloud(const PointCloudPtr& source,
                                         const PointCloudPtr& cloudOut) const;
@@ -225,6 +241,10 @@ private:
     std::vector<SemanticClassGroup> dynamic_obstacle_groups_;
     static std::shared_ptr<octomap::OcTree> local_terrain_support_octree_;
     PointCloudPtr semantic_obs_cloud_;
+    // Current confirmed-static window extracted only from SemanticOcTree.
+    // It is intentionally separate from semantic_obs_cloud_, which becomes
+    // the high-resolution local static layer in dual-input mode.
+    PointCloudPtr confirmed_global_static_cloud_;
     PointCloudPtr persistent_static_obs_cloud_;
     PointCloudPtr semantic_terrain_support_cloud_;
     PointCloudPtr current_dynamic_obs_cloud_;

@@ -144,7 +144,9 @@ void ContourGraph::SetLocalCollisionCloud(
 // 全局检查时，才去看 global_contour_。
 // 所以如果当前局部轮廓和历史全局轮廓有明显差异，代码不会把它们“拉齐”，而是把不一致保留下来，变成匹配失败、未匹配轮廓、或 inactive 轮廓。
 // 第三层是“区分轮廓内部还是外部，而且这个判断是显式存在的”。在 UpdateContourGraph 里，每个多边形都会计算 poly_ptr->is_robot_inside = PointInsideAPoly(...)。后面 UpdateOdomFreePosition 还会根据机器人是否在多边形内部，去找一个“外移后的 free 位置”。另外在可连通性检查里，is_robot_inside 会参与判断一条边是否跨越了“机器人所在侧”和“非机器人所在侧”的轮廓。也就是说，这里确实区分了轮廓内外，但它不是把两个轮廓系统做整体配准，而是用“当前机器人处于多边形内/外”和“边是否穿过轮廓”来做可达性约束。
-void ContourGraph::MatchContourWithNavGraph(const NodePtrStack& global_nodes, const NodePtrStack& near_nodes, CTNodeStack& new_convex_vertices) {
+void ContourGraph::MatchContourWithNavGraph(
+    const NodePtrStack& global_nodes, const NodePtrStack& near_nodes,
+    CTNodeStack& new_convex_vertices, const float static_duplicate_radius) {
     for (const auto& node_ptr : global_nodes) {
         node_ptr->is_contour_match = false;
         node_ptr->ctnode = NULL;
@@ -281,16 +283,96 @@ void ContourGraph::MatchContourWithNavGraph(const NodePtrStack& global_nodes, co
     }
     this->EnclosePolygonsCheck();
     new_convex_vertices.clear();
+    std::size_t rejected_concave = 0;
+    std::size_t suppressed_duplicates = 0;
+    const float duplicate_radius = std::max(0.0f, static_duplicate_radius);
+    const float duplicate_direction_cos = std::cos(
+        std::max(FARUtil::kAngleNoise * 2.0f,
+                 static_cast<float>(15.0 * M_PI / 180.0)));
+    const auto is_static_contour = [](const CTNodePtr& node) {
+        return node &&
+            (node->source == GraphNodeSource::STATIC_CANDIDATE ||
+             node->source == GraphNodeSource::STATIC_GLOBAL);
+    };
+    const auto same_static_corner = [duplicate_radius,
+                                     duplicate_direction_cos](
+        const CTNodePtr& current, const Point3D& other_position,
+        const PointPair& other_dirs, const NodeFreeDirect other_free_direct) {
+        if (!current || duplicate_radius <= 0.0f ||
+            current->is_boundary_clipped ||
+            current->free_direct != other_free_direct ||
+            (current->position - other_position).norm_flat() >
+                duplicate_radius ||
+            std::fabs(current->position.z - other_position.z) >
+                FARUtil::kTolerZ) {
+            return false;
+        }
+        if (current->free_direct == NodeFreeDirect::PILLAR) return true;
+        const Point3D current_direction =
+            FARUtil::SurfTopoDirect(current->surf_dirs);
+        const Point3D other_direction =
+            FARUtil::SurfTopoDirect(other_dirs);
+        return current_direction * other_direction >=
+               duplicate_direction_cos;
+    };
     for (const auto& ctnode_ptr : ContourGraph::contour_graph_) { // Get new vertices
         if (!ctnode_ptr->is_global_match &&
             ctnode_ptr->free_direct != NodeFreeDirect::UNKNOW) {
+            if (is_static_contour(ctnode_ptr) &&
+                ctnode_ptr->free_direct == NodeFreeDirect::CONCAVE) {
+                ++rejected_concave;
+                continue;
+            }
             if (ctnode_ptr->free_direct != NodeFreeDirect::PILLAR) { // check wall contour
                 const float dot_value = ctnode_ptr->surf_dirs.first * ctnode_ptr->surf_dirs.second;
                 if (dot_value < ALIGN_ANGLE_COS) continue; // wall detected
             }
+            bool duplicate = false;
+            if (is_static_contour(ctnode_ptr)) {
+                // A second current corner is suppressed only when an already
+                // matched/accepted static routing vertex is extremely close,
+                // has the same corner class and nearly the same free-space
+                // direction. Distinct door-frame corners therefore survive.
+                for (const auto& node_ptr : near_nodes) {
+                    if (!node_ptr || !node_ptr->is_contour_match ||
+                        (node_ptr->source !=
+                             GraphNodeSource::STATIC_CANDIDATE &&
+                         node_ptr->source != GraphNodeSource::STATIC_GLOBAL)) {
+                        continue;
+                    }
+                    if (same_static_corner(
+                            ctnode_ptr, node_ptr->position,
+                            node_ptr->surf_dirs, node_ptr->free_direct) &&
+                        IsCTMatchLineFreePolygon(
+                            ctnode_ptr, node_ptr, false)) {
+                        duplicate = true;
+                        break;
+                    }
+                }
+                if (!duplicate) {
+                    for (const auto& accepted : new_convex_vertices) {
+                        if (!is_static_contour(accepted)) continue;
+                        if (same_static_corner(
+                                ctnode_ptr, accepted->position,
+                                accepted->surf_dirs,
+                                accepted->free_direct)) {
+                            duplicate = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            if (duplicate) {
+                ++suppressed_duplicates;
+                continue;
+            }
             new_convex_vertices.push_back(ctnode_ptr);
         }
     }
+    ROS_INFO_THROTTLE(
+        5.0,
+        "CG static routing filter: rejected_concave=%zu suppressed_duplicates=%zu",
+        rejected_concave, suppressed_duplicates);
 }
 
 bool ContourGraph::IsNavNodesConnectFreePolygon(const NavNodePtr& node_ptr1, const NavNodePtr& node_ptr2) {
@@ -1216,8 +1298,12 @@ bool ContourGraph::IsEdgeCollisionFreeInCloud(
     if (length < FARUtil::kEpsilon) return true;
 
     const float step = std::max(FARUtil::kLeafSize * 0.75f, 0.05f);
-    const float radius = std::max(FARUtil::kLeafSize * 0.75f,
-                                  FARUtil::kNavClearDist);
+    const float requested_radius = std::max(FARUtil::kLeafSize * 0.75f,
+                                            FARUtil::kNavClearDist);
+    // The samples approximate a continuous swept segment.  Inflate each
+    // sample sphere by half a step in quadrature so their union guarantees
+    // the requested perpendicular clearance even midway between samples.
+    const float radius = std::hypot(requested_radius, step * 0.5f);
     // The search ball, not only its centre, must stay outside the endpoints.
     // Otherwise points belonging to the target contour are reported as an
     // obstacle of the edge that intentionally terminates at that contour.
@@ -1229,6 +1315,26 @@ bool ContourGraph::IsEdgeCollisionFreeInCloud(
     for (float distance = endpoint_margin; distance <= length - endpoint_margin;
          distance += step) {
         const float ratio = distance / length;
+        PCLPoint sample;
+        sample.x = edge.start_p.x + dx * ratio;
+        sample.y = edge.start_p.y + dy * ratio;
+        sample.z = mid_z;
+        sample.intensity = 0.0f;
+        std::vector<int> indices;
+        std::vector<float> squared_distances;
+        if (kdtree->radiusSearch(
+                sample, radius, indices, squared_distances, 1) > 0) {
+            return false;
+        }
+    }
+    // A fixed step does not normally land exactly on the far end.  For the
+    // zero-exclusion routes used by odom, goal and contour-follow edges that
+    // omission could leave the final fraction of an otherwise blocked edge
+    // unchecked.  Sample the far checked endpoint explicitly (repeating an
+    // exact sample is harmless).
+    const float far_distance = length - endpoint_margin;
+    if (far_distance >= endpoint_margin) {
+        const float ratio = far_distance / length;
         PCLPoint sample;
         sample.x = edge.start_p.x + dx * ratio;
         sample.y = edge.start_p.y + dy * ratio;
@@ -1799,4 +1905,4 @@ void ContourGraph::ResetCurrentContour() {
 
     odom_node_ptr_ = NULL;
     is_robot_inside_poly_ = false;
-}   
+}

@@ -111,6 +111,21 @@ catkin_install_python(PROGRAMS
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION})
 
 if(CATKIN_ENABLE_TESTING)
+  catkin_add_gtest(local_voxel_policy_test
+    src/local_voxel_policy_test.cpp)
+  if(TARGET local_voxel_policy_test)
+    target_link_libraries(local_voxel_policy_test ${catkin_LIBRARIES})
+  endif()
+
+  catkin_add_gtest(semantic_confidence_policy_test
+    src/semantic_confidence_policy_test.cpp)
+  if(TARGET semantic_confidence_policy_test)
+    add_dependencies(semantic_confidence_policy_test
+      semantic_octomap_generate_messages_cpp)
+    target_link_libraries(semantic_confidence_policy_test
+      ${catkin_LIBRARIES})
+  endif()
+
   catkin_add_gtest(graph_lifecycle_policy_test
     src/graph_lifecycle_policy_test.cpp)
   if(TARGET graph_lifecycle_policy_test)
@@ -157,6 +172,19 @@ if(CATKIN_ENABLE_TESTING)
   add_dependencies(map_handler_test semantic_octomap_generate_messages_cpp)
   target_link_libraries(map_handler_test ${catkin_LIBRARIES} ${PCL_LIBRARIES} ${OpenCV_LIBS})
 
+  catkin_add_gtest(map_handler_dual_input_test
+    src/map_handler_dual_input_test.cpp
+    src/map_handler.cpp
+    src/utility.cpp)
+  if(TARGET map_handler_dual_input_test)
+    add_dependencies(map_handler_dual_input_test
+      ${${PROJECT_NAME}_EXPORTED_TARGETS}
+      ${catkin_EXPORTED_TARGETS}
+      semantic_octomap_generate_messages_cpp)
+    target_link_libraries(map_handler_dual_input_test
+      ${catkin_LIBRARIES} ${PCL_LIBRARIES} ${OpenCV_LIBS})
+  endif()
+
   add_executable(far_planner_bag_test src/far_planner_bag_test.cpp)
   add_dependencies(far_planner_bag_test ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
   add_dependencies(far_planner_bag_test semantic_octomap_generate_messages_cpp)
@@ -176,4 +204,8 @@ install(DIRECTORY launch/
 
 install(DIRECTORY rviz/
   DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}/rviz
+)
+
+install(DIRECTORY config/
+  DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}/config
 )

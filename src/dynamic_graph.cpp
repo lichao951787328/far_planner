@@ -9,6 +9,7 @@
 #include "far_planner/dynamic_graph.h"
 
 #include <cmath>
+#include <limits>
 
 /***************************************************************************************/
 
@@ -26,7 +27,6 @@ void DynamicGraph::Init(const ros::NodeHandle& nh, const DynamicGraphParams& par
     tp_params_.inflate_size = FARUtil::kObsInflate;
     terrain_planner_.Init(nh, tp_params_);
 }
-
 void DynamicGraph::UpdateRobotPosition(const Point3D& robot_pos) {
     robot_pos_ = robot_pos;
     terrain_planner_.SetLocalTerrainObsCloud(FARUtil::surround_obs_cloud_);
@@ -90,6 +90,78 @@ void DynamicGraph::RemoveNodeFromGraph(const NavNodePtr& node_ptr) {
     FARUtil::EraseNodeFromStack(node_ptr, globalGraphNodes_);
     FARUtil::EraseNodeFromStack(node_ptr, staticCandidateGraphNodes_);
     FARUtil::EraseNodeFromStack(node_ptr, dynamicLocalGraphNodes_);
+    staticMainNodeIds_.erase(node_ptr->id);
+}
+
+void DynamicGraph::RefreshStaticMainComponent() {
+    std::unordered_set<std::size_t> visited;
+    std::unordered_set<std::size_t> odom_anchor_ids;
+    if (odom_node_ptr_) {
+        for (const auto& neighbor : odom_node_ptr_->connect_nodes) {
+            if (neighbor &&
+                neighbor->source == GraphNodeSource::STATIC_GLOBAL &&
+                IsPersistentStaticRoutingVertex(*neighbor) &&
+                IsGraphEdgeSearchEligible(*odom_node_ptr_, *neighbor)) {
+                odom_anchor_ids.insert(neighbor->id);
+            }
+        }
+    }
+
+    std::unordered_set<std::size_t> selected;
+    std::size_t best_previous_overlap = 0;
+    std::size_t best_odom_anchors = 0;
+    std::size_t best_size = 0;
+    for (const auto& seed : globalGraphNodes_) {
+        if (!seed || seed->source != GraphNodeSource::STATIC_GLOBAL ||
+            !IsPersistentStaticRoutingVertex(*seed) ||
+            visited.count(seed->id)) {
+            continue;
+        }
+        const std::unordered_set<std::size_t> component =
+            ActiveTransactionalStaticRoutingNodeIds({seed}, {});
+        visited.insert(component.begin(), component.end());
+        std::size_t previous_overlap = 0;
+        std::size_t odom_anchors = 0;
+        for (const std::size_t id : component) {
+            previous_overlap += staticMainNodeIds_.count(id);
+            odom_anchors += odom_anchor_ids.count(id);
+        }
+        const bool is_better = selected.empty() ||
+            (staticMainNodeIds_.empty()
+                 ? (odom_anchors > best_odom_anchors ||
+                    (odom_anchors == best_odom_anchors &&
+                     component.size() > best_size))
+                 : (previous_overlap > best_previous_overlap ||
+                    (previous_overlap == best_previous_overlap &&
+                     (odom_anchors > best_odom_anchors ||
+                      (odom_anchors == best_odom_anchors &&
+                       component.size() > best_size)))));
+        if (is_better) {
+            selected = component;
+            best_previous_overlap = previous_overlap;
+            best_odom_anchors = odom_anchors;
+            best_size = component.size();
+        }
+    }
+
+    std::size_t confirmed_routing_nodes = 0;
+    for (const auto& node_ptr : globalGraphNodes_) {
+        if (node_ptr &&
+            node_ptr->source == GraphNodeSource::STATIC_GLOBAL &&
+            IsPersistentStaticRoutingVertex(*node_ptr)) {
+            ++confirmed_routing_nodes;
+        }
+    }
+    staticMainNodeIds_.swap(selected);
+    const std::size_t detached = confirmed_routing_nodes >=
+            staticMainNodeIds_.size()
+        ? confirmed_routing_nodes - staticMainNodeIds_.size()
+        : 0;
+    ROS_INFO_THROTTLE(
+        5.0,
+        "DG static main component: active_main=%zu detached_history=%zu odom_anchors=%zu previous_overlap=%zu",
+        staticMainNodeIds_.size(), detached, best_odom_anchors,
+        best_previous_overlap);
 }
 
 void DynamicGraph::BeginSemanticGraphUpdate() {
@@ -359,11 +431,132 @@ void DynamicGraph::CommitMatureContourEdgeReplacements() {
 
 void DynamicGraph::CommitSemanticGraphUpdate(
     const std::function<StaticNodeEvidence(const Point3D&)>& evidence_query) {
+    // Edge validation precedes lifecycle commit. Refresh now so this frame's
+    // promotion anchors are taken only from the still-active main component.
+    this->RefreshStaticMainComponent();
     NodePtrStack remove_nodes;
     NodePtrStack promote_nodes;
+    std::size_t promotion_waiting_finalization = 0;
+    std::size_t promotion_waiting_edge = 0;
+    std::size_t promotion_waiting_routing_type = 0;
+    std::size_t promotion_waiting_main_component = 0;
+    std::size_t promotion_waiting_global_evidence = 0;
     NodePtrStack static_nodes = globalGraphNodes_;
     static_nodes.insert(static_nodes.end(), staticCandidateGraphNodes_.begin(),
                         staticCandidateGraphNodes_.end());
+
+    // Precompute candidates that will satisfy every non-topological gate
+    // after this snapshot's positive observation is applied.  The main
+    // component traversal below is restricted to this set: a mature node may
+    // not borrow an unfinalized/unconfirmed candidate as a temporary bridge.
+    const int confirm_frames =
+        std::max(1, dg_params_.static_confirm_frames);
+    std::unordered_map<std::size_t, StaticNodeEvidence> evidence_by_node_id;
+    const auto query_evidence = [&](const NavNodePtr& node_ptr) {
+        if (!node_ptr) return StaticNodeEvidence::UNKNOWN;
+        const auto cached = evidence_by_node_id.find(node_ptr->id);
+        if (cached != evidence_by_node_id.end()) return cached->second;
+        const StaticNodeEvidence evidence = evidence_query
+            ? evidence_query(node_ptr->position)
+            : StaticNodeEvidence::UNKNOWN;
+        evidence_by_node_id[node_ptr->id] = evidence;
+        return evidence;
+    };
+    std::unordered_set<std::size_t> transaction_candidate_ids;
+    for (const auto& node_ptr : staticCandidateGraphNodes_) {
+        if (!node_ptr || !node_ptr->observed_in_semantic_snapshot) continue;
+        const bool observation_ready =
+            std::min(confirm_frames, node_ptr->static_seen_count + 1) >=
+            confirm_frames;
+        const bool finalization_ready =
+            !dg_params_.static_promotion_requires_finalized ||
+            node_ptr->is_finalized;
+        const bool global_evidence_ready =
+            IsStaticPromotionEvidenceReady(
+                query_evidence(node_ptr),
+                dg_params_.static_promotion_requires_global_evidence);
+        if (observation_ready && finalization_ready &&
+            global_evidence_ready &&
+            IsPersistentStaticRoutingVertex(*node_ptr)) {
+            transaction_candidate_ids.insert(node_ptr->id);
+        }
+    }
+
+    // Once a confirmed graph exists, grow the promotion transaction from the
+    // persisted main component itself.  Odom visibility is a transient search
+    // concern and must not deadlock map growth when the robot rounds a corner
+    // and temporarily loses every direct edge to old confirmed vertices.
+    bool has_confirmed_static_routing = false;
+    for (const auto& node_ptr : globalGraphNodes_) {
+        if (!node_ptr ||
+            node_ptr->source != GraphNodeSource::STATIC_GLOBAL ||
+            !IsPersistentStaticRoutingVertex(*node_ptr)) {
+            continue;
+        }
+        has_confirmed_static_routing = true;
+    }
+
+    NodePtrStack robot_candidate_seeds;
+    if (odom_node_ptr_) {
+        for (const auto& neighbor : odom_node_ptr_->connect_nodes) {
+            if (!neighbor ||
+                !IsGraphEdgeSearchEligible(*odom_node_ptr_, *neighbor)) {
+                continue;
+            }
+            if (neighbor->source == GraphNodeSource::STATIC_CANDIDATE &&
+                transaction_candidate_ids.count(neighbor->id)) {
+                robot_candidate_seeds.push_back(neighbor);
+            }
+        }
+    }
+
+    std::unordered_set<std::size_t> transaction_main_ids;
+    if (has_confirmed_static_routing) {
+        transaction_main_ids = PersistentMainTransactionNodeIds(
+            globalGraphNodes_, staticMainNodeIds_, transaction_candidate_ids);
+    }
+
+    // Bootstrap selects one largest odom-anchored component made exclusively
+    // of transaction-ready candidates. With the normal active-edge gate, a
+    // singleton is not reusable topology and therefore cannot initialize the
+    // persistent graph.
+    std::unordered_set<std::size_t> bootstrap_component_ids;
+    if (!has_confirmed_static_routing) {
+        std::unordered_set<std::size_t> visited_candidates;
+        std::size_t best_size = 0;
+        float best_robot_distance = std::numeric_limits<float>::infinity();
+        for (const auto& seed : robot_candidate_seeds) {
+            if (!seed || visited_candidates.count(seed->id) ||
+                !transaction_candidate_ids.count(seed->id)) {
+                continue;
+            }
+            const std::unordered_set<std::size_t> component =
+                ActiveTransactionalStaticRoutingNodeIds(
+                    {seed}, transaction_candidate_ids);
+            visited_candidates.insert(component.begin(), component.end());
+            if (dg_params_.static_promotion_requires_active_edge &&
+                component.size() < 2) {
+                continue;
+            }
+            float nearest_robot =
+                (seed->position - robot_pos_).norm_flat();
+            for (const auto& candidate : staticCandidateGraphNodes_) {
+                if (candidate && component.count(candidate->id)) {
+                    nearest_robot = std::min(
+                        nearest_robot,
+                        (candidate->position - robot_pos_).norm_flat());
+                }
+            }
+            if (component.size() > best_size ||
+                (component.size() == best_size &&
+                 nearest_robot < best_robot_distance)) {
+                bootstrap_component_ids = component;
+                best_size = component.size();
+                best_robot_distance = nearest_robot;
+            }
+        }
+        transaction_main_ids = bootstrap_component_ids;
+    }
     for (const auto& node_ptr : static_nodes) {
         if (!node_ptr) continue;
         const bool is_static =
@@ -371,17 +564,57 @@ void DynamicGraph::CommitSemanticGraphUpdate(
             node_ptr->source == GraphNodeSource::STATIC_GLOBAL;
         if (!is_static) continue;
         const float distance = (node_ptr->position - robot_pos_).norm_flat();
+        const StaticNodeEvidence queried_evidence =
+            query_evidence(node_ptr);
+        // Legacy single-map mode retains its original rule that a current
+        // semantic contour observation is occupied evidence. In dual-input
+        // mode, current local geometry and confirmed global evidence remain
+        // independent signals.
         const StaticNodeEvidence evidence =
-            node_ptr->observed_in_semantic_snapshot
+            node_ptr->observed_in_semantic_snapshot &&
+                    !dg_params_.static_promotion_requires_global_evidence
                 ? StaticNodeEvidence::STATIC_OCCUPIED
-                : (evidence_query
-                       ? evidence_query(node_ptr->position)
-                       : StaticNodeEvidence::UNKNOWN);
+                : queried_evidence;
+        const bool finalization_ready =
+            !dg_params_.static_promotion_requires_finalized ||
+            node_ptr->is_finalized;
+        const bool edge_ready =
+            !dg_params_.static_promotion_requires_active_edge ||
+            HasActiveSearchEligibleIncidentEdge(*node_ptr);
+        const bool routing_type_ready =
+            IsPersistentStaticRoutingVertex(*node_ptr);
+        bool main_component_ready = true;
+        if (dg_params_.static_promotion_requires_main_component &&
+            node_ptr->source == GraphNodeSource::STATIC_CANDIDATE) {
+            main_component_ready =
+                transaction_main_ids.count(node_ptr->id) > 0;
+        }
+        const bool global_evidence_ready =
+            IsStaticPromotionEvidenceReady(
+                queried_evidence,
+                dg_params_.static_promotion_requires_global_evidence);
+        const bool promotion_ready = finalization_ready && edge_ready &&
+                                     routing_type_ready &&
+                                     main_component_ready &&
+                                     global_evidence_ready;
         const GraphLifecycleAction action = AdvanceStaticNodeLifecycle(
             *node_ptr, node_ptr->observed_in_semantic_snapshot, evidence,
             distance,
             dg_params_.static_update_radius, dg_params_.static_stitch_radius,
-            dg_params_.static_confirm_frames, dg_params_.static_remove_frames);
+            dg_params_.static_confirm_frames, dg_params_.static_remove_frames,
+            promotion_ready);
+        if (node_ptr->source == GraphNodeSource::STATIC_CANDIDATE &&
+            node_ptr->observed_in_semantic_snapshot &&
+            node_ptr->static_seen_count >=
+                std::max(1, dg_params_.static_confirm_frames)) {
+            if (!finalization_ready) ++promotion_waiting_finalization;
+            if (!edge_ready) ++promotion_waiting_edge;
+            if (!routing_type_ready) ++promotion_waiting_routing_type;
+            if (!main_component_ready) ++promotion_waiting_main_component;
+            if (!global_evidence_ready) {
+                ++promotion_waiting_global_evidence;
+            }
+        }
         if (action == GraphLifecycleAction::PROMOTE_STATIC) {
             promote_nodes.push_back(node_ptr);
             ROS_INFO_STREAM("DG: promoted semantic static node " << node_ptr->id
@@ -410,6 +643,14 @@ void DynamicGraph::CommitSemanticGraphUpdate(
             neighbor->edge_states[node_ptr->id].source = source;
         }
     }
+    ROS_INFO_THROTTLE(
+        5.0,
+        "DG static promotion gate: promoted=%zu waiting_finalized=%zu waiting_active_edge=%zu waiting_routing_type=%zu waiting_main_component=%zu waiting_global_evidence=%zu main_seed_confirmed=%zu bootstrap=%zu",
+        promote_nodes.size(), promotion_waiting_finalization,
+        promotion_waiting_edge, promotion_waiting_routing_type,
+        promotion_waiting_main_component,
+        promotion_waiting_global_evidence,
+        staticMainNodeIds_.size(), bootstrap_component_ids.size());
 
     // Replacement is a transaction, not an early filtering action.  At this
     // point all current contour nodes and validated route geometries exist and
@@ -420,6 +661,12 @@ void DynamicGraph::CommitSemanticGraphUpdate(
     this->CommitMatureContourEdgeReplacements();
 
     for (const auto& node_ptr : remove_nodes) this->RemoveNodeFromGraph(node_ptr);
+    this->RefreshStaticMainComponent();
+    // Promotion, replacement or a physical edge mask may have changed main
+    // membership after UpdateNavGraph built the transient start layer.
+    // Rebuild it once against the committed component so reachability used by
+    // GetNavGraph cannot pass through a newly detached history node.
+    this->UpdateOdomConnections();
     semantic_update_in_progress_ = false;
 }
 
@@ -555,6 +802,7 @@ void DynamicGraph::UpdateNavGraph(const NodePtrStack& new_nodes,
         struct ValidatedPair {
             NavNodePtr first;
             NavNodePtr second;
+            EdgeRejectReason rejection_reason = EdgeRejectReason::NONE;
         };
         std::vector<ValidatedPair> valid_pairs;
         std::vector<ValidatedPair> all_pairs;
@@ -564,15 +812,28 @@ void DynamicGraph::UpdateNavGraph(const NodePtrStack& new_nodes,
             for (std::size_t j = i + 1; j < near_nav_nodes_.size(); ++j) {
                 const NavNodePtr second = near_nav_nodes_[j];
                 if (!second || second->is_odom || first == second) continue;
-                all_pairs.push_back({first, second});
                 const bool both_static =
                     (first->source == GraphNodeSource::STATIC_CANDIDATE ||
                      first->source == GraphNodeSource::STATIC_GLOBAL) &&
                     (second->source == GraphNodeSource::STATIC_CANDIDATE ||
                      second->source == GraphNodeSource::STATIC_GLOBAL);
-                if (this->IsValidConnect(first, second, true,
-                                         !both_static, false)) {
-                    valid_pairs.push_back({first, second});
+                const bool valid = this->IsValidConnect(
+                    first, second, true, !both_static, false);
+                const EdgeRejectReason rejection_reason = valid
+                    ? EdgeRejectReason::NONE
+                    : this->ClassifyVisibilityRejection(
+                          first, second, !both_static, false);
+                all_pairs.push_back({first, second, rejection_reason});
+                if (valid) {
+                    valid_pairs.push_back(
+                        {first, second, EdgeRejectReason::NONE});
+                } else if (dg_params_.diagnostic_near_pair_radius > 0.0f &&
+                           (first->position - second->position).norm_flat() <=
+                               dg_params_.diagnostic_near_pair_radius) {
+                    contour_edge_diagnostics_.push_back({
+                        first->id, second->id, first->position,
+                        second->position, EdgeValidationMode::VISIBILITY,
+                        rejection_reason});
                 }
             }
         }
@@ -617,7 +878,18 @@ void DynamicGraph::UpdateNavGraph(const NodePtrStack& new_nodes,
             const bool keep = is_contour_pair(pair.first, pair.second) ||
                 (!has_shorter_in_direction(pair.first, pair.second) &&
                  !has_shorter_in_direction(pair.second, pair.first));
-            if (!keep) continue;
+            if (!keep) {
+                if (dg_params_.diagnostic_near_pair_radius > 0.0f &&
+                    (pair.first->position - pair.second->position).norm_flat() <=
+                        dg_params_.diagnostic_near_pair_radius) {
+                    contour_edge_diagnostics_.push_back({
+                        pair.first->id, pair.second->id,
+                        pair.first->position, pair.second->position,
+                        EdgeValidationMode::VISIBILITY,
+                        EdgeRejectReason::DIRECTION_SPARSIFIED});
+                }
+                continue;
+            }
             NavEdge edge(pair.first, pair.second);
             if (pair.first->id > pair.second->id) {
                 edge = NavEdge(pair.second, pair.first);
@@ -630,7 +902,12 @@ void DynamicGraph::UpdateNavGraph(const NodePtrStack& new_nodes,
                 edge = NavEdge(pair.second, pair.first);
             }
             this->ApplyValidatedGraphEdge(
-                pair.first, pair.second, selected_pairs.count(edge) > 0);
+                pair.first, pair.second, selected_pairs.count(edge) > 0,
+                selected_pairs.count(edge) > 0
+                    ? EdgeRejectReason::NONE
+                    : (pair.rejection_reason == EdgeRejectReason::NONE
+                           ? EdgeRejectReason::DIRECTION_SPARSIFIED
+                           : pair.rejection_reason));
         }
         // update out range break nodes connects
         for (const auto& node_ptr : near_nav_nodes_) {
@@ -753,6 +1030,8 @@ void DynamicGraph::UpdateNavGraph(const NodePtrStack& new_nodes,
                 case EdgeRejectReason::DYNAMIC_CLOUD_BLOCKED:
                     ++dynamic_cloud;
                     break;
+                case EdgeRejectReason::DIRECTION_SPARSIFIED:
+                    break;
                 case EdgeRejectReason::TERRAIN_BLOCKED:
                     ++terrain;
                     break;
@@ -807,14 +1086,29 @@ void DynamicGraph::UpdateOdomConnections() {
     std::size_t persistent_candidates = 0;
     std::size_t local_candidates = 0;
     std::size_t not_start_candidate = 0;
+    std::size_t not_topology_connected = 0;
     EdgeRejectionStats rejections;
     float farthest_candidate = 0.0f;
     float farthest_connection = 0.0f;
     for (const auto& candidate : candidates) {
         if (!candidate || candidate->is_odom || candidate->is_goal ||
             !checked_candidates.insert(candidate->id).second) continue;
+        if (candidate->source == GraphNodeSource::STATIC_GLOBAL &&
+            !staticMainNodeIds_.empty() &&
+            !staticMainNodeIds_.count(candidate->id)) {
+            ++not_start_candidate;
+            continue;
+        }
         if (!IsStartConnectionCandidate(*candidate)) {
             ++not_start_candidate;
+            continue;
+        }
+        // A start edge to a corner that has no reusable graph edge produces
+        // exactly the two-node dead end seen in the SSMI replay: odom and one
+        // blue orphan.  Preserve that corner for future matching, but do not
+        // select it as a query anchor until the map topology reconnects it.
+        if (!HasActiveSearchEligibleIncidentEdge(*candidate)) {
+            ++not_topology_connected;
             continue;
         }
         if (candidate->source == GraphNodeSource::STATIC_GLOBAL) {
@@ -867,10 +1161,10 @@ void DynamicGraph::UpdateOdomConnections() {
     }
     ROS_INFO_THROTTLE(
         5.0,
-        "DG start connections: unique=%zu validated=%zu persistent=%zu local=%zu accepted=%zu skipped[not_start_candidate=%zu] farthest_candidate=%.2fm farthest_edge=%.2fm reject[unreachable=%zu direction=%zu static_cloud=%zu dynamic_cloud=%zu polygon=%zu terrain=%zu vote=%zu]",
+        "DG start connections: unique=%zu validated=%zu persistent=%zu local=%zu accepted=%zu skipped[not_start_candidate=%zu no_topology_edge=%zu] farthest_candidate=%.2fm farthest_edge=%.2fm reject[unreachable=%zu direction=%zu static_cloud=%zu dynamic_cloud=%zu polygon=%zu terrain=%zu vote=%zu]",
         checked_candidates.size(), validated_candidates,
         persistent_candidates, local_candidates, accepted_connections,
-        not_start_candidate,
+        not_start_candidate, not_topology_connected,
         farthest_candidate, farthest_connection, rejections.unreachable,
         rejections.direction_rejected, rejections.static_cloud_blocked,
         rejections.dynamic_cloud_blocked, rejections.polygon_blocked,
@@ -924,7 +1218,12 @@ bool DynamicGraph::IsValidConnect(const NavNodePtr& node_ptr1,
         DeletePolygonVote(node_ptr1, node_ptr2, vote_queue_size);
     }
     const bool vote_ready = this->IsPolygonEdgeVoteTrue(node_ptr1, node_ptr2);
-    if (vote_ready) {
+    // Historical votes stabilize edge identity, but they may never override a
+    // collision observed in the current snapshot. This makes the first static
+    // obstacle failure immediately non-searchable while the separate edge
+    // miss counter below decides when its history may be erased.
+    if (convex && direct && polygon_free && terrain_free && poly_matched &&
+        vote_ready) {
         if (!apply_direction_filter ||
             !this->IsSimilarConnectInDiection(node_ptr1, node_ptr2)) {
             is_connect = true;
@@ -988,8 +1287,13 @@ bool DynamicGraph::UpdateGraphEdge(const NavNodePtr& node_ptr1,
     const bool structurally_valid = this->IsValidConnect(
         node_ptr1, node_ptr2, is_check_contour,
         !is_persistent_static_edge);
+    const EdgeRejectReason rejection_reason = structurally_valid
+        ? EdgeRejectReason::NONE
+        : this->ClassifyVisibilityRejection(
+              node_ptr1, node_ptr2, !is_persistent_static_edge, true);
     return this->ApplyValidatedGraphEdge(node_ptr1, node_ptr2,
-                                         structurally_valid);
+                                         structurally_valid,
+                                         rejection_reason);
 }
 
 void DynamicGraph::RemoveVisibilityEdge(const NavNodePtr& node_ptr1,
@@ -1004,7 +1308,8 @@ void DynamicGraph::RemoveVisibilityEdge(const NavNodePtr& node_ptr1,
 
 bool DynamicGraph::ApplyValidatedGraphEdge(const NavNodePtr& node_ptr1,
                                            const NavNodePtr& node_ptr2,
-                                           const bool structurally_valid) {
+                                           const bool structurally_valid,
+                                           const EdgeRejectReason rejection_reason) {
     if (!node_ptr1 || !node_ptr2 || node_ptr1 == node_ptr2) return false;
     const auto is_static_obstacle_node = [](const NavNodePtr& node_ptr) {
         return node_ptr &&
@@ -1015,6 +1320,59 @@ bool DynamicGraph::ApplyValidatedGraphEdge(const NavNodePtr& node_ptr1,
         is_static_obstacle_node(node_ptr1) &&
         is_static_obstacle_node(node_ptr2);
     if (!structurally_valid) {
+        const bool has_visibility_identity = FARUtil::IsTypeInStack(
+            node_ptr2, node_ptr1->poly_connects);
+        const bool has_other_edge_identity = FARUtil::IsTypeInStack(
+            node_ptr2, node_ptr1->contour_connects) ||
+            FARUtil::IsTypeInStack(
+                node_ptr2, node_ptr1->trajectory_connects);
+        auto forward_it = node_ptr1->edge_states.find(node_ptr2->id);
+        auto reverse_it = node_ptr2->edge_states.find(node_ptr1->id);
+        if (is_persistent_static_edge && has_visibility_identity &&
+            !has_other_edge_identity &&
+            IsRecoverableStaticVisibilitySelectionReason(
+                rejection_reason) &&
+            forward_it != node_ptr1->edge_states.end() &&
+            reverse_it != node_ptr2->edge_states.end()) {
+            // ClassifyVisibilityRejection reaches VOTE_PENDING only after
+            // current direction, static geometry and terrain have passed.
+            // DIRECTION_SPARSIFIED likewise comes from a fully valid pair.
+            // Therefore a retained edge can recover immediately; historical
+            // vote hysteresis is only a creation gate, not deletion evidence.
+            ApplyVisibilityStaticValidationObservation(
+                forward_it->second, true,
+                dg_params_.static_visibility_remove_frames);
+            ApplyVisibilityStaticValidationObservation(
+                reverse_it->second, true,
+                dg_params_.static_visibility_remove_frames);
+            return forward_it->second.IsActive() &&
+                   reverse_it->second.IsActive();
+        }
+        if (is_persistent_static_edge && has_visibility_identity &&
+            !has_other_edge_identity &&
+            IsStaticGeometryRejectReason(rejection_reason) &&
+            forward_it != node_ptr1->edge_states.end() &&
+            reverse_it != node_ptr2->edge_states.end()) {
+            const bool remove_forward =
+                ApplyVisibilityStaticValidationObservation(
+                    forward_it->second, false,
+                    dg_params_.static_visibility_remove_frames);
+            const bool remove_reverse =
+                ApplyVisibilityStaticValidationObservation(
+                    reverse_it->second, false,
+                    dg_params_.static_visibility_remove_frames);
+            const int misses = std::max(
+                forward_it->second.static_visibility_misses,
+                reverse_it->second.static_visibility_misses);
+            forward_it->second.static_visibility_misses = misses;
+            reverse_it->second.static_visibility_misses = misses;
+            forward_it->second.static_valid = false;
+            reverse_it->second.static_valid = false;
+            if (remove_forward || remove_reverse) {
+                this->RemoveVisibilityEdge(node_ptr1, node_ptr2);
+            }
+            return false;
+        }
         this->RemoveVisibilityEdge(node_ptr1, node_ptr2);
         return false;
     }

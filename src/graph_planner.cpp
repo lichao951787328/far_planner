@@ -25,6 +25,7 @@ const char* EdgeRejectReasonName(const EdgeRejectReason reason) {
         case EdgeRejectReason::NOT_CURRENT_ADJACENT: return "not_adjacent";
         case EdgeRejectReason::UNREACHABLE: return "unreachable";
         case EdgeRejectReason::DIRECTION_REJECTED: return "direction";
+        case EdgeRejectReason::DIRECTION_SPARSIFIED: return "direction_sparse";
         case EdgeRejectReason::STATIC_CLOUD_BLOCKED: return "static_cloud";
         case EdgeRejectReason::DYNAMIC_CLOUD_BLOCKED: return "dynamic_cloud";
         case EdgeRejectReason::POLYGON_BLOCKED: return "polygon";
@@ -37,7 +38,6 @@ const char* EdgeRejectReasonName(const EdgeRejectReason reason) {
     }
     return "unknown";
 }
-
 }  // namespace
 
 

@@ -31,11 +31,21 @@ is_debug_output                         : false
 # 是否开启“自动切换到可尝试导航模式”的机制。
 is_attempt_autoswitch                   : true  # Auto switch to attemptable navigation
 world_frame                             : map
-semantic_map_topic                      : octomap_full
+# Unified architecture used by both simulation and recorded data. The local
+# semantic snapshot owns current terrain/contours; SemanticOcTree supplies
+# confirmed static evidence only.
+input_mode                              : local_semantic_with_global_static
+semantic_profile                       : gazebo
+global_static_map_topic                 : /octomap_full
+local_semantic_map_topic                : /local_3d_semantic_voxel_map/voxel_cloud
 # Safety watchdogs use message receipt wall-time, so they remain effective
 # even when simulated ROS time is paused.
 odom_timeout                            : 3.0   # seconds; tolerates a slow graph-update cycle
 semantic_map_timeout                    : 3.0   # seconds; <= 0 disables the check
+local_semantic_map_timeout              : 0.5   # wall time; <= 0 disables the check
+# Small timestamp disorder is dropped. A larger backwards jump is interpreted
+# as a rosbag restart and atomically resets map/graph state (-1 disables).
+input_time_rewind_reset_threshold       : 1.0
 # Rebuild only the transient robot/start edges after this much planar motion.
 odom_connection_update_distance         : 0.2   # Unit: meter
 
@@ -51,21 +61,30 @@ MapHandler/terrain_neighbor_radius      : 1.0     # XY terrain-support radius (2
 MapHandler/local_planner_radius         : 10.0    # 10 m radius: about 20 m x 20 m local collision-map coverage
 MapHandler/local_planner_resolution     : 0.2     # Dense XY sampling resolution for occupied octree voxels
 MapHandler/local_planner_obstacle_intensity: 200.0 # Hard-obstacle value for static and dynamic layers
+MapHandler/local_voxel_resolution       : 0.10
+MapHandler/local_voxel_min_semantic_confidence: 0.55
+MapHandler/local_voxel_obstacle_cost_threshold: 0.60
 # The current planner intentionally uses binary top-1 semantics. The probability
 # field is retained for a future full SemanticOcTree decoder and is not applied yet.
 MapHandler/semantic_top1_only           : true
 MapHandler/semantic_min_probability     : 0.55
 MapHandler/obstacle_groups:
-  - {name: chair,         rgb: [0, 33, 193]}
-  - {name: television,    rgb: [0, 67, 130]}
-  - {name: table,         rgb: [0, 101, 68]}
-  - {name: boundary_wall, rgb: [0, 134, 5]}
-  - {name: maze_wall,     rgb: [0, 168, 199]}
+  - {name: chair,         label: "0x0021c1", rgb: [0, 33, 193]}
+  - {name: television,    label: "0x004382", rgb: [0, 67, 130]}
+  - {name: table,         label: "0x006544", rgb: [0, 101, 68]}
+  - {name: boundary_wall, label: "0x008605", rgb: [0, 134, 5]}
+  - {name: maze_wall,     label: "0x00a8c7", rgb: [0, 168, 199]}
+  # These two canonical classes are emitted by the Gazebo local voxel map.
+  - {name: structure,     labels: ["0x808080", 2], rgb: [128, 128, 128]}
+  - {name: low_obstacle,  labels: ["0x0000ff", 3], rgb: [0, 0, 255]}
 MapHandler/terrain_support_groups:
-  - {name: background_floor, rgb: [0, 0, 0]}
-  - {name: staircase,        rgb: [255, 165, 0]}
+  # Both colors are accepted because the local map recolors floor voxels
+  # while older simulation SemanticOcTrees retain the raw black class.
+  - {name: background_floor_raw,   labels: ["0x000000", 0], rgb: [0, 0, 0]}
+  - {name: background_floor_voxel, labels: ["0x000000", 0], rgb: [80, 180, 80]}
+  - {name: staircase,              label: "0xffa500", rgb: [255, 165, 0]}
 MapHandler/dynamic_obstacle_groups:
-  - {name: dynamic_obstacle, rgb: [255, 0, 255]}
+  - {name: dynamic_obstacle, labels: ["0xff00ff", 11], rgb: [255, 0, 255]}
 # 把整个环境切成很多小格子,每个格子的边长就是 cell_length
 MapHandler/cell_length                  : 5.0     # Unit: meter
 MapHandler/map_grid_max_length          : 1000.0  # Unit: meter
@@ -132,6 +151,15 @@ Graph/dynamic_position_alpha            : 0.65    # Current-frame weight for mat
 Graph/static_confirm_frames             : 3       # Positive semantic observations before persistence
 Graph/static_remove_frames              : 3       # Consecutive local misses before true static deletion
 Graph/static_topology_remove_frames     : 5       # FAR-style recoverable contradictions; replacement also requires RANSAC-stable successors, a validated contour route and no static cut
+Graph/static_visibility_remove_frames   : 3       # A failed static edge leaves search immediately; history is erased only after repeated failures
+Graph/static_duplicate_radius           : 0.5
+Graph/static_promotion_requires_finalized: true
+Graph/static_promotion_requires_active_edge: true
+# Expansion starts from persistent staticMainNodeIds_, not current odom
+# visibility, so a mature chain can reconnect old confirmed topology.
+Graph/static_promotion_requires_main_component: true
+Graph/static_promotion_requires_global_evidence: true
+Graph/diagnostic_near_pair_radius       : 0.0
 
 # Same-current-contour edges search outward for the first fully collision-free
 # robot-centre segment. These values do not alter ordinary visibility edges.
