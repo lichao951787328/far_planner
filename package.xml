@@ -32,6 +32,9 @@
   <run_depend>pcl_ros</run_depend>
   <run_depend>octomap_msgs</run_depend>
   <run_depend>semantic_octomap</run_depend>
+  <run_depend>local3d_semantic_voxel_map</run_depend>
+  <run_depend>local_planner</run_depend>
+  <run_depend>rosbag</run_depend>
   <run_depend>octomap_rviz_plugins</run_depend>
   <run_depend>robot_state_publisher</run_depend>
   <run_depend>rviz</run_depend>

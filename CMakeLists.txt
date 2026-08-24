@@ -101,6 +101,10 @@ add_executable(pose_stamped_to_point_stamped
 add_dependencies(pose_stamped_to_point_stamped ${catkin_EXPORTED_TARGETS})
 target_link_libraries(pose_stamped_to_point_stamped ${catkin_LIBRARIES})
 
+add_executable(point_stamped_tf_adapter src/point_stamped_tf_adapter.cpp)
+add_dependencies(point_stamped_tf_adapter ${catkin_EXPORTED_TARGETS})
+target_link_libraries(point_stamped_tf_adapter ${catkin_LIBRARIES})
+
 add_executable(navigation_demo_monitor src/navigation_demo_monitor.cpp)
 add_dependencies(navigation_demo_monitor
   ${${PROJECT_NAME}_EXPORTED_TARGETS}
@@ -199,7 +203,8 @@ if(CATKIN_ENABLE_TESTING)
 endif()
 
 install(TARGETS ${PROJECT_NAME} pose_stamped_to_odometry
-  pose_stamped_to_point_stamped navigation_demo_monitor
+  pose_stamped_to_point_stamped point_stamped_tf_adapter
+  navigation_demo_monitor
   ssmi_bag_graph_monitor
   ARCHIVE DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
   LIBRARY DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
