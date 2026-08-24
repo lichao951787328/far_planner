@@ -1,6 +1,8 @@
 #ifndef CONTOUR_DETECTOR_H
 #define CONTOUR_DETECTOR_H
 
+#include <cmath>
+
 #include "utility.h"
 
 
@@ -17,6 +19,21 @@ struct ContourDetectParams {
     bool  is_save_img;
     std::string img_path;
 };
+
+/** Anchor a robot-centred contour raster to the fixed world grid.
+ *
+ * The raster window may move with the robot, but its cell centres must not
+ * move continuously with odometry. Otherwise world obstacle coordinates are
+ * rounded relative to a different origin on every frame and reconstructed
+ * contour vertices exhibit a +/- half-cell sawtooth motion. */
+inline float AlignContourRasterCoordinate(const float coordinate,
+                                          const float resolution) {
+    if (!std::isfinite(coordinate) || !std::isfinite(resolution) ||
+        resolution <= 0.0f) {
+        return coordinate;
+    }
+    return std::round(coordinate / resolution) * resolution;
+}
 
 /** Remove B only when its closed-contour neighbours A-B-C describe the same
  * straight wall in world coordinates. This is independent of image resize
@@ -74,6 +91,7 @@ inline void SimplifyClosedContourCollinearVertices(
 class ContourDetector {
 private:
     Point3D odom_pos_;
+    Point3D raster_center_;
     cv::Point2f free_odom_resized_;
     ContourDetectParams cd_params_;
     PointCloudPtr new_corners_cloud_;
@@ -116,8 +134,14 @@ private:
     /* inline functions */
     inline void UpdateOdom(const NavNodePtr& odom_node_ptr) {
         odom_pos_ = odom_node_ptr->position;
+        raster_center_ = odom_pos_;
+        raster_center_.x = AlignContourRasterCoordinate(
+            odom_pos_.x, cd_params_.contour_grid_resolution);
+        raster_center_.y = AlignContourRasterCoordinate(
+            odom_pos_.y, cd_params_.contour_grid_resolution);
         odom_node_ptr_ = odom_node_ptr;
-        free_odom_resized_ = ConvertPoint3DToCVPoint(FARUtil::free_odom_p, odom_pos_, true);
+        free_odom_resized_ = ConvertPoint3DToCVPoint(
+            FARUtil::free_odom_p, raster_center_, true);
     }
 
     inline void ConvertCVToPoint3DVector(const CVPointStack& cv_vec,
@@ -127,7 +151,8 @@ private:
         p_vec.clear(), p_vec.resize(vec_size);
         for (std::size_t i=0; i<vec_size; i++) {
             cv::Point2f cv_p = cv_vec[i];
-            Point3D p = ConvertCVPointToPoint3D(cv_p, odom_pos_, is_resized_img);
+            Point3D p = ConvertCVPointToPoint3D(
+                cv_p, raster_center_, is_resized_img);
             p_vec[i] = p;
         }
     }

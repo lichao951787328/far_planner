@@ -31,13 +31,10 @@ void ContourDetector::Init(const ContourDetectParams& params) {
     VOXEL_DIM_INV = 1.0f / cd_params_.contour_grid_resolution;
 }
 
-// 用 odom_node_ptr 更新当前参考中心
-// 在 contour_detector.h 里的 UpdateOdom，会把：
-// odom_pos_ = odom_node_ptr->position
-// free_odom_resized_ 也更新成以当前 odom 为参考的图像坐标
-// 把 surround_obs_cloud 投到一张以 odom 为中心的局部图像上
-// 在 contour_detector.cpp 的 UpdateImgMatWithCloud 里，每个障碍点都会通过 PointToImgSub 映射到图像坐标。
-// 而这个映射是相对 odom_pos_ 做的，不是全局绝对坐标。
+// odom_node_ptr 决定局部裁剪窗口，但栅格原点会对齐到 map_start 下
+// 固定的 contour_grid_resolution 网格。这样机器人连续运动时，已有障碍
+// 不会因为投影原点每帧变化而产生半个栅格以内的锯齿跳动。
+// free_odom_resized_ 仍使用真实 odom/free-odom 位置，保证内外轮廓判断正确。
 // 在这张局部障碍图像上提取轮廓
 // 然后做 threshold / blur / findContours / approxPolyDP，最后转回 realworld_contour。
 void ContourDetector::BuildTerrainImgAndExtractContour(const NavNodePtr& odom_node_ptr,
@@ -62,7 +59,8 @@ void ContourDetector::UpdateImgMatWithCloud(
     int row_idx, col_idx, inf_row, inf_col;
     const std::vector<int> inflate_vec{-1, 0, 1};
     for (const auto& pcl_p : pc->points) {
-        this->PointToImgSub(pcl_p, odom_pos_, row_idx, col_idx, false, false);
+        this->PointToImgSub(
+            pcl_p, raster_center_, row_idx, col_idx, false, false);
         if (!this->IsIdxesInImg(row_idx, col_idx)) continue;
         for (const auto& dr : inflate_vec) {
             for (const auto& dc : inflate_vec) {
@@ -127,7 +125,8 @@ void ContourDetector::ShowCornerImage(const cv::Mat& img_mat,
     cv::Mat dst = cv::Mat::zeros(MAT_RESIZE, MAT_RESIZE, CV_8UC3);
     const int circle_size = (int)(cd_params_.kRatio*1.5);
     for (std::size_t i=0; i<pc->size(); i++) {
-        cv::Point2f cv_p = this->ConvertPoint3DToCVPoint(pc->points[i], odom_pos_, true);
+        cv::Point2f cv_p = this->ConvertPoint3DToCVPoint(
+            pc->points[i], raster_center_, true);
         cv::circle(dst, cv_p, circle_size, cv::Scalar(128,128,128), -1);
 
     }

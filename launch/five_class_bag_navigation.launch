@@ -1,0 +1,87 @@
+<?xml version="1.0"?>
+<launch>
+  <!-- One-command five-class bag pipeline:
+       bag -> local semantic voxel map -> SemanticOcTree -> FAR Planner.
+       No pathFollower/controller is started. -->
+  <arg name="bag"
+       default="/home/yanaibo/mapless_navigation/dataset/2026-08-21-17-27-12.bag"/>
+  <!-- Start at the selected stable scene time. The first cloud at this offset
+       predates the first retained TF sample by 0.20 s and is dropped; the next
+       cloud has an exact TF and defines map_start. -->
+  <arg name="bagStart" default="18"/>
+  <!-- Waiting for every advertised topic to have a subscriber guarantees that
+       the reference pose is captured from the bag's first grid frame. -->
+  <arg name="bagPlayArgs"
+       default="--clock --delay=4 --wait-for-subscribers"/>
+  <arg name="rviz" default="true"/>
+  <arg name="rvizConfig" default="navigation_demo"/>
+
+  <param name="/use_sim_time" value="true"/>
+
+  <include file="$(find local3d_semantic_voxel_map)/launch/grids_points_voxel_map.launch">
+    <arg name="config"
+         value="$(find far_planner)/config/five_class_local_voxel.yaml"/>
+    <arg name="input_topic" value="/grids_points"/>
+    <arg name="global_frame" value="map"/>
+    <arg name="use_initial_pose_reference" value="true"/>
+    <arg name="reference_frame" value="map_start"/>
+    <arg name="local_cost_frame" value="wuba_base"/>
+    <arg name="ssmi_topic" value="/semantic_pcl/five_class_global_admitted"/>
+    <arg name="rviz" value="false"/>
+  </include>
+
+  <!-- The adapter is intentionally enabled: unlike the direct local-map
+       encoder, it reads this dataset's configurable five-class schema. -->
+  <include file="$(find semantic_octomap)/launch/semantic_octomap_grid.launch">
+    <arg name="input_topic"
+         value="/local_3d_semantic_voxel_map/global_semantic_admission_grid"/>
+    <arg name="output_topic"
+         value="/semantic_pcl/five_class_global_admitted"/>
+    <arg name="semantic_schema"
+         value="$(find far_planner)/config/five_class_semantic_schema.yaml"/>
+    <arg name="use_grid_adapter" value="true"/>
+    <arg name="world_frame_id" value="map_start"/>
+    <arg name="use_initial_pose_reference" value="false"/>
+    <arg name="reference_frame_id" value="map_start"/>
+    <arg name="enable_explicit_revocation" value="true"/>
+    <arg name="rviz" value="false"/>
+  </include>
+
+  <!-- This branch exposes the split through use_local_voxel_map rather than
+       the newer input_mode interface. Load the normal planner tuning first,
+       then overlay only this bag's source and five-class semantic contract. -->
+  <node pkg="far_planner" type="far_planner" name="far_planner"
+        output="screen" required="true">
+    <rosparam command="load" file="$(find far_planner)/config/default.yaml"/>
+    <rosparam command="load"
+              file="$(find far_planner)/config/five_class_bag.yaml"/>
+    <param name="world_frame" value="map_start"/>
+    <param name="semantic_map_topic" value="/octomap_full"/>
+    <param name="local_voxel_topic"
+           value="/local_3d_semantic_voxel_map/voxel_cloud"/>
+    <param name="local_voxel_timeout" value="1.0"/>
+    <remap from="odom_world" to="/fusion_localization"/>
+    <remap from="goal_point" to="/goal_point"/>
+  </node>
+
+  <!-- The bag already publishes /fusion_localization, so no pose-to-odometry
+       adapter is started. Only convert RViz's PoseStamped goal for FAR. -->
+  <node pkg="far_planner" type="pose_stamped_to_point_stamped"
+        name="five_class_goal_adapter" output="screen" required="true">
+    <param name="input_goal_topic" value="/move_base_simple/goal"/>
+    <param name="output_goal_topic" value="/goal_point"/>
+    <param name="default_frame" value="map_start"/>
+  </node>
+
+  <!-- navigation_demo.rviz is shared with the world-frame simulator. Override
+       its fixed frame for this map_start bag without changing that profile. -->
+  <node if="$(arg rviz)" pkg="rviz" type="rviz"
+        name="five_class_navigation_rviz" output="screen"
+        args="-d $(find far_planner)/rviz/$(arg rvizConfig).rviz -f map_start"/>
+
+  <!-- A required player makes Ctrl-C and normal end-of-bag shut down the
+       complete pipeline instead of leaving latched maps running. -->
+  <node pkg="rosbag" type="play" name="five_class_bag_player"
+        args="$(arg bagPlayArgs) --start=$(arg bagStart) $(arg bag)"
+        output="screen" required="true"/>
+</launch>

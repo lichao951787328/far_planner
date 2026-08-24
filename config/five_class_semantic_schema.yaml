@@ -1,0 +1,33 @@
+# Shared label/color/role contract for the five-class recorded dataset.
+semantic_schema:
+  version: 1
+
+  input:
+    label_field: semantic_lable
+    traversability_field: traversability
+
+  defaults:
+    initial_floor_label: 1
+
+  unknown:
+    policy: exclude
+    fallback_label: 0
+    name: unknown
+    meaning: invalid label (including UINT32_MAX) or unconfigured perception output
+    rgb: [127, 127, 127]
+
+  # High measured cost is consumed by FAR's latest-snapshot transient layer.
+  # Do not rewrite it to class 0 here: doing so would insert a local/dynamic
+  # safety observation into the persistent SSMI map.
+  traversability:
+    override_semantics: false
+    obstacle_threshold: 0.75
+    obstacle_label: 0
+
+  classes:
+    - {label: 0, name: background_obstacle, meaning: non-traversable background, rgb: [0, 0, 0],       role: static_obstacle,  global_map: true}
+    - {label: 1, name: flat_ground,         meaning: flat traversable ground,  rgb: [0, 255, 0],     role: terrain,          global_map: true}
+    - {label: 2, name: grass,               meaning: grass terrain,             rgb: [0, 128, 0],     role: terrain,          global_map: true}
+    - {label: 3, name: rough_ground,        meaning: rough but traversable ground, rgb: [160, 82, 45], role: terrain,          global_map: true}
+    - {label: 4, name: manhole_cover,       meaning: manhole cover terrain,     rgb: [128, 128, 128], role: terrain,          global_map: true}
+    - {label: 11, name: reserved_dynamic,   meaning: reserved dynamic obstacle, rgb: [255, 0, 255],   role: dynamic_obstacle, global_map: false}

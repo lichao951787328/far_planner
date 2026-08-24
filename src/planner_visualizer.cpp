@@ -62,14 +62,22 @@ void DPVisualizer::VizSemanticGraphLayers(
     const auto publish_layer = [this](
         const NodePtrStack& nodes, const ros::Publisher& publisher,
         const std::string& ns, const VizColor color,
-        const bool skip_dynamic_blocked) {
+        const bool skip_dynamic_blocked, const float node_scale,
+        const float edge_scale, const float z_offset) {
         MarkerArray markers;
         Marker node_marker;
         Marker edge_marker;
         node_marker.type = Marker::SPHERE_LIST;
         edge_marker.type = Marker::LINE_LIST;
-        this->SetMarker(color, ns + "_nodes", 0.55f, 0.8f, node_marker);
-        this->SetMarker(color, ns + "_edges", 0.12f, 0.65f, edge_marker);
+        this->SetMarker(color, ns + "_nodes", node_scale, 0.9f,
+                        node_marker);
+        this->SetMarker(color, ns + "_edges", edge_scale, 0.85f,
+                        edge_marker);
+        // The graph geometry remains unchanged. Lift only these diagnostic
+        // markers so occupied OctoMap voxels cannot hide lines that lie on
+        // the terrain/obstacle surface in RViz.
+        node_marker.pose.position.z = z_offset;
+        edge_marker.pose.position.z = z_offset;
         std::unordered_set<std::size_t> ids;
         for (const auto& node_ptr : nodes) {
             if (!node_ptr) continue;
@@ -98,18 +106,19 @@ void DPVisualizer::VizSemanticGraphLayers(
     };
 
     publish_layer(static_global, viz_static_global_pub_, "static_global",
-                  VizColor::BLUE, false);
+                  VizColor::BLUE, false, 0.60f, 0.14f, 0.12f);
     publish_layer(static_main, viz_static_main_pub_, "static_main",
-                  VizColor::EMERALD, true);
+                  VizColor::EMERALD, true, 0.65f, 0.16f, 0.18f);
     publish_layer(dynamic_local, viz_dynamic_local_pub_, "dynamic_local",
-                  VizColor::MAGNA, false);
+                  VizColor::MAGNA, false, 0.65f, 0.18f, 0.22f);
     publish_layer(search_graph, viz_search_graph_pub_, "search_graph",
-                  VizColor::GREEN, true);
+                  VizColor::YELLOW, true, 0.70f, 0.18f, 0.25f);
 
     MarkerArray blocked_markers;
     Marker blocked;
     blocked.type = Marker::LINE_LIST;
     this->SetMarker(VizColor::RED, "dynamic_blocked", 0.22f, 0.9f, blocked);
+    blocked.pose.position.z = 0.28f;
     std::unordered_set<std::size_t> search_ids;
     for (const auto& node_ptr : search_graph) {
         if (node_ptr) search_ids.insert(node_ptr->id);
