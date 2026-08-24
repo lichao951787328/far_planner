@@ -499,12 +499,18 @@ inline bool IsStartConnectionCandidate(const NavNode& node) {
            static_cast<bool>(node.ctnode);
 }
 
-/** Local overlay vertices are meaningful only inside their observation or
- * stitch window. Confirmed static vertices are global and must not have an
- * already validated start edge removed solely because of distance. */
+/** Every start edge obeys the optional universal limit. Local overlay
+ * vertices additionally remain meaningful only inside their observation or
+ * stitch window; confirmed static vertices are exempt only from these moving
+ * local-window limits. */
 inline bool ShouldPruneStartConnectionForRange(
     const NavNode& node, const float distance,
-    const float dynamic_range, const float static_stitch_range) {
+    const float dynamic_range, const float static_stitch_range,
+    const float start_connection_max_distance = -1.0f) {
+    if (start_connection_max_distance > 0.0f &&
+        distance > start_connection_max_distance) {
+        return true;
+    }
     if (node.source == GraphNodeSource::STATIC_GLOBAL) return false;
     const float range = node.source == GraphNodeSource::DYNAMIC_LOCAL
         ? dynamic_range : static_stitch_range;

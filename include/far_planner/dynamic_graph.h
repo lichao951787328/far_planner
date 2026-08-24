@@ -21,6 +21,9 @@ struct DynamicGraphParams {
     float frontier_perimeter_thred;
     float static_update_radius = 28.5f;
     float static_stitch_radius = 28.5f;
+    // Universal planar limit for odom/start query edges. A non-positive value
+    // preserves the legacy unlimited behavior.
+    float start_connection_max_distance = -1.0f;
     float dynamic_position_alpha = 0.65f;
     // When positive, rejected visibility candidates no farther than this
     // radius are exported as diagnostic markers. This is observability only.
@@ -907,7 +910,10 @@ public:
 
     /* Get Internal Values */
     const NavNodePtr    GetOdomNode()         const { return odom_node_ptr_;};
-    NodePtrStack GetNavGraph() const {
+    /** Every node currently eligible for graph search before applying robot
+     * reachability. This diagnostic view preserves disconnected valid
+     * components when the odom/start node cannot attach to the graph. */
+    NodePtrStack GetEligibleSearchGraph() const {
         NodePtrStack eligible_graph;
         std::unordered_set<std::size_t> eligible_ids;
         const auto append_eligible = [&eligible_graph, &eligible_ids](
@@ -943,6 +949,15 @@ public:
                 HasActiveSearchEligibleIncidentEdge(*node_ptr)) {
                 append_eligible(node_ptr);
             }
+        }
+        return eligible_graph;
+    };
+    NodePtrStack GetNavGraph() const {
+        const NodePtrStack eligible_graph = GetEligibleSearchGraph();
+        std::unordered_set<std::size_t> eligible_ids;
+        eligible_ids.reserve(eligible_graph.size());
+        for (const auto& node_ptr : eligible_graph) {
+            if (node_ptr) eligible_ids.insert(node_ptr->id);
         }
         const std::unordered_set<std::size_t> robot_reachable =
             ActiveReachableNodeIdsWithin(odom_node_ptr_, eligible_ids);

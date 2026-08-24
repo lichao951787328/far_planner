@@ -19,14 +19,14 @@ MapHandler/semantic_local_window_radius: 9.0
 MapHandler/local_planner_radius: 9.0
 MapHandler/local_voxel_resolution: 0.10
 MapHandler/local_voxel_min_semantic_confidence: 0.55
-MapHandler/local_voxel_obstacle_cost_threshold: 0.60
-MapHandler/local_voxel_static_labels: [0, 4]
-MapHandler/local_voxel_terrain_labels: [1, 2, 3]
+MapHandler/local_voxel_obstacle_cost_threshold: 0.55
+MapHandler/local_voxel_static_labels: [0, 2, 3, 4]
+MapHandler/local_voxel_terrain_labels: [1]
 MapHandler/local_voxel_dynamic_labels: [11]
 
-# Labels 0 and 4 are obstacles in this navigation profile. Label 0 can also
-# contain objects which may move. The local box is a short forward-looking
-# crop, so requiring
+# Every class except flat ground is an obstacle in this navigation profile.
+# Label 0 can also contain objects which may move. The local box is a short
+# forward-looking crop, so requiring
 # 15 FAR updates made most wall corners leave the crop before promotion and the
 # accumulated graph stopped growing.  Three observations (about 1.2 s at
 # main_run_freq=2.5 Hz) are enough to bridge consecutive local windows.  A node
@@ -40,22 +40,29 @@ Graph/static_promotion_requires_active_edge: true
 Graph/static_promotion_requires_main_component: true
 Graph/static_promotion_requires_global_evidence: true
 Graph/static_visibility_remove_frames: 3
+# Odom/start query edges may connect only to Graph nodes within this planar
+# distance. This also removes an existing start edge after the robot moves out
+# of range; it does not limit persistent obstacle-to-obstacle Graph topology.
+Graph/start_connection_max_distance: 20.0
 # Three contour cells.  Duplicate suppression still requires the same corner
 # type, compatible free-space direction and a collision-free local match, so
 # opposite door-frame corners are not merged solely because they are nearby.
+# 静态轮廓节点的重复抑制半径，单位是米。
+# 当新提取出一个静态障碍轮廓拐点时，如果在二维水平距离 0.6m 内已经有非常相似的静态节点，新的候选节点就不会加入 Graph。
 Graph/static_duplicate_radius: 0.6
+# 近距离节点连边失败的诊断范围，单位也是米。Graph 在检查两个节点能不能建立可见边时，如果节点距离 <= 3.0m，就会打印诊断信息，帮助分析为什么近距离节点连边失败。
 Graph/diagnostic_near_pair_radius: 3.0
 
 # RGB values exactly match five_class_semantic_schema.yaml. Labels are used by
 # the local voxel snapshot; RGB is used when FAR decodes SemanticOcTree.
 MapHandler/obstacle_groups:
   - {name: background_obstacle, label: 0, rgb: [0, 0, 0]}
+  - {name: grass,               label: 2, rgb: [0, 128, 0]}
+  - {name: rough_ground,        label: 3, rgb: [160, 82, 45]}
   - {name: manhole_cover,       label: 4, rgb: [128, 128, 128]}
 
 MapHandler/terrain_support_groups:
   - {name: flat_ground,   label: 1, rgb: [0, 255, 0]}
-  - {name: grass,         label: 2, rgb: [0, 128, 0]}
-  - {name: rough_ground,  label: 3, rgb: [160, 82, 45]}
 
 # FAR requires a non-empty role table. Label 11 is reserved and is absent from
 # this bag; keeping it here makes accidental future dynamic data conservative.

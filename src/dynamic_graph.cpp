@@ -1087,6 +1087,7 @@ void DynamicGraph::UpdateOdomConnections() {
     std::size_t persistent_candidates = 0;
     std::size_t local_candidates = 0;
     std::size_t not_start_candidate = 0;
+    std::size_t outside_start_range = 0;
     std::size_t not_topology_connected = 0;
     EdgeRejectionStats rejections;
     float farthest_candidate = 0.0f;
@@ -1104,6 +1105,16 @@ void DynamicGraph::UpdateOdomConnections() {
             ++not_start_candidate;
             continue;
         }
+        const float distance =
+            (candidate->position - odom_node_ptr_->position).norm_flat();
+        farthest_candidate = std::max(farthest_candidate, distance);
+        if (ShouldPruneStartConnectionForRange(
+                *candidate, distance, FARUtil::kSensorRange,
+                dg_params_.static_stitch_radius,
+                dg_params_.start_connection_max_distance)) {
+            ++outside_start_range;
+            continue;
+        }
         // A start edge to a corner that has no reusable graph edge produces
         // exactly the two-node dead end seen in the SSMI replay: odom and one
         // blue orphan.  Preserve that corner for future matching, but do not
@@ -1118,9 +1129,6 @@ void DynamicGraph::UpdateOdomConnections() {
             ++local_candidates;
         }
         ++validated_candidates;
-        const float distance =
-            (candidate->position - odom_node_ptr_->position).norm_flat();
-        farthest_candidate = std::max(farthest_candidate, distance);
 
         EdgeValidationResult validation =
             ContourGraph::ValidateVisibilityEdgeWithRoute(
@@ -1162,10 +1170,10 @@ void DynamicGraph::UpdateOdomConnections() {
     }
     ROS_INFO_THROTTLE(
         5.0,
-        "DG start connections: unique=%zu validated=%zu persistent=%zu local=%zu accepted=%zu skipped[not_start_candidate=%zu no_topology_edge=%zu] farthest_candidate=%.2fm farthest_edge=%.2fm reject[unreachable=%zu direction=%zu static_cloud=%zu dynamic_cloud=%zu polygon=%zu terrain=%zu vote=%zu]",
+        "DG start connections: unique=%zu validated=%zu persistent=%zu local=%zu accepted=%zu skipped[not_start_candidate=%zu outside_start_range=%zu no_topology_edge=%zu] farthest_candidate=%.2fm farthest_edge=%.2fm reject[unreachable=%zu direction=%zu static_cloud=%zu dynamic_cloud=%zu polygon=%zu terrain=%zu vote=%zu]",
         checked_candidates.size(), validated_candidates,
         persistent_candidates, local_candidates, accepted_connections,
-        not_start_candidate, not_topology_connected,
+        not_start_candidate, outside_start_range, not_topology_connected,
         farthest_candidate, farthest_connection, rejections.unreachable,
         rejections.direction_rejected, rejections.static_cloud_blocked,
         rejections.dynamic_cloud_blocked, rejections.polygon_blocked,
@@ -2036,7 +2044,8 @@ void DynamicGraph::UpdateGlobalNearNodes() {
             (node_ptr->position - odom_node_ptr_->position).norm_flat();
         if (ShouldPruneStartConnectionForRange(
                 *node_ptr, distance, FARUtil::kSensorRange,
-                dg_params_.static_stitch_radius)) {
+                dg_params_.static_stitch_radius,
+                dg_params_.start_connection_max_distance)) {
             ErasePolyEdge(odom_node_ptr_, node_ptr);
             EraseEdge(odom_node_ptr_, node_ptr);
         }

@@ -114,6 +114,12 @@ Visualization Manager:
           Value: true
         - Class: rviz/MarkerArray
           Enabled: true
+          Marker Topic: /viz_current_eligible_graph
+          Name: Current Eligible Graph (May Be Disconnected)
+          Queue Size: 10
+          Value: true
+        - Class: rviz/MarkerArray
+          Enabled: true
           Marker Topic: /viz_dynamic_blocked_edges
           Name: Dynamic Blocked Edges
           Queue Size: 10

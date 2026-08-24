@@ -35,7 +35,8 @@ private:
     ros::Publisher viz_contour_pub_, viz_map_pub_, viz_view_extend;
     ros::Publisher viz_static_global_pub_, viz_static_main_pub_;
     ros::Publisher viz_dynamic_local_pub_;
-    ros::Publisher viz_search_graph_pub_, viz_dynamic_blocked_pub_;
+    ros::Publisher viz_eligible_graph_pub_, viz_search_graph_pub_;
+    ros::Publisher viz_dynamic_blocked_pub_;
 
 public:
     DPVisualizer() = default;
@@ -78,6 +79,7 @@ public:
     void VizSemanticGraphLayers(const NodePtrStack& static_global,
                                 const NodePtrStack& static_main,
                                 const NodePtrStack& dynamic_local,
+                                const NodePtrStack& eligible_graph,
                                 const NodePtrStack& search_graph);
     void VizPointCloud(const ros::Publisher& viz_pub, 
                        const PointCloudPtr& pc);

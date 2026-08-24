@@ -143,6 +143,7 @@ Graph/node_finalize_thred               : 6
 Graph/filter_pool_size                  : 12
 Graph/static_update_radius              : 28.5    # Covers the corners of the +/-20 m square semantic window
 Graph/static_stitch_radius              : 28.5    # Keep/reconnect visible static corners across the complete local square
+Graph/start_connection_max_distance    : -1.0    # <=0 keeps legacy unlimited odom/start query edges; scenario overlays may set a finite radius
 Graph/dynamic_position_alpha            : 0.65    # Current-frame weight for matched dynamic routing vertices
 Graph/diagnostic_near_pair_radius       : 0.0     # Disabled normally; positive values publish rejected near-pair diagnostics
 Graph/static_confirm_frames             : 3       # Positive semantic observations before persistence

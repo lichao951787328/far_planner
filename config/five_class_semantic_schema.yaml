@@ -19,15 +19,17 @@ semantic_schema:
   # High measured cost is consumed by FAR's latest-snapshot transient layer.
   # Do not rewrite it to class 0 here: doing so would insert a local/dynamic
   # safety observation into the persistent SSMI map.
+  # 这里的 obstacle_label: 0 并不是“只有 label 0 是障碍”，而是“启用代价覆盖语义时，统一改写成哪个障碍标签”。
   traversability:
     override_semantics: false
     obstacle_threshold: 0.75
     obstacle_label: 0
 
+# 是不是障碍会在这个地方来定义。
   classes:
     - {label: 0, name: background_obstacle, meaning: non-traversable background, rgb: [0, 0, 0],       role: static_obstacle,  global_map: true}
     - {label: 1, name: flat_ground,         meaning: flat traversable ground,  rgb: [0, 255, 0],     role: terrain,          global_map: true}
-    - {label: 2, name: grass,               meaning: grass terrain,             rgb: [0, 128, 0],     role: terrain,          global_map: true}
-    - {label: 3, name: rough_ground,        meaning: rough but traversable ground, rgb: [160, 82, 45], role: terrain,          global_map: true}
+    - {label: 2, name: grass,               meaning: non-traversable grass,      rgb: [0, 128, 0],     role: static_obstacle,  global_map: true}
+    - {label: 3, name: rough_ground,        meaning: non-traversable rough ground, rgb: [160, 82, 45], role: static_obstacle,  global_map: true}
     - {label: 4, name: manhole_cover,       meaning: non-traversable manhole cover, rgb: [128, 128, 128], role: static_obstacle, global_map: true}
     - {label: 11, name: reserved_dynamic,   meaning: reserved dynamic obstacle, rgb: [255, 0, 255],   role: dynamic_obstacle, global_map: false}

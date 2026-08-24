@@ -30,6 +30,8 @@ void DPVisualizer::Init(const ros::NodeHandle& nh) {
         nh_.advertise<MarkerArray>("/viz_static_main_graph", 2);
     viz_dynamic_local_pub_ =
         nh_.advertise<MarkerArray>("/viz_dynamic_local_graph", 2);
+    viz_eligible_graph_pub_ =
+        nh_.advertise<MarkerArray>("/viz_current_eligible_graph", 2);
     viz_search_graph_pub_ =
         nh_.advertise<MarkerArray>("/viz_current_search_graph", 2);
     viz_dynamic_blocked_pub_ =
@@ -58,7 +60,8 @@ void DPVisualizer::VizNodes(const NodePtrStack& node_stack,
 
 void DPVisualizer::VizSemanticGraphLayers(
     const NodePtrStack& static_global, const NodePtrStack& static_main,
-    const NodePtrStack& dynamic_local, const NodePtrStack& search_graph) {
+    const NodePtrStack& dynamic_local, const NodePtrStack& eligible_graph,
+    const NodePtrStack& search_graph) {
     const auto publish_layer = [this](
         const NodePtrStack& nodes, const ros::Publisher& publisher,
         const std::string& ns, const VizColor color,
@@ -111,6 +114,12 @@ void DPVisualizer::VizSemanticGraphLayers(
                   VizColor::EMERALD, true, 0.65f, 0.16f, 0.18f);
     publish_layer(dynamic_local, viz_dynamic_local_pub_, "dynamic_local",
                   VizColor::MAGNA, false, 0.65f, 0.18f, 0.22f);
+    // The eligible layer intentionally ignores robot reachability, but still
+    // displays only currently active edges. It therefore remains visible when
+    // an occupied odom/start node temporarily disconnects the yellow search
+    // graph from otherwise valid topology.
+    publish_layer(eligible_graph, viz_eligible_graph_pub_, "eligible_graph",
+                  VizColor::ORANGE, true, 0.55f, 0.12f, 0.20f);
     publish_layer(search_graph, viz_search_graph_pub_, "search_graph",
                   VizColor::YELLOW, true, 0.70f, 0.18f, 0.25f);
 

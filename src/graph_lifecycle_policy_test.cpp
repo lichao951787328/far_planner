@@ -348,15 +348,22 @@ TEST(GraphLifecyclePolicy, StartQueryKeepsLocalLayersSnapshotBound) {
     EXPECT_FALSE(IsStartConnectionCandidate(dynamic));
 }
 
-TEST(GraphLifecyclePolicy, StartConnectionRangePruningPreservesGlobalStatic) {
+TEST(GraphLifecyclePolicy, StartConnectionRangePruningCombinesLocalAndUniversalLimits) {
     const float dynamic_range = 20.0f;
     const float static_stitch_range = 28.5f;
+    const float start_max_distance = 20.0f;
     NavNode global = MakeNode(GraphNodeSource::STATIC_GLOBAL);
     NavNode candidate = MakeNode(GraphNodeSource::STATIC_CANDIDATE);
     NavNode dynamic = MakeNode(GraphNodeSource::DYNAMIC_LOCAL);
 
     EXPECT_FALSE(ShouldPruneStartConnectionForRange(
         global, 100.0f, dynamic_range, static_stitch_range));
+    EXPECT_FALSE(ShouldPruneStartConnectionForRange(
+        global, 20.0f, dynamic_range, static_stitch_range,
+        start_max_distance));
+    EXPECT_TRUE(ShouldPruneStartConnectionForRange(
+        global, 20.01f, dynamic_range, static_stitch_range,
+        start_max_distance));
     EXPECT_FALSE(ShouldPruneStartConnectionForRange(
         candidate, 28.0f, dynamic_range, static_stitch_range));
     EXPECT_TRUE(ShouldPruneStartConnectionForRange(
@@ -365,6 +372,9 @@ TEST(GraphLifecyclePolicy, StartConnectionRangePruningPreservesGlobalStatic) {
         dynamic, 19.5f, dynamic_range, static_stitch_range));
     EXPECT_TRUE(ShouldPruneStartConnectionForRange(
         dynamic, 20.5f, dynamic_range, static_stitch_range));
+    EXPECT_TRUE(ShouldPruneStartConnectionForRange(
+        candidate, 20.01f, dynamic_range, static_stitch_range,
+        start_max_distance));
 }
 
 TEST(GraphLifecyclePolicy, ConfirmedStaticNeedsThreeLocalMisses) {

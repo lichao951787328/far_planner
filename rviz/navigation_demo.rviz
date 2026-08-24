@@ -129,6 +129,15 @@ Visualization Manager:
           Queue Size: 20
           Value: true
         - Class: rviz/MarkerArray
+          Enabled: true
+          Marker Topic: /viz_current_eligible_graph
+          Name: Current Eligible Graph (Orange, May Be Disconnected)
+          Namespaces:
+            eligible_graph_edges: true
+            eligible_graph_nodes: true
+          Queue Size: 20
+          Value: true
+        - Class: rviz/MarkerArray
           Enabled: false
           Marker Topic: /viz_dynamic_local_graph
           Name: Current Dynamic Local Graph

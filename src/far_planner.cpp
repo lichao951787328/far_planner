@@ -569,7 +569,8 @@ void FARMaster::Loop() {
         planner_viz_.VizSemanticGraphLayers(
             graph_manager_.GetStaticGraphNodes(),
             graph_manager_.GetStaticMainGraphNodes(),
-            graph_manager_.GetDynamicLocalNodes(), nav_graph_);
+            graph_manager_.GetDynamicLocalNodes(),
+            graph_manager_.GetEligibleSearchGraph(), nav_graph_);
       }
       PublishSeconds(main_loop_time_pub_, ros::WallTime::now() - loop_start);
       loop_rate.sleep();
@@ -736,7 +737,8 @@ void FARMaster::Loop() {
     planner_viz_.VizSemanticGraphLayers(
         graph_manager_.GetStaticGraphNodes(),
         graph_manager_.GetStaticMainGraphNodes(),
-        graph_manager_.GetDynamicLocalNodes(), nav_graph_);
+        graph_manager_.GetDynamicLocalNodes(),
+        graph_manager_.GetEligibleSearchGraph(), nav_graph_);
     PublishSeconds(main_loop_time_pub_, ros::WallTime::now() - loop_start);
     loop_rate.sleep();
   }
@@ -1286,6 +1288,8 @@ void FARMaster::LoadROSParams() {
                            graph_params_.static_update_radius, 28.5f);
   private_nh_.param<float>(graph_prefix  + "static_stitch_radius",
                            graph_params_.static_stitch_radius, 28.5f);
+  private_nh_.param<float>(graph_prefix  + "start_connection_max_distance",
+                           graph_params_.start_connection_max_distance, -1.0f);
   private_nh_.param<float>(graph_prefix  + "dynamic_position_alpha",
                            graph_params_.dynamic_position_alpha, 0.65f);
   private_nh_.param<float>(graph_prefix  + "diagnostic_near_pair_radius",
