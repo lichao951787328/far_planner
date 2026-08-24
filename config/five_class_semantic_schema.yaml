@@ -29,5 +29,5 @@ semantic_schema:
     - {label: 1, name: flat_ground,         meaning: flat traversable ground,  rgb: [0, 255, 0],     role: terrain,          global_map: true}
     - {label: 2, name: grass,               meaning: grass terrain,             rgb: [0, 128, 0],     role: terrain,          global_map: true}
     - {label: 3, name: rough_ground,        meaning: rough but traversable ground, rgb: [160, 82, 45], role: terrain,          global_map: true}
-    - {label: 4, name: manhole_cover,       meaning: manhole cover terrain,     rgb: [128, 128, 128], role: terrain,          global_map: true}
+    - {label: 4, name: manhole_cover,       meaning: non-traversable manhole cover, rgb: [128, 128, 128], role: static_obstacle, global_map: true}
     - {label: 11, name: reserved_dynamic,   meaning: reserved dynamic obstacle, rgb: [255, 0, 255],   role: dynamic_obstacle, global_map: false}

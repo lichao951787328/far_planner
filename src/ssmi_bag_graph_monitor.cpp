@@ -19,8 +19,10 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <deque>
 #include <fstream>
 #include <iomanip>
+#include <iterator>
 #include <limits>
 #include <map>
 #include <queue>
@@ -144,8 +146,16 @@ class SsmiBagGraphMonitor {
                       visibility_endpoint_exclusion_, 0.875);
     private_nh_.param("static_accumulation_resolution",
                       static_accumulation_resolution_, 0.20);
+    private_nh_.param("initial_alignment_cache_duration",
+                      initial_alignment_cache_duration_, 3.0);
+    private_nh_.param("initial_alignment_max_interpolation_gap",
+                      initial_alignment_max_interpolation_gap_, 0.25);
     private_nh_.param("static_component_failure_frames",
                       static_component_failure_frames_, 5);
+    initial_alignment_cache_duration_ =
+        std::max(0.5, initial_alignment_cache_duration_);
+    initial_alignment_max_interpolation_gap_ =
+        std::max(1e-3, initial_alignment_max_interpolation_gap_);
     static_component_failure_frames_ =
         std::max(1, static_component_failure_frames_);
 
@@ -252,6 +262,7 @@ class SsmiBagGraphMonitor {
     if (!message) return;
     source_odom_frame_ = message->header.frame_id;
     odom_stamp_ = message->header.stamp;
+    CacheOdom(*message);
 
     tf::Pose source_pose;
     tf::poseMsgToTF(message->pose.pose, source_pose);
@@ -275,17 +286,124 @@ class SsmiBagGraphMonitor {
     current_robot_.y = aligned_pose.getOrigin().y();
     current_robot_.z = aligned_pose.getOrigin().z();
     have_aligned_odom_ = true;
-    if (!have_initial_alignment_) {
-      initial_position_error_ = std::sqrt(
-          current_robot_.x * current_robot_.x +
-          current_robot_.y * current_robot_.y +
-          current_robot_.z * current_robot_.z);
-      initial_yaw_error_deg_ = std::fabs(NormalizeAngle(
-          tf::getYaw(aligned_pose.getRotation()))) * 180.0 / M_PI;
-      have_initial_alignment_ = true;
-      ROS_INFO("SSMI initial alignment: position error=%.6f m, yaw error=%.4f deg",
-               initial_position_error_, initial_yaw_error_deg_);
+    TryInitializeAlignment();
+  }
+
+  void CacheOdom(const nav_msgs::Odometry& message) {
+    if (message.header.stamp.isZero()) return;
+    const auto position = std::lower_bound(
+        odom_history_.begin(), odom_history_.end(), message.header.stamp,
+        [](const nav_msgs::Odometry& cached, const ros::Time& stamp) {
+          return cached.header.stamp < stamp;
+        });
+    if (position != odom_history_.end() &&
+        position->header.stamp == message.header.stamp) {
+      *position = message;
+    } else {
+      odom_history_.insert(position, message);
     }
+
+    // Keep the reference neighborhood until the one-time alignment check has
+    // completed.  Ordinarily this retains only a few dozen 10 Hz messages.
+    if (!initial_reference_stamp_.isZero() && !have_initial_alignment_) return;
+    const ros::Time oldest = message.header.stamp -
+        ros::Duration(initial_alignment_cache_duration_);
+    while (!odom_history_.empty() &&
+           odom_history_.front().header.stamp < oldest) {
+      odom_history_.pop_front();
+    }
+  }
+
+  bool SourcePoseAtReference(tf::Pose* pose, std::string* frame,
+                             bool* interpolated,
+                             double* interpolation_span) const {
+    if (!pose || !frame || !interpolated || !interpolation_span ||
+        initial_reference_stamp_.isZero() || odom_history_.empty()) {
+      return false;
+    }
+    const auto after = std::lower_bound(
+        odom_history_.begin(), odom_history_.end(), initial_reference_stamp_,
+        [](const nav_msgs::Odometry& cached, const ros::Time& stamp) {
+          return cached.header.stamp < stamp;
+        });
+    constexpr double exact_tolerance = 1e-6;
+    if (after != odom_history_.end() &&
+        std::fabs((after->header.stamp - initial_reference_stamp_).toSec()) <=
+            exact_tolerance) {
+      tf::poseMsgToTF(after->pose.pose, *pose);
+      *frame = after->header.frame_id;
+      *interpolated = false;
+      *interpolation_span = 0.0;
+      return true;
+    }
+    if (after == odom_history_.begin() || after == odom_history_.end()) {
+      return false;
+    }
+    const auto before = std::prev(after);
+    if (!SameFrame(before->header.frame_id, after->header.frame_id)) {
+      return false;
+    }
+    const double span = (after->header.stamp - before->header.stamp).toSec();
+    if (span <= 0.0 || span > initial_alignment_max_interpolation_gap_) {
+      return false;
+    }
+    const double ratio =
+        (initial_reference_stamp_ - before->header.stamp).toSec() / span;
+    if (ratio < 0.0 || ratio > 1.0) return false;
+
+    tf::Pose before_pose;
+    tf::Pose after_pose;
+    tf::poseMsgToTF(before->pose.pose, before_pose);
+    tf::poseMsgToTF(after->pose.pose, after_pose);
+    const tf::Vector3 origin = before_pose.getOrigin() * (1.0 - ratio) +
+                               after_pose.getOrigin() * ratio;
+    tf::Quaternion rotation = before_pose.getRotation().slerp(
+        after_pose.getRotation(), ratio);
+    rotation.normalize();
+    *pose = tf::Pose(rotation, origin);
+    *frame = before->header.frame_id;
+    *interpolated = true;
+    *interpolation_span = span;
+    return true;
+  }
+
+  void TryInitializeAlignment() {
+    if (have_initial_alignment_ || initial_reference_stamp_.isZero()) return;
+    tf::Pose source_pose;
+    std::string source_frame;
+    bool interpolated = false;
+    double interpolation_span = 0.0;
+    if (!SourcePoseAtReference(&source_pose, &source_frame, &interpolated,
+                               &interpolation_span)) {
+      return;
+    }
+
+    tf::Pose aligned_pose = source_pose;
+    if (!SameFrame(source_frame, expected_frame_)) {
+      try {
+        tf::StampedTransform transform;
+        // map -> map_start is static.  Use its latest value, but evaluate the
+        // cached source pose at the exact reference acquisition timestamp.
+        tf_listener_.lookupTransform(expected_frame_, source_frame,
+                                     ros::Time(0), transform);
+        aligned_pose = transform * source_pose;
+      } catch (const tf::TransformException& exception) {
+        ROS_WARN_THROTTLE(
+            2.0, "SSMI monitor waiting to evaluate reference pose: %s",
+            exception.what());
+        return;
+      }
+    }
+
+    initial_position_error_ = aligned_pose.getOrigin().length();
+    initial_yaw_error_deg_ = std::fabs(NormalizeAngle(
+        tf::getYaw(aligned_pose.getRotation()))) * 180.0 / M_PI;
+    have_initial_alignment_ = true;
+    ROS_INFO("SSMI initial alignment at %.9f: position error=%.6f m, "
+             "yaw error=%.4f deg, odom match=%s, interpolation span=%.6f s",
+             initial_reference_stamp_.toSec(), initial_position_error_,
+             initial_yaw_error_deg_, interpolated ? "interpolated" : "exact",
+             interpolation_span);
   }
 
   void MapCallback(const octomap_msgs::OctomapConstPtr& message) {
@@ -314,6 +432,9 @@ class SsmiBagGraphMonitor {
       local_voxel_zero_stamp_seen_ = true;
       return;
     }
+    if (initial_reference_stamp_.isZero()) {
+      initial_reference_stamp_ = message->header.stamp;
+    }
     have_local_voxel_ = true;
     if (local_voxel_stamp_.isZero() ||
         message->header.stamp > local_voxel_stamp_) {
@@ -322,6 +443,7 @@ class SsmiBagGraphMonitor {
     } else if (message->header.stamp < local_voxel_stamp_) {
       local_voxel_out_of_order_seen_ = true;
     }
+    TryInitializeAlignment();
   }
 
   void StaticCloudCallback(const sensor_msgs::PointCloud2ConstPtr& message) {
@@ -971,6 +1093,7 @@ class SsmiBagGraphMonitor {
   std::ofstream csv_;
   ros::WallTime start_wall_, first_graph_wall_, last_clock_wall_;
   ros::Time last_clock_, map_stamp_, odom_stamp_, local_voxel_stamp_;
+  ros::Time initial_reference_stamp_;
   ros::Time graph_static_stamp_;
 
   bool auto_goal_ = false;
@@ -1007,6 +1130,8 @@ class SsmiBagGraphMonitor {
   double collision_check_radius_ = 10.0;
   double visibility_endpoint_exclusion_ = 0.875;
   double static_accumulation_resolution_ = 0.20;
+  double initial_alignment_cache_duration_ = 3.0;
+  double initial_alignment_max_interpolation_gap_ = 0.25;
   int static_component_failure_frames_ = 5;
   double initial_position_error_ = std::numeric_limits<double>::infinity();
   double initial_yaw_error_deg_ = std::numeric_limits<double>::infinity();
@@ -1029,6 +1154,7 @@ class SsmiBagGraphMonitor {
   float main_loop_time_ = 0.0f;
 
   Point current_robot_, goal_, waypoint_;
+  std::deque<nav_msgs::Odometry> odom_history_;
   std::vector<Point> latest_path_points_;
   MarkerArray latest_full_graph_;
   std::vector<std::string> graph_violation_details_;

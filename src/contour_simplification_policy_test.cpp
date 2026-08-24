@@ -20,6 +20,25 @@ TEST(ContourSimplificationPolicy, PreservesDoorLipAndRightAngle) {
     EXPECT_EQ(6u, contour.size());
 }
 
+TEST(ContourSimplificationPolicy, AggressiveProfileCollapsesShortZigZagRun) {
+    PointStack contour = {
+        Point3D(0.0f, 0.0f, 0.0f), Point3D(1.0f, 0.10f, 0.0f),
+        Point3D(2.0f, 0.0f, 0.0f), Point3D(3.0f, 0.10f, 0.0f),
+        Point3D(4.0f, 0.0f, 0.0f), Point3D(4.0f, 2.0f, 0.0f),
+        Point3D(0.0f, 2.0f, 0.0f)};
+    SimplifyClosedContourCollinearVertices(contour, 0.30f, 15.0f);
+    EXPECT_EQ(4u, contour.size());
+}
+
+TEST(ContourSimplificationPolicy, AggressiveProfileStillPreservesDoorLip) {
+    PointStack contour = {
+        Point3D(0.0f, 0.0f, 0.0f), Point3D(2.0f, 0.0f, 0.0f),
+        Point3D(2.0f, 0.5f, 0.0f), Point3D(4.0f, 0.5f, 0.0f),
+        Point3D(4.0f, 2.0f, 0.0f), Point3D(0.0f, 2.0f, 0.0f)};
+    SimplifyClosedContourCollinearVertices(contour, 0.30f, 15.0f);
+    EXPECT_EQ(6u, contour.size());
+}
+
 TEST(ContourRasterAlignment, SnapsPositiveAndNegativeWorldCoordinates) {
     EXPECT_NEAR(1.2f, AlignContourRasterCoordinate(1.13f, 0.2f), 1e-6f);
     EXPECT_NEAR(-1.2f, AlignContourRasterCoordinate(-1.13f, 0.2f), 1e-6f);

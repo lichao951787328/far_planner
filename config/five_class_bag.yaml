@@ -9,17 +9,24 @@ enable_goal_recording: false
 contour_grid_resolution: 0.2
 sensor_range: 9.0
 terrain_range: 9.0
+# The five-class segmentation leaves short zig-zag runs along otherwise
+# continuous obstacle boundaries.  Merge those runs more aggressively than
+# the generic profile while the angle gate still preserves real corners.
+CDetector/dynamic_simplify_ratio: 2.5
+CDetector/collinear_tolerance: 0.50
+CDetector/collinear_angle_deg: 15.0
 MapHandler/semantic_local_window_radius: 9.0
 MapHandler/local_planner_radius: 9.0
 MapHandler/local_voxel_resolution: 0.10
 MapHandler/local_voxel_min_semantic_confidence: 0.55
 MapHandler/local_voxel_obstacle_cost_threshold: 0.60
-MapHandler/local_voxel_static_labels: [0]
-MapHandler/local_voxel_terrain_labels: [1, 2, 3, 4]
+MapHandler/local_voxel_static_labels: [0, 4]
+MapHandler/local_voxel_terrain_labels: [1, 2, 3]
 MapHandler/local_voxel_dynamic_labels: [11]
 
-# Label 0 contains every geometric obstacle in this dataset, including objects
-# which may move.  The local box is a short forward-looking crop, so requiring
+# Labels 0 and 4 are obstacles in this navigation profile. Label 0 can also
+# contain objects which may move. The local box is a short forward-looking
+# crop, so requiring
 # 15 FAR updates made most wall corners leave the crop before promotion and the
 # accumulated graph stopped growing.  Three observations (about 1.2 s at
 # main_run_freq=2.5 Hz) are enough to bridge consecutive local windows.  A node
@@ -33,19 +40,22 @@ Graph/static_promotion_requires_active_edge: true
 Graph/static_promotion_requires_main_component: true
 Graph/static_promotion_requires_global_evidence: true
 Graph/static_visibility_remove_frames: 3
-Graph/static_duplicate_radius: 0.4
+# Three contour cells.  Duplicate suppression still requires the same corner
+# type, compatible free-space direction and a collision-free local match, so
+# opposite door-frame corners are not merged solely because they are nearby.
+Graph/static_duplicate_radius: 0.6
 Graph/diagnostic_near_pair_radius: 3.0
 
 # RGB values exactly match five_class_semantic_schema.yaml. Labels are used by
 # the local voxel snapshot; RGB is used when FAR decodes SemanticOcTree.
 MapHandler/obstacle_groups:
   - {name: background_obstacle, label: 0, rgb: [0, 0, 0]}
+  - {name: manhole_cover,       label: 4, rgb: [128, 128, 128]}
 
 MapHandler/terrain_support_groups:
   - {name: flat_ground,   label: 1, rgb: [0, 255, 0]}
   - {name: grass,         label: 2, rgb: [0, 128, 0]}
   - {name: rough_ground,  label: 3, rgb: [160, 82, 45]}
-  - {name: manhole_cover, label: 4, rgb: [128, 128, 128]}
 
 # FAR requires a non-empty role table. Label 11 is reserved and is absent from
 # this bag; keeping it here makes accidental future dynamic data conservative.
