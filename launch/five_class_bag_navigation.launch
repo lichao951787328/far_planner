@@ -5,7 +5,7 @@
        -> localPlanner -> /path -> optional pathFollower. The follower emits
        only a generic Twist; no Go2 command adapter is started here. -->
   <arg name="bag"
-       default="/home/yanaibo/mapless_navigation/dataset/2026-08-22-09-33-02.bag"/>
+       default="/home/wuba/mapless_nav/src/dateset/2026-08-22-09-33-02.bag"/>
   <!-- Start at the selected stable scene time. The first cloud at this offset
        predates the first retained TF sample by 0.20 s and is dropped; the next
        cloud has an exact TF and defines map_start. -->
