@@ -4,7 +4,7 @@
        bag -> local semantic voxel map -> SemanticOcTree -> FAR Planner.
        No pathFollower/controller is started. -->
   <arg name="bag"
-       default="/home/yanaibo/mapless_navigation/dataset/2026-08-22-09-33-02.bag"/>
+       default="/home/wuba/mapless_nav/src/dateset/2026-08-22-09-33-02.bag"/>
   <!-- Start at the selected stable scene time. The first cloud at this offset
        predates the first retained TF sample by 0.20 s and is dropped; the next
        cloud has an exact TF and defines map_start. -->

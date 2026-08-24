@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 2.8.3)
 project(far_planner)
 
-set(CMAKE_CXX_STANDARD 14)
+set(CMAKE_CXX_STANDARD 17)
 
 set(CMAKE_BUILD_TYPE Release)
 set(BUILD_STATIC_LIBS ON)
