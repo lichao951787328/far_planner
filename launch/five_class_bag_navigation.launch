@@ -1,8 +1,9 @@
 <?xml version="1.0"?>
 <launch>
   <!-- One-command five-class bag pipeline:
-       bag -> local semantic voxel map -> SemanticOcTree -> FAR Planner.
-       No pathFollower/controller is started. -->
+       bag -> local semantic voxel map -> SemanticOcTree -> FAR Planner
+       -> localPlanner -> /path -> optional pathFollower. The follower emits
+       only a generic Twist; no Go2 command adapter is started here. -->
   <arg name="bag"
        default="/home/yanaibo/mapless_navigation/dataset/2026-08-22-09-33-02.bag"/>
   <!-- Start at the selected stable scene time. The first cloud at this offset
@@ -15,6 +16,10 @@
        default="--clock --delay=4 --wait-for-subscribers"/>
   <arg name="rviz" default="true"/>
   <arg name="rvizConfig" default="navigation_demo"/>
+  <arg name="startLocalPlanner" default="true"/>
+  <arg name="startPathFollower" default="false"/>
+  <arg name="localPathTopic" default="/path"/>
+  <arg name="cmdVelTopic" default="/far_cmd_vel"/>
 
   <param name="/use_sim_time" value="true"/>
 
@@ -72,6 +77,43 @@
     <param name="output_goal_topic" value="/goal_point"/>
     <param name="default_frame" value="map_start"/>
   </node>
+
+  <!-- The voxel-map cost cloud and recorded odometry are expressed in map,
+       while FAR plans in map_start. Transform only the small PointStamped
+       waypoint so localPlanner can keep its three global inputs in map without
+       transforming the large cost cloud on every update. -->
+  <group if="$(arg startLocalPlanner)">
+    <node pkg="far_planner" type="point_stamped_tf_adapter"
+          name="five_class_waypoint_map_adapter" output="screen"
+          required="true">
+      <param name="input_topic" value="/way_point"/>
+      <param name="output_topic" value="/way_point_map"/>
+      <param name="target_frame" value="map"/>
+      <param name="transform_timeout" value="0.2"/>
+    </node>
+
+    <include file="$(find local_planner)/launch/local_planner.launch">
+      <arg name="startLocalPlanner" value="true"/>
+      <arg name="startPathFollower" value="$(arg startPathFollower)"/>
+      <arg name="worldFrameId" value="map"/>
+      <arg name="odometryTopic" value="/fusion_localization"/>
+      <arg name="staticObstacleTopic"
+           value="/local_3d_semantic_voxel_map/traversability_cost_cloud"/>
+      <arg name="useAddedObstacles" value="false"/>
+      <arg name="requireDynamicObstacleCloud" value="false"/>
+      <arg name="requireNonEmptyCostCloud" value="true"/>
+      <arg name="waypointTopic" value="/way_point_map"/>
+      <!-- Disabled because this bag's record-time /clock and sensor header
+           stamps use different epochs. Input wall-time watchdogs remain on. -->
+      <arg name="goalTimeout" value="0.0"/>
+      <arg name="pathTopic" value="$(arg localPathTopic)"/>
+      <arg name="cmdVelTopic" value="$(arg cmdVelTopic)"/>
+      <arg name="sensorFrameId" value="wuba_base"/>
+      <arg name="vehicleFrameId" value="wuba_base"/>
+      <arg name="maxSpeed" value="0.3"/>
+      <arg name="autonomySpeed" value="0.3"/>
+    </include>
+  </group>
 
   <!-- navigation_demo.rviz is shared with the world-frame simulator. Override
        its fixed frame for this map_start bag without changing that profile. -->
