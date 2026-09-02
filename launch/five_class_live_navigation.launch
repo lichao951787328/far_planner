@@ -1,0 +1,123 @@
+<?xml version="1.0"?>
+<launch>
+  <!-- Live five-class navigation pipeline. External nodes must publish the
+       semantic point cloud, odometry and TF; this launch never starts rosbag. -->
+  <arg name="pointCloudTopic" default="/grids_points"/>
+  <arg name="odometryTopic" default="/fusion_localization"/>
+  <arg name="worldFrameId" default="map"/>
+  <arg name="planningFrameId" default="map_start"/>
+  <arg name="vehicleFrameId" default="wuba_base"/>
+  <arg name="useInitialPoseReference" default="true"/>
+
+  <arg name="rvizGoalTopic" default="/move_base_simple/goal"/>
+  <arg name="farGoalTopic" default="/goal_point"/>
+  <arg name="farWaypointTopic" default="/way_point"/>
+  <arg name="localWaypointTopic" default="/way_point_map"/>
+  <arg name="semanticMapTopic" default="/octomap_full"/>
+  <arg name="globalAdmissionTopic"
+       default="/local_3d_semantic_voxel_map/global_semantic_admission_grid"/>
+  <arg name="ssmiTopic" default="/semantic_pcl/five_class_global_admitted"/>
+  <arg name="localVoxelTopic"
+       default="/local_3d_semantic_voxel_map/voxel_cloud"/>
+  <arg name="staticObstacleTopic"
+       default="/local_3d_semantic_voxel_map/traversability_cost_cloud"/>
+
+  <arg name="voxelConfig"
+       default="$(find far_planner)/config/five_class_local_voxel.yaml"/>
+  <arg name="semanticSchema"
+       default="$(find far_planner)/config/five_class_semantic_schema.yaml"/>
+  <arg name="rviz" default="true"/>
+  <arg name="rvizConfig" default="navigation_demo"/>
+  <arg name="startLocalPlanner" default="true"/>
+  <arg name="startPathFollower" default="false"/>
+  <arg name="localPathTopic" default="/path"/>
+  <arg name="cmdVelTopic" default="/far_cmd_vel"/>
+  <arg name="goalTimeout" default="0.0"/>
+  <arg name="maxSpeed" default="0.3"/>
+  <arg name="autonomySpeed" default="0.3"/>
+
+  <!-- Deployment uses wall/ROS time supplied by the host, not bag /clock. -->
+  <param name="/use_sim_time" value="false"/>
+
+  <include file="$(find local3d_semantic_voxel_map)/launch/grids_points_voxel_map.launch">
+    <arg name="config" value="$(arg voxelConfig)"/>
+    <arg name="input_topic" value="$(arg pointCloudTopic)"/>
+    <arg name="global_frame" value="$(arg worldFrameId)"/>
+    <arg name="use_initial_pose_reference"
+         value="$(arg useInitialPoseReference)"/>
+    <arg name="reference_frame" value="$(arg planningFrameId)"/>
+    <arg name="local_cost_frame" value="$(arg vehicleFrameId)"/>
+    <arg name="ssmi_topic" value="$(arg ssmiTopic)"/>
+    <arg name="rviz" value="false"/>
+  </include>
+
+  <!-- The configurable adapter converts the five-class admission grid into
+       the SSMI cloud schema consumed by SemanticOctomap. -->
+  <include file="$(find semantic_octomap)/launch/semantic_octomap_grid.launch">
+    <arg name="input_topic" value="$(arg globalAdmissionTopic)"/>
+    <arg name="output_topic" value="$(arg ssmiTopic)"/>
+    <arg name="semantic_schema" value="$(arg semanticSchema)"/>
+    <arg name="use_grid_adapter" value="true"/>
+    <arg name="world_frame_id" value="$(arg planningFrameId)"/>
+    <arg name="use_initial_pose_reference" value="false"/>
+    <arg name="reference_frame_id" value="$(arg planningFrameId)"/>
+    <arg name="enable_explicit_revocation" value="true"/>
+    <arg name="rviz" value="false"/>
+  </include>
+
+  <node pkg="far_planner" type="far_planner" name="far_planner"
+        output="screen" required="true">
+    <rosparam command="load" file="$(find far_planner)/config/default.yaml"/>
+    <rosparam command="load"
+              file="$(find far_planner)/config/five_class_bag.yaml"/>
+    <param name="world_frame" value="$(arg planningFrameId)"/>
+    <param name="semantic_map_topic" value="$(arg semanticMapTopic)"/>
+    <param name="local_voxel_topic" value="$(arg localVoxelTopic)"/>
+    <param name="local_voxel_timeout" value="1.0"/>
+    <remap from="odom_world" to="$(arg odometryTopic)"/>
+    <remap from="goal_point" to="$(arg farGoalTopic)"/>
+  </node>
+
+  <node pkg="far_planner" type="pose_stamped_to_point_stamped"
+        name="five_class_goal_adapter" output="screen" required="true">
+    <param name="input_goal_topic" value="$(arg rvizGoalTopic)"/>
+    <param name="output_goal_topic" value="$(arg farGoalTopic)"/>
+    <param name="default_frame" value="$(arg planningFrameId)"/>
+  </node>
+
+  <!-- FAR plans in planningFrameId. Convert only its small waypoint message
+       into worldFrameId for the live odometry/cost-cloud local planner. -->
+  <group if="$(arg startLocalPlanner)">
+    <node pkg="far_planner" type="point_stamped_tf_adapter"
+          name="five_class_waypoint_map_adapter" output="screen"
+          required="true">
+      <param name="input_topic" value="$(arg farWaypointTopic)"/>
+      <param name="output_topic" value="$(arg localWaypointTopic)"/>
+      <param name="target_frame" value="$(arg worldFrameId)"/>
+      <param name="transform_timeout" value="0.2"/>
+    </node>
+
+    <include file="$(find local_planner)/launch/local_planner.launch">
+      <arg name="startLocalPlanner" value="true"/>
+      <arg name="startPathFollower" value="$(arg startPathFollower)"/>
+      <arg name="worldFrameId" value="$(arg worldFrameId)"/>
+      <arg name="odometryTopic" value="$(arg odometryTopic)"/>
+      <arg name="staticObstacleTopic" value="$(arg staticObstacleTopic)"/>
+      <arg name="useAddedObstacles" value="false"/>
+      <arg name="requireDynamicObstacleCloud" value="false"/>
+      <arg name="requireNonEmptyCostCloud" value="true"/>
+      <arg name="waypointTopic" value="$(arg localWaypointTopic)"/>
+      <arg name="goalTimeout" value="$(arg goalTimeout)"/>
+      <arg name="pathTopic" value="$(arg localPathTopic)"/>
+      <arg name="cmdVelTopic" value="$(arg cmdVelTopic)"/>
+      <arg name="sensorFrameId" value="$(arg vehicleFrameId)"/>
+      <arg name="vehicleFrameId" value="$(arg vehicleFrameId)"/>
+      <arg name="maxSpeed" value="$(arg maxSpeed)"/>
+      <arg name="autonomySpeed" value="$(arg autonomySpeed)"/>
+    </include>
+  </group>
+
+  <node if="$(arg rviz)" pkg="rviz" type="rviz"
+        name="five_class_navigation_rviz" output="screen"
+        args="-d $(find far_planner)/rviz/$(arg rvizConfig).rviz -f $(arg planningFrameId)"/>
+</launch>

@@ -5,15 +5,16 @@
        -> localPlanner -> /path -> optional pathFollower. The follower emits
        only a generic Twist; no Go2 command adapter is started here. -->
   <arg name="bag"
-       default="/home/wuba/mapless_nav/src/dateset/2026-08-22-09-33-02.bag"/>
+       default="/home/wuba/mapless_nav/src/dateset/2026-08-08-04-16-57.bag"/>
   <!-- Start at the selected stable scene time. The first cloud at this offset
        predates the first retained TF sample by 0.20 s and is dropped; the next
        cloud has an exact TF and defines map_start. -->
-  <arg name="bagStart" default="25"/>
+  <arg name="bagStart" default="1"/>
   <!-- Waiting for every advertised topic to have a subscriber guarantees that
        the reference pose is captured from the bag's first grid frame. -->
+<!-- wait-for-subscribers 要求 rosbag 准备播放的每一个 bag 话题都至少有一个订阅者，才开始播放 -->
   <arg name="bagPlayArgs"
-       default="--clock --delay=4 --wait-for-subscribers"/>
+       default="--clock --delay=1"/>
   <arg name="rviz" default="true"/>
   <arg name="rvizConfig" default="navigation_demo"/>
   <arg name="startLocalPlanner" default="true"/>
