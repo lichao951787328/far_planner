@@ -35,9 +35,18 @@
   <arg name="goalTimeout" default="0.0"/>
   <arg name="maxSpeed" default="0.3"/>
   <arg name="autonomySpeed" default="0.3"/>
+  <!-- Record the source messages needed to compare the acquisition stamp in
+       /grids_points with the map -> wuba_base transform stamp in /tf. rosbag
+       records complete messages rather than individual fields. -->
+  <arg name="recordTimingTopics" default="true"/>
+  <arg name="timingBagPrefix"
+       default="$(env HOME)/.ros/five_class_live_tf_timing"/>
 
   <!-- Deployment uses wall/ROS time supplied by the host, not bag /clock. -->
   <param name="/use_sim_time" value="false"/>
+  <!-- Load the class table before any consumer starts. roslaunch uploads all
+       parameters before starting nodes, so every component sees one snapshot. -->
+  <rosparam command="load" file="$(arg semanticSchema)"/>
 
   <include file="$(find local3d_semantic_voxel_map)/launch/grids_points_voxel_map.launch">
     <arg name="config" value="$(arg voxelConfig)"/>
@@ -57,6 +66,7 @@
     <arg name="input_topic" value="$(arg globalAdmissionTopic)"/>
     <arg name="output_topic" value="$(arg ssmiTopic)"/>
     <arg name="semantic_schema" value="$(arg semanticSchema)"/>
+    <arg name="load_semantic_schema" value="false"/>
     <arg name="use_grid_adapter" value="true"/>
     <arg name="world_frame_id" value="$(arg planningFrameId)"/>
     <arg name="use_initial_pose_reference" value="false"/>
@@ -116,6 +126,11 @@
       <arg name="autonomySpeed" value="$(arg autonomySpeed)"/>
     </include>
   </group>
+
+  <node if="$(arg recordTimingTopics)"
+        pkg="rosbag" type="record" name="five_class_live_tf_timing_recorder"
+        args="-o $(arg timingBagPrefix) $(arg pointCloudTopic) /tf"
+        output="screen"/>
 
   <node if="$(arg rviz)" pkg="rviz" type="rviz"
         name="five_class_navigation_rviz" output="screen"

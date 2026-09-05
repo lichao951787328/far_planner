@@ -19,6 +19,7 @@
 #include <iomanip>
 #include <limits>
 #include <sstream>
+#include <unordered_set>
 #include <vector>
 
 namespace {
@@ -100,6 +101,153 @@ bool ParseLocalVoxelLabels(const ros::NodeHandle& private_nh,
   std::sort(parsed.begin(), parsed.end());
   parsed.erase(std::unique(parsed.begin(), parsed.end()), parsed.end());
   labels.swap(parsed);
+  return true;
+}
+
+bool ParseSharedNavigationSemanticProfile(
+    const ros::NodeHandle& node,
+    bool& enabled,
+    std::vector<SemanticClassGroup>& obstacle_groups,
+    std::vector<SemanticClassGroup>& terrain_groups,
+    std::vector<SemanticClassGroup>& dynamic_groups,
+    std::vector<uint32_t>& static_labels,
+    std::vector<uint32_t>& terrain_labels,
+    std::vector<uint32_t>& dynamic_labels) {
+  enabled = false;
+  XmlRpc::XmlRpcValue root;
+  if (!node.getParam("/semantic_schema", root)) return true;
+  if (root.getType() != XmlRpc::XmlRpcValue::TypeStruct) {
+    ROS_ERROR("FARMaster: /semantic_schema must be a YAML mapping.");
+    return false;
+  }
+  if (!root.hasMember("navigation")) return true;
+  XmlRpc::XmlRpcValue& navigation = root["navigation"];
+  if (navigation.getType() != XmlRpc::XmlRpcValue::TypeStruct ||
+      !navigation.hasMember("derive_runtime_roles") ||
+      navigation["derive_runtime_roles"].getType() !=
+          XmlRpc::XmlRpcValue::TypeBoolean) {
+    ROS_ERROR("FARMaster: /semantic_schema/navigation/derive_runtime_roles "
+              "must be a boolean.");
+    return false;
+  }
+  if (!static_cast<bool>(navigation["derive_runtime_roles"])) return true;
+  enabled = true;
+
+  if (!root.hasMember("classes") ||
+      root["classes"].getType() != XmlRpc::XmlRpcValue::TypeArray ||
+      root["classes"].size() == 0) {
+    ROS_ERROR("FARMaster: /semantic_schema/classes must be a nonempty list.");
+    return false;
+  }
+
+  std::vector<SemanticClassGroup> parsed_obstacles;
+  std::vector<SemanticClassGroup> parsed_terrain;
+  std::vector<SemanticClassGroup> parsed_dynamic;
+  std::vector<uint32_t> parsed_static_labels;
+  std::vector<uint32_t> parsed_terrain_labels;
+  std::vector<uint32_t> parsed_dynamic_labels;
+  std::unordered_set<uint32_t> seen_labels;
+  std::unordered_set<uint32_t> seen_colors;
+
+  XmlRpc::XmlRpcValue& classes = root["classes"];
+  for (int index = 0; index < classes.size(); ++index) {
+    XmlRpc::XmlRpcValue& entry = classes[index];
+    if (entry.getType() != XmlRpc::XmlRpcValue::TypeStruct ||
+        !entry.hasMember("label") || !entry.hasMember("name") ||
+        !entry.hasMember("rgb") || !entry.hasMember("role") ||
+        !entry.hasMember("semantic_cost") ||
+        entry["label"].getType() != XmlRpc::XmlRpcValue::TypeInt ||
+        entry["name"].getType() != XmlRpc::XmlRpcValue::TypeString ||
+        entry["role"].getType() != XmlRpc::XmlRpcValue::TypeString ||
+        entry["rgb"].getType() != XmlRpc::XmlRpcValue::TypeArray ||
+        entry["rgb"].size() != 3) {
+      ROS_ERROR("FARMaster: invalid /semantic_schema/classes[%d].", index);
+      return false;
+    }
+
+    const int signed_label = static_cast<int>(entry["label"]);
+    if (signed_label < 0 ||
+        !seen_labels.insert(static_cast<uint32_t>(signed_label)).second) {
+      ROS_ERROR("FARMaster: class %d has a negative or duplicate label.", index);
+      return false;
+    }
+    const uint32_t label = static_cast<uint32_t>(signed_label);
+    const std::string name = static_cast<std::string>(entry["name"]);
+    const std::string role = static_cast<std::string>(entry["role"]);
+    if (name.empty()) {
+      ROS_ERROR("FARMaster: class %d has an empty name.", index);
+      return false;
+    }
+
+    int rgb[3];
+    for (int channel = 0; channel < 3; ++channel) {
+      if (entry["rgb"][channel].getType() != XmlRpc::XmlRpcValue::TypeInt) {
+        ROS_ERROR("FARMaster: class %d RGB channels must be integers.", index);
+        return false;
+      }
+      rgb[channel] = static_cast<int>(entry["rgb"][channel]);
+      if (rgb[channel] < 0 || rgb[channel] > 255) {
+        ROS_ERROR("FARMaster: class %d RGB channels must be in [0,255].", index);
+        return false;
+      }
+    }
+    const uint32_t rgb_key = (static_cast<uint32_t>(rgb[0]) << 16) |
+                             (static_cast<uint32_t>(rgb[1]) << 8) |
+                             static_cast<uint32_t>(rgb[2]);
+    if (!seen_colors.insert(rgb_key).second) {
+      ROS_ERROR("FARMaster: class %d duplicates another class RGB value.", index);
+      return false;
+    }
+
+    const XmlRpc::XmlRpcValue::Type cost_type =
+        entry["semantic_cost"].getType();
+    if (cost_type != XmlRpc::XmlRpcValue::TypeInt &&
+        cost_type != XmlRpc::XmlRpcValue::TypeDouble) {
+      ROS_ERROR("FARMaster: class %d semantic_cost must be numeric.", index);
+      return false;
+    }
+    const double semantic_cost = cost_type == XmlRpc::XmlRpcValue::TypeInt
+        ? static_cast<int>(entry["semantic_cost"])
+        : static_cast<double>(entry["semantic_cost"]);
+    if (semantic_cost < 0.0 || semantic_cost > 1.0) {
+      ROS_ERROR("FARMaster: class %d semantic_cost must be in [0,1].", index);
+      return false;
+    }
+
+    if (role == "static_obstacle") {
+      parsed_obstacles.emplace_back(name, rgb_key);
+      parsed_static_labels.push_back(label);
+    } else if (role == "terrain") {
+      parsed_terrain.emplace_back(name, rgb_key);
+      parsed_terrain_labels.push_back(label);
+    } else if (role == "dynamic_obstacle") {
+      parsed_dynamic.emplace_back(name, rgb_key);
+      parsed_dynamic_labels.push_back(label);
+    } else if (role != "ignore") {
+      ROS_ERROR("FARMaster: class %d has unsupported role '%s'.",
+                index, role.c_str());
+      return false;
+    }
+  }
+
+  if (parsed_obstacles.empty() || parsed_terrain.empty() ||
+      parsed_dynamic.empty()) {
+    ROS_ERROR("FARMaster: shared schema needs at least one static_obstacle, "
+              "terrain, and dynamic_obstacle class.");
+    return false;
+  }
+  const auto sort_labels = [](std::vector<uint32_t>& labels) {
+    std::sort(labels.begin(), labels.end());
+  };
+  sort_labels(parsed_static_labels);
+  sort_labels(parsed_terrain_labels);
+  sort_labels(parsed_dynamic_labels);
+  obstacle_groups.swap(parsed_obstacles);
+  terrain_groups.swap(parsed_terrain);
+  dynamic_groups.swap(parsed_dynamic);
+  static_labels.swap(parsed_static_labels);
+  terrain_labels.swap(parsed_terrain_labels);
+  dynamic_labels.swap(parsed_dynamic_labels);
   return true;
 }
 
@@ -1184,33 +1332,55 @@ void FARMaster::LoadROSParams() {
                           map_params_.semantic_params.use_top1_only, true);
   private_nh_.param<float>(map_prefix + "semantic_min_probability",
                            map_params_.semantic_params.min_semantic_prob, 0.55f);
-  const bool obstacle_groups_ok = ParseSemanticGroups(
-      private_nh_, map_prefix + "obstacle_groups", map_params_.obstacle_groups);
-  const bool terrain_groups_ok = ParseSemanticGroups(
-      private_nh_, map_prefix + "terrain_support_groups", map_params_.terrain_support_groups);
-  const bool dynamic_groups_ok = ParseSemanticGroups(
-      private_nh_, map_prefix + "dynamic_obstacle_groups", map_params_.dynamic_obstacle_groups);
-  if (!obstacle_groups_ok || !terrain_groups_ok || !dynamic_groups_ok) {
-    ROS_FATAL("FARMaster: semantic class parameters are invalid; refusing to continue.");
-    ros::shutdown();
-  }
   private_nh_.param<float>(map_prefix + "local_voxel_min_semantic_confidence",
       local_voxel_policy_params_.minimum_semantic_confidence, 0.55f);
   private_nh_.param<float>(map_prefix + "local_voxel_obstacle_cost_threshold",
       local_voxel_policy_params_.obstacle_cost_threshold, 0.60f);
-  const bool local_static_labels_ok = ParseLocalVoxelLabels(
-      private_nh_, map_prefix + "local_voxel_static_labels",
-      local_voxel_policy_params_.static_labels);
-  const bool local_terrain_labels_ok = ParseLocalVoxelLabels(
-      private_nh_, map_prefix + "local_voxel_terrain_labels",
-      local_voxel_policy_params_.terrain_labels);
-  const bool local_dynamic_labels_ok = ParseLocalVoxelLabels(
-      private_nh_, map_prefix + "local_voxel_dynamic_labels",
-      local_voxel_policy_params_.dynamic_labels);
-  if (!local_static_labels_ok || !local_terrain_labels_ok ||
-      !local_dynamic_labels_ok) {
-    ROS_FATAL("FARMaster: local voxel semantic label parameters are invalid.");
+  bool shared_semantic_profile_enabled = false;
+  if (!ParseSharedNavigationSemanticProfile(
+          private_nh_, shared_semantic_profile_enabled,
+          map_params_.obstacle_groups,
+          map_params_.terrain_support_groups,
+          map_params_.dynamic_obstacle_groups,
+          local_voxel_policy_params_.static_labels,
+          local_voxel_policy_params_.terrain_labels,
+          local_voxel_policy_params_.dynamic_labels)) {
+    ROS_FATAL("FARMaster: shared semantic schema is invalid; refusing to continue.");
     ros::shutdown();
+    return;
+  }
+  if (!shared_semantic_profile_enabled) {
+    const bool obstacle_groups_ok = ParseSemanticGroups(
+        private_nh_, map_prefix + "obstacle_groups", map_params_.obstacle_groups);
+    const bool terrain_groups_ok = ParseSemanticGroups(
+        private_nh_, map_prefix + "terrain_support_groups",
+        map_params_.terrain_support_groups);
+    const bool dynamic_groups_ok = ParseSemanticGroups(
+        private_nh_, map_prefix + "dynamic_obstacle_groups",
+        map_params_.dynamic_obstacle_groups);
+    if (!obstacle_groups_ok || !terrain_groups_ok || !dynamic_groups_ok) {
+      ROS_FATAL("FARMaster: semantic class parameters are invalid; refusing to continue.");
+      ros::shutdown();
+      return;
+    }
+    const bool local_static_labels_ok = ParseLocalVoxelLabels(
+        private_nh_, map_prefix + "local_voxel_static_labels",
+        local_voxel_policy_params_.static_labels);
+    const bool local_terrain_labels_ok = ParseLocalVoxelLabels(
+        private_nh_, map_prefix + "local_voxel_terrain_labels",
+        local_voxel_policy_params_.terrain_labels);
+    const bool local_dynamic_labels_ok = ParseLocalVoxelLabels(
+        private_nh_, map_prefix + "local_voxel_dynamic_labels",
+        local_voxel_policy_params_.dynamic_labels);
+    if (!local_static_labels_ok || !local_terrain_labels_ok ||
+        !local_dynamic_labels_ok) {
+      ROS_FATAL("FARMaster: local voxel semantic label parameters are invalid.");
+      ros::shutdown();
+      return;
+    }
+  } else {
+    ROS_INFO("FARMaster: semantic obstacle/terrain/dynamic roles and colors "
+             "were derived from /semantic_schema/classes.");
   }
   local_voxel_policy_params_.minimum_semantic_confidence = std::max(
       0.0f, std::min(1.0f,

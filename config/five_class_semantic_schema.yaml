@@ -1,35 +1,104 @@
-# Shared label/color/role contract for the five-class recorded dataset.
+# 五分类导航的唯一语义配置源。
+# five_class_bag_navigation.launch 和 five_class_live_navigation.launch 会把
+# 本文件加载到全局参数 /semantic_schema。局部 voxel、SemanticOctomap 和 FAR
+# 都从这里读取类别，不需要再分别维护 obstacle/terrain label 列表。
 semantic_schema:
+  # 配置格式版本。当前解析器只接受 1；以后字段含义发生不兼容变化时才升级。
   version: 1
 
+  navigation:
+    # five-class 启动链必须为 true：局部 voxel 和 FAR 根据下面 classes 自动生成运行角色。
+    # five_class_local_voxel.yaml 和 five_class_bag.yaml 不再保存类别表回退副本。
+    derive_runtime_roles: true
+
   input:
+    # 输入 PointCloud2 中保存语义 label 的字段名。上游字段当前就拼写为 semantic_lable。
     label_field: semantic_lable
+    # 输入 PointCloud2 中保存原始几何可通行代价的字段名，范围应为 [0,1]。
     traversability_field: traversability
 
   defaults:
+    # SemanticOctomap 初始化地面时采用的类别；必须指向 role=terrain 且 global_map=true 的 label。
     initial_floor_label: 1
 
   unknown:
+    # 这里的 unknown 指“无效或未配置的 label”，不是下面有真实观测的 label 0。
+    # exclude：丢弃无效类别；map_to_fallback：改写成 fallback_label 后再处理。
     policy: exclude
+    # policy=map_to_fallback 时使用的目标 label；policy=exclude 时保留但不会使用。
     fallback_label: 0
+    # RViz/日志中给真正无效类别显示的名字。
     name: unknown
+    # 对真正无效类别的文字解释，不参与算法判断。
     meaning: invalid label (including UINT32_MAX) or unconfigured perception output
+    # 真正无效类别的显示颜色 [R,G,B]；不能与任何已配置类别颜色重复。
     rgb: [127, 127, 127]
 
-  # High measured cost is consumed by FAR's latest-snapshot transient layer.
-  # Do not rewrite it to class 0 here: doing so would insert a local/dynamic
-  # safety observation into the persistent SSMI map.
-  # 这里的 obstacle_label: 0 并不是“只有 label 0 是障碍”，而是“启用代价覆盖语义时，统一改写成哪个障碍标签”。
   traversability:
+    # true：代价达到 obstacle_threshold 时，SemanticOctomap 适配器把语义改成 obstacle_label。
+    # false：保持原语义；高代价仍会在 FAR 最新局部快照中成为瞬时障碍，不污染持久全局语义。
     override_semantics: false
+    # 上述语义覆盖使用的高代价阈值，范围 [0,1]。
     obstacle_threshold: 0.75
+    # 发生高代价语义覆盖时写成的静态障碍 label；必须是 global_map=true 的 static_obstacle。
     obstacle_label: 0
 
-# 是不是障碍会在这个地方来定义。
+  # 每个类别必须填写以下字段：
+  # label：输入点云中的非负整数类别编号，所有类别之间必须唯一。
+  # name：日志和可视化使用的稳定名称。
+  # meaning：给维护者阅读的语义说明，不参与数值计算。
+  # rgb：全局 SemanticOctomap/FAR 识别该类别的唯一 [R,G,B] 颜色。
+  # role：导航角色，只能是 terrain、static_obstacle、dynamic_obstacle、ignore。
+  # semantic_cost：语义先验代价 [0,1]。当前 maximum 融合取它和 measured traversability
+  #                的较大值，因此低语义代价不会掩盖真实的高几何代价。
+  # global_map：是否允许写进持久 SemanticOctomap。dynamic_obstacle/ignore 必须为 false。
+  # OpenCV 恢复角色直接由 role 派生：terrain 构成白色地面，static_obstacle 是可恢复候选，
+  # dynamic_obstacle 和 ignore 始终排除。因此以后修改 grass 等类别时只改 role，不维护第二套标签表。
   classes:
-    - {label: 0, name: background_obstacle, meaning: non-traversable background, rgb: [0, 0, 0],       role: static_obstacle,  global_map: true}
-    - {label: 1, name: flat_ground,         meaning: flat traversable ground,  rgb: [0, 255, 0],     role: terrain,          global_map: true}
-    - {label: 2, name: grass,               meaning: non-traversable grass,      rgb: [0, 128, 0],     role: static_obstacle,  global_map: true}
-    - {label: 3, name: rough_ground,        meaning: non-traversable rough ground, rgb: [160, 82, 45], role: static_obstacle,  global_map: true}
-    - {label: 4, name: manhole_cover,       meaning: non-traversable manhole cover, rgb: [128, 128, 128], role: static_obstacle, global_map: true}
-    - {label: 11, name: reserved_dynamic,   meaning: reserved dynamic obstacle, rgb: [255, 0, 255],   role: dynamic_obstacle, global_map: false}
+    - label: 0
+      name: background_unknown
+      meaning: observed background with ambiguous semantics; obstacle unless geometric recovery succeeds
+      rgb: [0, 0, 0]
+      role: static_obstacle
+      semantic_cost: 1.00
+      global_map: true
+
+    - label: 1
+      name: flat_ground
+      meaning: flat traversable ground and morphology-recovery reference
+      rgb: [0, 255, 0]
+      role: terrain
+      semantic_cost: 0.05
+      global_map: true
+
+    - label: 2
+      name: grass
+      meaning: traversable grass with a larger preference cost than flat ground
+      rgb: [0, 128, 0]
+      role: terrain
+      semantic_cost: 0.20
+      global_map: true
+
+    - label: 3
+      name: rough_ground
+      meaning: traversable rough ground; allowed but less preferred than grass
+      rgb: [160, 82, 45]
+      role: terrain
+      semantic_cost: 0.40
+      global_map: true
+
+    - label: 4
+      name: manhole_cover
+      meaning: static obstacle unless a small morphology-filled area is level with nearby terrain
+      rgb: [128, 128, 128]
+      role: static_obstacle
+      semantic_cost: 1.00
+      global_map: true
+
+    - label: 11
+      name: reserved_dynamic
+      meaning: reserved moving-object label used to keep the dynamic role table non-empty
+      rgb: [255, 0, 255]
+      role: dynamic_obstacle
+      semantic_cost: 1.00
+      global_map: false

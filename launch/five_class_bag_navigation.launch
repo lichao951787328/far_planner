@@ -5,11 +5,14 @@
        -> localPlanner -> /path -> optional pathFollower. The follower emits
        only a generic Twist; no Go2 command adapter is started here. -->
   <arg name="bag"
-       default="/home/wuba/mapless_nav/src/dateset/2026-08-08-04-16-57.bag"/>
+       default="/home/yanaibo/mapless_navigation/dataset/2026-08-22-09-33-02.bag"/>
+  <!-- One shared class table drives local voxel, SemanticOctomap and FAR. -->
+  <arg name="semanticSchema"
+       default="$(find far_planner)/config/five_class_semantic_schema.yaml"/>
   <!-- Start at the selected stable scene time. The first cloud at this offset
        predates the first retained TF sample by 0.20 s and is dropped; the next
        cloud has an exact TF and defines map_start. -->
-  <arg name="bagStart" default="1"/>
+  <arg name="bagStart" default="20"/>
   <!-- Waiting for every advertised topic to have a subscriber guarantees that
        the reference pose is captured from the bag's first grid frame. -->
 <!-- wait-for-subscribers 要求 rosbag 准备播放的每一个 bag 话题都至少有一个订阅者，才开始播放 -->
@@ -23,6 +26,7 @@
   <arg name="cmdVelTopic" default="/far_cmd_vel"/>
 
   <param name="/use_sim_time" value="true"/>
+  <rosparam command="load" file="$(arg semanticSchema)"/>
 
   <include file="$(find local3d_semantic_voxel_map)/launch/grids_points_voxel_map.launch">
     <arg name="config"
@@ -44,7 +48,8 @@
     <arg name="output_topic"
          value="/semantic_pcl/five_class_global_admitted"/>
     <arg name="semantic_schema"
-         value="$(find far_planner)/config/five_class_semantic_schema.yaml"/>
+         value="$(arg semanticSchema)"/>
+    <arg name="load_semantic_schema" value="false"/>
     <arg name="use_grid_adapter" value="true"/>
     <arg name="world_frame_id" value="map_start"/>
     <arg name="use_initial_pose_reference" value="false"/>
@@ -126,5 +131,10 @@
        complete pipeline instead of leaving latched maps running. -->
   <node pkg="rosbag" type="play" name="five_class_bag_player"
         args="$(arg bagPlayArgs) --start=$(arg bagStart) $(arg bag)"
-        output="screen" required="true"/>
+        output="screen" required="true">
+    <!-- map_start is mission-local and must be rebuilt by the local semantic
+         voxel node on every launch. Keep the recorded /tf_static, including
+         its old map -> map_start, out of the active TF tree. -->
+    <remap from="/tf_static" to="/recorded_tf_static"/>
+  </node>
 </launch>
