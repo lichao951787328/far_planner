@@ -16,6 +16,8 @@ sensor_range                            : 20.0  # Contour canvas half-extent: 20
 terrain_range                           : 15.0  # Unit: meter
 # 局部规划器关注的范围。这个值越大，局部规划会更“看远一点”。
 local_planner_range                     : 5.0   # Unit: meter
+# 轮廓绕行时，折点沿自由空间方向投影的最大距离；不改变普通 waypoint 前视和局部规划范围。
+contour_waypoint_projection_range       : 3.0   # Unit: meter
 visualize_ratio                         : 0.75
 # 是否启用“视点前推/前视延伸”。也就是在规划路径时，沿着当前可通行方向把 waypoint 再往前推一点，形成更平滑的目标点。设为 true 时，路径更像“前瞻点”，会更顺滑。
 is_viewpoint_extend                     : true
@@ -185,10 +187,22 @@ CDetector/img_folder_path               : /path
 # Graph Planner Params
 # 目标收敛距离。越小，说明越希望机器人精确逼近目标。
 GPlanner/converge_distance              : 0.5  # Unit: meter
-# 目标附近的调整范围。越大，说明目标附近的规划更宽松。
-## 目标附近的调整范围。表示在目标附近，规划器允许把目标位置“往周围轻微调整”的范围。
-## 越大，说明在目标附近更宽松，规划器更容易找一个更容易到达的替代点；越小则更严格，偏向直接逼近精确目标。
+# 是否允许在原始目标被明确障碍占用时选择附近的安全可达目标。
+GPlanner/enable_goal_adjustment          : false
+# 替代目标离 RViz 原始目标的最大平面距离。
 GPlanner/goal_adjust_radius             : 2.0  # Unit: meter
+# 低频检查原始目标/重新选择替代目标的周期。目标连边碰撞检查仍按规划频率执行。
+GPlanner/goal_adjust_check_period       : 1.0  # Unit: second
+# terrain 候选点的二维降采样间距；不会以原始体素分辨率逐点做完整验证。
+GPlanner/goal_adjust_sample_spacing     : 0.5  # Unit: meter
+# 每轮最多执行的候选点碰撞+Graph可达性完整验证次数。
+GPlanner/goal_adjust_max_candidates     : 32
+# 连续多少次低频检查确认占用后才启用替代目标。
+GPlanner/goal_adjust_block_confirmations: 2
+# 原始目标连续明确可通行且可达多少次后才从替代目标切回。
+GPlanner/goal_restore_confirmations     : 3
+# 默认不因临时人物等动态障碍改变用户终点，只停车等待其离开。
+GPlanner/goal_adjust_on_dynamic_obstacle: false
 # 影响“认为某块区域是空闲/可通行”的阈值。越大，越保守。
 # 这是一个“可通行性阈值”。表示某个区域要被认为“空闲/可通行”，需要满足多少次/多少份支持。
 # 越大，越保守：只有更明确的空闲证据才会认为这里可走。这会让规划更安全，但也可能让机器人更容易避让，路径更绕。

@@ -14,6 +14,10 @@ TEST(LocalVoxelPolicy, ConfidentStaticSemanticCreatesStaticCandidateGeometry) {
     LocalVoxelPolicyParams params;
     EXPECT_EQ(LocalVoxelLayer::STATIC_OBSTACLE,
               ClassifyLocalVoxel(3, true, 0.8f, true, 1.0f, params));
+    EXPECT_EQ(LocalVoxelLayer::IGNORE,
+              ClassifyLocalVoxel(3, true, 0.8f, true, 0.1f, params));
+    EXPECT_EQ(LocalVoxelLayer::IGNORE,
+              ClassifyLocalVoxel(3, true, 0.8f, false, 0.0f, params));
 }
 
 TEST(LocalVoxelPolicy, LowConfidenceStaticStaysTransientWhenDangerous) {

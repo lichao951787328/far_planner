@@ -927,6 +927,12 @@ void FARMaster::ExecutePlanningCycle() {
     // cannot make an otherwise disconnected component appear reachable.
     graph_planner_.UpdateGraphTraverability(odom_node_ptr_, NULL);
 
+    // Expensive substitute-goal selection is rate limited internally. It is
+    // evaluated only after current Graph reachability is known, so a free
+    // point across a wall cannot win merely because it is close to the RViz
+    // command.
+    graph_planner_.UpdateGoalAdjustment(goal_ptr, ros::Time::now());
+
     // Adding goal into v-graph
     FARUtil::Timer.start_time("Adding Goal to V-Graph");
     graph_planner_.UpdateGoalNavNodeConnects(goal_ptr);
@@ -1141,7 +1147,8 @@ Point3D FARMaster::ProjectContourWaypointProgressively(
   const float first_distance = std::max(
       FARUtil::kNearDist,
       FARUtil::kNavClearDist + FARUtil::kLeafSize * 0.5f);
-  const float maximum_distance = master_params_.local_planner_range;
+  const float maximum_distance =
+      master_params_.contour_waypoint_projection_range;
   if (maximum_distance < first_distance) return safe_fallback;
   const float distance_step = std::max(FARUtil::kLeafSize, 0.05f);
   EdgeRejectReason first_rejection = EdgeRejectReason::NONE;
@@ -1270,6 +1277,9 @@ void FARMaster::LoadROSParams() {
   private_nh_.param<float>(master_prefix + "sensor_range",          master_params_.sensor_range, 20.0);
   private_nh_.param<float>(master_prefix + "terrain_range",         master_params_.terrain_range, 15.0);
   private_nh_.param<float>(master_prefix + "local_planner_range",   master_params_.local_planner_range, 5.0);
+  private_nh_.param<float>(master_prefix + "contour_waypoint_projection_range",
+                           master_params_.contour_waypoint_projection_range,
+                           3.0f);
   private_nh_.param<float>(master_prefix + "visualize_ratio",       master_params_.viz_ratio, 1.0);
   private_nh_.param<bool>(master_prefix  + "is_viewpoint_extend",   master_params_.is_viewpoint_extend, true);
   private_nh_.param<bool>(master_prefix  + "is_multi_layer",        master_params_.is_multi_layer, false);
@@ -1431,9 +1441,35 @@ void FARMaster::LoadROSParams() {
   // graph planner params
   private_nh_.param<float>(planner_prefix + "converge_distance",    gp_params_.converge_dist, 1.0);
   private_nh_.param<float>(planner_prefix + "goal_adjust_radius",   gp_params_.adjust_radius, 10.0);
+  private_nh_.param<bool>(planner_prefix + "enable_goal_adjustment",
+                          gp_params_.enable_goal_adjustment, false);
+  private_nh_.param<float>(planner_prefix + "goal_adjust_check_period",
+                           gp_params_.adjust_check_period, 1.0f);
+  private_nh_.param<float>(planner_prefix + "goal_adjust_sample_spacing",
+                           gp_params_.adjust_sample_spacing, 0.5f);
+  private_nh_.param<int>(planner_prefix + "goal_adjust_max_candidates",
+                         gp_params_.adjust_max_candidates, 32);
+  private_nh_.param<int>(planner_prefix + "goal_adjust_block_confirmations",
+                         gp_params_.adjust_block_confirmations, 2);
+  private_nh_.param<int>(planner_prefix + "goal_restore_confirmations",
+                         gp_params_.restore_confirmations, 3);
+  private_nh_.param<bool>(planner_prefix + "goal_adjust_on_dynamic_obstacle",
+                          gp_params_.adjust_on_dynamic_obstacle, false);
   private_nh_.param<int>(planner_prefix   + "free_counter_thred",   gp_params_.free_thred, 5);
   private_nh_.param<int>(planner_prefix   + "reach_goal_vote_size", gp_params_.votes_size, 5);
   private_nh_.param<int>(planner_prefix   + "path_momentum_thred",  gp_params_.momentum_thred, 5);
+  gp_params_.adjust_radius = std::max(
+      FARUtil::kLeafSize, gp_params_.adjust_radius);
+  gp_params_.adjust_check_period = std::max(
+      0.0f, gp_params_.adjust_check_period);
+  gp_params_.adjust_sample_spacing = std::max(
+      FARUtil::kLeafSize, gp_params_.adjust_sample_spacing);
+  gp_params_.adjust_max_candidates = std::max(
+      1, gp_params_.adjust_max_candidates);
+  gp_params_.adjust_block_confirmations = std::max(
+      1, gp_params_.adjust_block_confirmations);
+  gp_params_.restore_confirmations = std::max(
+      1, gp_params_.restore_confirmations);
   gp_params_.momentum_dist = master_params_.robot_dim / 2.0f;
   gp_params_.is_autoswitch = master_params_.is_attempt_autoswitch;
 

@@ -158,6 +158,12 @@ if(CATKIN_ENABLE_TESTING)
       ${catkin_LIBRARIES})
   endif()
 
+  catkin_add_gtest(goal_adjustment_policy_test
+    src/goal_adjustment_policy_test.cpp)
+  if(TARGET goal_adjustment_policy_test)
+    target_link_libraries(goal_adjustment_policy_test ${catkin_LIBRARIES})
+  endif()
+
   catkin_add_gtest(semantic_confidence_policy_test
     src/semantic_confidence_policy_test.cpp)
   if(TARGET semantic_confidence_policy_test)

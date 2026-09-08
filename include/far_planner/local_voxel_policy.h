@@ -29,10 +29,10 @@ inline bool LocalVoxelLabelInSet(
 /**
  * Classify one voxel from the atomic high-resolution local snapshot.
  *
- * Dynamic semantics are an unconditional veto on static persistence. A
- * low-confidence or unknown high-cost voxel remains a current safety obstacle
- * but is deliberately assigned to the transient layer, so it cannot create a
- * permanent static Graph node merely through a traversability fallback.
+ * Dynamic semantics are an unconditional transient obstacle. Every other
+ * obstacle contour must first pass the final fused-cost gate. Semantic role
+ * then decides whether that high-cost contour is static or transient; this
+ * prevents a high semantic prior by itself from bypassing the common gate.
  */
 inline LocalVoxelLayer ClassifyLocalVoxel(
     const uint32_t label, const bool has_semantic_label,
@@ -48,20 +48,22 @@ inline LocalVoxelLayer ClassifyLocalVoxel(
         LocalVoxelLabelInSet(label, params.dynamic_labels)) {
         return LocalVoxelLayer::TRANSIENT_OBSTACLE;
     }
+
+    if (!high_cost) {
+        if (has_semantic_label &&
+            LocalVoxelLabelInSet(label, params.terrain_labels)) {
+            return LocalVoxelLayer::TERRAIN_SUPPORT;
+        }
+        return LocalVoxelLayer::IGNORE;
+    }
+
     if (has_semantic_label &&
         LocalVoxelLabelInSet(label, params.static_labels)) {
         return confidence >= params.minimum_semantic_confidence
             ? LocalVoxelLayer::STATIC_OBSTACLE
-            : (high_cost ? LocalVoxelLayer::TRANSIENT_OBSTACLE
-                         : LocalVoxelLayer::IGNORE);
+            : LocalVoxelLayer::TRANSIENT_OBSTACLE;
     }
-    if (has_semantic_label &&
-        LocalVoxelLabelInSet(label, params.terrain_labels)) {
-        return high_cost ? LocalVoxelLayer::TRANSIENT_OBSTACLE
-                         : LocalVoxelLayer::TERRAIN_SUPPORT;
-    }
-    return high_cost ? LocalVoxelLayer::TRANSIENT_OBSTACLE
-                     : LocalVoxelLayer::IGNORE;
+    return LocalVoxelLayer::TRANSIENT_OBSTACLE;
 }
 
 #endif  // FAR_PLANNER_LOCAL_VOXEL_POLICY_H

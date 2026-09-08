@@ -143,6 +143,13 @@ public:
     static bool IsRouteConnectFreeStaticLayer(const Point3D& route_start,
                                               const Point3D& route_end);
 
+    /** Check robot-centre clearance at one query point against the exact
+     * current static/dynamic collision clouds used by visibility edges.  This
+     * is intentionally separate from a zero-length edge: zero-length edges
+     * are accepted by the segment checker before consulting its KD-tree. */
+    static bool IsPointCollisionFreeStaticLayer(const Point3D& point);
+    static bool IsPointCollisionFreeDynamicLayer(const Point3D& point);
+
     /** Whether a historical point is covered by a currently extracted
      * static contour.  Used to distinguish a real local contradiction from a
      * frame in which the area was not observed. */
@@ -252,6 +259,10 @@ private:
         const ConnectPair& edge, const HeightPair& edge_height,
         const PointCloudPtr& cloud, const PointKdTreePtr& kdtree,
         float endpoint_exclusion = -1.0f);
+
+    static bool IsPointCollisionFreeInCloud(
+        const Point3D& point, const PointCloudPtr& cloud,
+        const PointKdTreePtr& kdtree);
 
     /** Validate a query edge with exactly one obstacle-corner endpoint.  The
      * corner's direction proposes progressively farther projections, while

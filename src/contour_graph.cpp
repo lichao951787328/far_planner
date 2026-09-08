@@ -832,6 +832,17 @@ bool ContourGraph::IsRouteConnectFreeStaticLayer(
         PolygonPtr(), PolygonPtr(), false);
 }
 
+bool ContourGraph::IsPointCollisionFreeStaticLayer(const Point3D& point) {
+    return IsPointCollisionFreeInCloud(
+        point, local_static_collision_cloud_, local_static_collision_kdtree_);
+}
+
+bool ContourGraph::IsPointCollisionFreeDynamicLayer(const Point3D& point) {
+    return IsPointCollisionFreeInCloud(
+        point, local_dynamic_collision_cloud_,
+        local_dynamic_collision_kdtree_);
+}
+
 bool ContourGraph::IsPointInsideReliableContourWindow(
     const Point3D& point) {
     const float half_extent = std::max(
@@ -1348,6 +1359,25 @@ bool ContourGraph::IsEdgeCollisionFreeInCloud(
         }
     }
     return true;
+}
+
+bool ContourGraph::IsPointCollisionFreeInCloud(
+    const Point3D& point, const PointCloudPtr& cloud,
+    const PointKdTreePtr& kdtree) {
+    if (!cloud || cloud->empty() || !kdtree || !kdtree->getInputCloud()) {
+        return true;
+    }
+    PCLPoint sample;
+    sample.x = point.x;
+    sample.y = point.y;
+    sample.z = point.z;
+    sample.intensity = 0.0f;
+    const float radius = std::max(FARUtil::kLeafSize * 0.75f,
+                                  FARUtil::kNavClearDist);
+    std::vector<int> indices;
+    std::vector<float> squared_distances;
+    return kdtree->radiusSearch(
+               sample, radius, indices, squared_distances, 1) == 0;
 }
 
 bool ContourGraph::IsNavNodesConnectFromContour(const NavNodePtr& node_ptr1, const NavNodePtr& node_ptr2) {

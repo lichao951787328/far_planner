@@ -7,6 +7,11 @@ local_voxel_topic: /local_3d_semantic_voxel_map/voxel_cloud
 local_voxel_timeout: 1.0
 enable_goal_recording: false
 
+# When a previously unknown RViz goal is later confirmed inside a static
+# obstacle, select a sparse, explicitly traversable substitute within 2 m.
+# Dynamic occupancy and unknown space never move the command.
+GPlanner/enable_goal_adjustment: true
+
 contour_grid_resolution: 0.2
 sensor_range: 9.0
 terrain_range: 9.0

@@ -24,18 +24,20 @@ ssmi_obstacle_traversability_threshold: 0.75
 # 这些参数控制“SSMI 旧障碍撤销”机制：
 # 某个体素以前作为障碍写进了 SemanticOctomap，后来被稳定观测为平地时，发布删除证据，把旧障碍从全局地图中清除。
 enable_ssmi_obstacle_revocation: true
-ssmi_revocation_voxel_size: 0.10
+# 与 SemanticOctomap 的 resolution=0.40 对齐，确保删除证据命中同一个全局叶节点。
+ssmi_revocation_voxel_size: 0.40
 ssmi_revocation_minimum_free_frames: 5 # 至少 5 个不同采集帧提供自由证据；不要求连续，也不要求标签相同
 ssmi_revocation_minimum_free_duration: 0.5 # 从第一次仍有效的自由证据到当前至少跨越 0.5 秒，避免瞬时误清除
 ssmi_revocation_minimum_free_evidence: 5.0 # 置信度加权后的累计自由证据门限；一次高质量几何重分类贡献 1.0
 ssmi_revocation_free_evidence_decay_per_second: 0.5 # 没有新自由证据时每秒衰减多少；偶发语义抖动不会清零，长时间无证据会自然失效
 ssmi_revocation_free_max_traversability: 0.45 # 作为自由地形证据的点，代价必须 <=0.45
 ssmi_revocation_minimum_semantic_confidence: 0.60 # 自由地形语义置信度必须 >=0.60
-ssmi_revocation_ray_evidence_enabled: false # 当前不使用传感器射线穿透作为自由证据
+ssmi_revocation_allow_unclassified_geometry_free_evidence: true # 无语义点若有新鲜、真实且<=0.45的几何代价，也可累计多帧撤销证据
+ssmi_revocation_ray_evidence_enabled: true # 允许原始输入射线为已跟踪旧障碍累计多帧自由证据；达到上述门限后才发布显式撤销
 ssmi_revocation_ray_endpoint_margin: 0.20 # 开启射线证据时，不使用射线末端最后 0.2 m，防止表面回波清除自己
 ssmi_revocation_ray_point_stride: 2 # 开启射线证据时，每隔 2 个输入点构造一条射线
-ssmi_revocation_ambiguous_obstacle_labels: [0] # label 0 是语义不明确的背景；低几何代价时不因一次标签回跳而清空已有自由证据
-ssmi_revocation_ambiguous_obstacle_reset_min_traversability: 0.65 # label 0 的原始几何代价达到该值才作为明确障碍并立即清空自由证据
+ssmi_revocation_ambiguous_obstacle_labels: [] # label 0 已归一化为无语义点，由上面的几何自由证据路径处理
+ssmi_revocation_ambiguous_obstacle_reset_min_traversability: 0.65 # 保留给未来显式配置的歧义障碍类别
 # 障碍、地形和动态类别由共享 schema 的 role 自动生成。上面的列表不是角色表，
 # 而是只针对“语义会抖动但仍有真实观测”的特殊撤销策略。
 
@@ -92,12 +94,21 @@ min_z: -5.0
 max_z: 4.0
 local_radius: -1.0
 local_box_enabled: true
-local_box_min_x: -2.0
-local_box_max_x: 10.0
+local_box_min_x: -4.0
+local_box_max_x: 8.0
 local_box_min_y: -5.0
 local_box_max_y: 5.0
 local_box_min_z: -2.0
 local_box_max_z: 4.0
+
+# Optional miss-only global-map clearing evidence. The launch-level
+# enableTwoLayerAngularClearing argument overrides the enable flag so the local
+# publisher and global consumer always switch together. Ranges come from the
+# local_box above; there is deliberately no independent clearing range.
+two_layer_angular_clearing_enabled: false
+two_layer_angular_clearing_topic: /local_3d_semantic_voxel_map/two_layer_clearing_rays
+two_layer_angular_resolution_deg: 5.0
+two_layer_octomap_resolution: 0.40
 robot_body_exclusion_enabled: false
 
 semantic_positive_update: 1.0
@@ -107,6 +118,9 @@ semantic_max_log_evidence: 4.59512
 semantic_new_class_prior: 0.8
 
 unknown_cost: 0.50
+# label 0/无效/未配置标签且几何代价也缺失时仍保留该点，并以 1.0 参与局部规划。
+# has_measured_traversability 仍为 false，因此它不会被误当成真实几何测量或自由证据。
+missing_traversability_cost: 1.00
 # Preserve hard semantic obstacle costs instead of attenuating them by the
 # dominant-class confidence when measured traversability is lower.
 traversability_fusion_method: maximum

@@ -24,6 +24,7 @@ struct FARMasterParams {
     float sensor_range;
     float terrain_range;
     float local_planner_range;
+    float contour_waypoint_projection_range;
     float main_run_freq;
     float viz_ratio;
     bool  is_multi_layer;

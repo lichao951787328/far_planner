@@ -10,6 +10,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
+#include <unordered_set>
 
 /***************************************************************************************/
 
@@ -56,6 +58,175 @@ void GraphPlanner::Init(const ros::NodeHandle& nh, const GraphPlannerParams& par
     Eigen::Vector3d grid_origin(0,0,0);
     Eigen::Vector3d grid_resolution(FARUtil::kLeafSize, FARUtil::kLeafSize, FARUtil::kLeafSize);
     free_terrain_grid_ = std::make_unique<grid_ns::Grid<char>>(grid_size, INIT_BIT, grid_origin, grid_resolution, 3);
+}
+
+GoalPointStatus GraphPlanner::ClassifyGoalPoint(
+    const Point3D& point) const {
+    // Collision authority is checked before terrain.  A wall remains an
+    // explicit blocker even if the floor below it is absent from this local
+    // terrain snapshot.
+    if (!ContourGraph::IsPointCollisionFreeStaticLayer(point)) {
+        return GoalPointStatus::STATIC_BLOCKED;
+    }
+    if (!ContourGraph::IsPointCollisionFreeDynamicLayer(point)) {
+        return GoalPointStatus::DYNAMIC_BLOCKED;
+    }
+    if (!free_terrain_grid_) return GoalPointStatus::UNKNOWN;
+    const Eigen::Vector3i sub = free_terrain_grid_->Pos2Sub(
+        point.x, point.y, grid_center_.z);
+    if (!free_terrain_grid_->InRange(sub)) {
+        return GoalPointStatus::UNKNOWN;
+    }
+    const char cell = free_terrain_grid_->GetCellValue(sub);
+    if ((cell & OBS_BIT) != 0) {
+        return GoalPointStatus::STATIC_BLOCKED;
+    }
+    if ((cell & FREE_BIT) == 0) {
+        return GoalPointStatus::UNKNOWN;
+    }
+    return GoalPointStatus::FREE;
+}
+
+std::vector<Point3D>
+GraphPlanner::CollectSparseGoalAdjustmentCandidates() const {
+    std::vector<Point3D> raw_candidates;
+    if (!free_terrain_grid_ || gp_params_.adjust_radius <= 0.0f) {
+        return raw_candidates;
+    }
+
+    const float radius = gp_params_.adjust_radius;
+    for (int index = 0; index < free_terrain_grid_->GetCellNumber(); ++index) {
+        const char cell = free_terrain_grid_->GetCellValue(index);
+        if ((cell & FREE_BIT) == 0 || (cell & OBS_BIT) != 0) continue;
+        const Eigen::Vector3d grid_position =
+            free_terrain_grid_->Ind2Pos(index);
+        Point3D candidate(static_cast<float>(grid_position.x()),
+                          static_cast<float>(grid_position.y()),
+                          origin_goal_pos_.z);
+        const float offset =
+            (candidate - origin_goal_pos_).norm_flat();
+        if (offset <= FARUtil::kEpsilon ||
+            offset > radius + FARUtil::kEpsilon) {
+            continue;
+        }
+        raw_candidates.push_back(candidate);
+    }
+
+    std::sort(raw_candidates.begin(), raw_candidates.end(),
+              [this](const Point3D& lhs, const Point3D& rhs) {
+                  const float lhs_distance =
+                      (lhs - origin_goal_pos_).norm_flat();
+                  const float rhs_distance =
+                      (rhs - origin_goal_pos_).norm_flat();
+                  if (std::fabs(lhs_distance - rhs_distance) >
+                      FARUtil::kEpsilon) {
+                      return lhs_distance < rhs_distance;
+                  }
+                  if (std::fabs(lhs.x - rhs.x) > FARUtil::kEpsilon) {
+                      return lhs.x < rhs.x;
+                  }
+                  return lhs.y < rhs.y;
+              });
+
+    // Reading every small grid cell is cheap.  Expensive collision and graph
+    // checks below see only one representative per coarser XY bucket.
+    const float spacing = std::max(
+        gp_params_.adjust_sample_spacing,
+        static_cast<float>(free_terrain_grid_->GetResolution().x()));
+    std::unordered_set<std::uint64_t> occupied_buckets;
+    std::vector<Point3D> sparse_candidates;
+    sparse_candidates.reserve(raw_candidates.size());
+    for (const Point3D& candidate : raw_candidates) {
+        const std::int32_t bucket_x = static_cast<std::int32_t>(std::floor(
+            (candidate.x - origin_goal_pos_.x) / spacing));
+        const std::int32_t bucket_y = static_cast<std::int32_t>(std::floor(
+            (candidate.y - origin_goal_pos_.y) / spacing));
+        const std::uint64_t key =
+            (static_cast<std::uint64_t>(static_cast<std::uint32_t>(bucket_x))
+             << 32) |
+            static_cast<std::uint32_t>(bucket_y);
+        if (occupied_buckets.insert(key).second) {
+            sparse_candidates.push_back(candidate);
+        }
+    }
+    return sparse_candidates;
+}
+
+bool GraphPlanner::IsCandidateReachable(const NavNodePtr& goal_ptr,
+                                        const Point3D& candidate) {
+    if (!goal_ptr) return false;
+    NavNodePtr candidate_goal = std::make_shared<NavNode>(*goal_ptr);
+    candidate_goal->position = candidate;
+    NodePtrStack graph_candidates =
+        this->SelectGoalConnectionCandidates(candidate_goal);
+    graph_candidates.erase(
+        std::remove_if(
+            graph_candidates.begin(), graph_candidates.end(),
+            [](const NavNodePtr& node_ptr) {
+                return !node_ptr || node_ptr->is_goal ||
+                    !node_ptr->is_traversable;
+            }),
+        graph_candidates.end());
+    std::sort(
+        graph_candidates.begin(), graph_candidates.end(),
+        [&candidate](const NavNodePtr& lhs, const NavNodePtr& rhs) {
+            const float lhs_distance =
+                (lhs->position - candidate).norm_flat();
+            const float rhs_distance =
+                (rhs->position - candidate).norm_flat();
+            if (std::fabs(lhs_distance - rhs_distance) >
+                FARUtil::kEpsilon) {
+                return lhs_distance < rhs_distance;
+            }
+            return lhs->id < rhs->id;
+        });
+    for (const NavNodePtr& node_ptr : graph_candidates) {
+        const EdgeValidationResult validation =
+            this->ValidateConnectToGoal(node_ptr, candidate_goal);
+        if (validation.valid) return true;
+    }
+    return false;
+}
+
+bool GraphPlanner::FindGoalAdjustmentCandidate(
+    const NavNodePtr& goal_ptr, Point3D& selected,
+    std::size_t& evaluated) {
+    const std::vector<Point3D> candidates =
+        this->CollectSparseGoalAdjustmentCandidates();
+    const std::size_t validation_limit = static_cast<std::size_t>(
+        std::max(1, gp_params_.adjust_max_candidates));
+    const BoundedGoalCandidateSearchResult result =
+        FindFirstValidGoalAdjustmentCandidate(
+            candidates, validation_limit,
+            [this, &goal_ptr, &selected](Point3D candidate) {
+                bool terrain_matched = false;
+                const float terrain_height =
+                    MapHandler::NearestTerrainHeightofNavPoint(
+                        candidate, terrain_matched);
+                if (!terrain_matched) return false;
+                candidate.z = terrain_height + FARUtil::vehicle_height;
+                if (this->ClassifyGoalPoint(candidate) !=
+                    GoalPointStatus::FREE) {
+                    return false;
+                }
+                if (!this->IsCandidateReachable(goal_ptr, candidate)) {
+                    return false;
+                }
+                selected = candidate;
+                return true;
+            });
+    evaluated = result.evaluated;
+    return result.found;
+}
+
+void GraphPlanner::SetActiveGoalPosition(const NavNodePtr& goal_ptr,
+                                         const Point3D& position,
+                                         const bool adjusted) {
+    if (!goal_ptr) return;
+    active_goal_pos_ = position;
+    goal_ptr->position = position;
+    is_goal_adjusted_ = adjusted;
+    is_terrain_associated_ = true;
 }
 
 void GraphPlanner::UpdaetVGraph(const NodePtrStack& vgraph) {
@@ -208,6 +379,18 @@ void GraphPlanner::UpdateGoalNavNodeConnects(const NavNodePtr& goal_ptr)
     }
     evaluated_goal_candidates_.clear();
 
+    // Endpoint occupancy is authoritative and must stop motion immediately,
+    // including during confirmation hysteresis or while no substitute exists.
+    // Do not rely on every contour-corner edge independently rediscovering
+    // the same endpoint blocker.
+    if (is_active_goal_explicitly_blocked_) {
+        ROS_WARN_THROTTLE(
+            1.0,
+            "GP: active goal endpoint is explicitly occupied; all goal "
+            "connections are suppressed while adjustment waits or retries.");
+        return;
+    }
+
     NodePtrStack candidates = this->SelectGoalConnectionCandidates(goal_ptr);
     std::size_t accepted_goal_connections = 0;
     float farthest_goal_candidate = 0.0f;
@@ -342,15 +525,16 @@ bool GraphPlanner::PathToGoal(const NavNodePtr& goal_ptr,
     _is_fail = false, _is_retry_wait = false, _is_succeed = false;
     global_path.clear();
     _goal_p = goal_ptr->position;
-    // A changing obstacle layout may change the Graph path and the selected
-    // waypoint, but it must never change the commanded destination.  Report
-    // success only at the original goal received from the user.
-    if ((odom_node_ptr_->position - origin_goal_pos_).norm() <
-        gp_params_.converge_dist)
+    // When obstacle-aware goal adjustment is active, the substitute is the
+    // explicitly selected safe destination.  The original command remains
+    // stored separately for restoration and visualization.
+    if (!is_active_goal_explicitly_blocked_ &&
+        (odom_node_ptr_->position - goal_ptr->position).norm() <
+            gp_params_.converge_dist)
     {
         if (FARUtil::IsDebug) ROS_INFO("GP: *********** Goal Reached! ***********");
         global_path.push_back(odom_node_ptr_);
-        _goal_p = origin_goal_pos_;
+        _goal_p = goal_ptr->position;
         _is_succeed = true;
         global_path.push_back(goal_ptr);
         _nav_node_ptr = goal_ptr;
@@ -512,12 +696,19 @@ void GraphPlanner::UpdateGoal(const Point3D& goal) {
     // connection endpoint.  In particular, dynamic contours may change the
     // latter's parents and the current waypoint, but not this destination.
     origin_goal_pos_       = goal;
+    active_goal_pos_       = goal;
+    is_goal_adjusted_      = false;
+    is_active_goal_explicitly_blocked_ = false;
+    last_goal_adjust_check_ = ros::Time(0);
+    goal_blocked_confirmations_ = 0;
+    goal_restore_confirmations_ = 0;
     is_free_nav_goal_      = command_is_free_nav_;
     if (!FARUtil::IsMultiLayer) {
         goal_node_ptr_->position.z = MapHandler::NearestTerrainHeightofNavPoint(origin_goal_pos_, is_terrain_associated_) + FARUtil::vehicle_height;
         // Terrain association is the canonical 2.5D height of the same goal;
         // its XY coordinates remain exactly those commanded by the user.
         origin_goal_pos_.z = goal_node_ptr_->position.z;
+        active_goal_pos_.z = goal_node_ptr_->position.z;
     }
     this->ResetFreeTerrainGridOrigin(goal_node_ptr_->position);
 }
@@ -526,24 +717,156 @@ void GraphPlanner::ReEvaluateGoalPosition(const NavNodePtr& goal_ptr, const bool
 {
     if (is_use_internav_goal_) return; // return if using an exsiting internav node as goal
     if (is_adjust_height) {
-        bool terrain_matched = false;
-        const float terrain_height = MapHandler::NearestTerrainHeightofNavPoint(
-            origin_goal_pos_, terrain_matched);
-        if (terrain_matched) {
-            goal_ptr->position.z = terrain_height + FARUtil::vehicle_height;
+        bool origin_terrain_matched = false;
+        const float origin_terrain_height =
+            MapHandler::NearestTerrainHeightofNavPoint(
+                origin_goal_pos_, origin_terrain_matched);
+        if (origin_terrain_matched) {
+            origin_goal_pos_.z =
+                origin_terrain_height + FARUtil::vehicle_height;
+        }
+        Point3D height_query = is_goal_adjusted_
+            ? active_goal_pos_ : origin_goal_pos_;
+        bool active_terrain_matched = false;
+        const float active_terrain_height =
+            MapHandler::NearestTerrainHeightofNavPoint(
+                height_query, active_terrain_matched);
+        if (active_terrain_matched) {
+            active_goal_pos_.z =
+                active_terrain_height + FARUtil::vehicle_height;
             is_terrain_associated_ = true;
         }
     }
-    // Goals are assumed reachable in the current phase.  Obstacles (including
-    // dynamic semantic obstacles) may change contours, Graph connections and
-    // intermediate waypoints, but never the goal XY position itself.
-    goal_ptr->position.x = origin_goal_pos_.x;
-    goal_ptr->position.y = origin_goal_pos_.y;
+    if (!is_goal_adjusted_) active_goal_pos_ = origin_goal_pos_;
+    goal_ptr->position = active_goal_pos_;
+}
 
-    // TODO: define a separate policy for an invalid user command that lies
-    // inside a permanent static obstacle.  The legacy FAR implementation
-    // reprojected such a goal to nearby free space; that behavior must not be
-    // reused for temporary dynamic occupancy without an explicit decision.
+void GraphPlanner::UpdateGoalAdjustment(const NavNodePtr& goal_ptr,
+                                        const ros::Time& now) {
+    if (!goal_ptr || !is_goal_init_ ||
+        !gp_params_.enable_goal_adjustment ||
+        gp_params_.adjust_radius <= 0.0f || FARUtil::IsMultiLayer) {
+        is_active_goal_explicitly_blocked_ = false;
+        return;
+    }
+
+    const GoalPointStatus active_status =
+        this->ClassifyGoalPoint(active_goal_pos_);
+    is_active_goal_explicitly_blocked_ =
+        active_status == GoalPointStatus::STATIC_BLOCKED ||
+        active_status == GoalPointStatus::DYNAMIC_BLOCKED;
+    const bool active_became_blocked = is_goal_adjusted_ &&
+        (active_status == GoalPointStatus::STATIC_BLOCKED ||
+         active_status == GoalPointStatus::DYNAMIC_BLOCKED);
+    const bool clock_rewound = !last_goal_adjust_check_.isZero() &&
+        now < last_goal_adjust_check_;
+    const bool period_elapsed = last_goal_adjust_check_.isZero() ||
+        gp_params_.adjust_check_period <= 0.0f || clock_rewound ||
+        (now - last_goal_adjust_check_).toSec() >=
+            gp_params_.adjust_check_period;
+    if (!period_elapsed && !active_became_blocked) return;
+    last_goal_adjust_check_ = now;
+
+    const GoalPointStatus origin_status =
+        this->ClassifyGoalPoint(origin_goal_pos_);
+
+    if (is_goal_adjusted_) {
+        bool original_reachable = false;
+        if (origin_status == GoalPointStatus::FREE) {
+            original_reachable =
+                this->IsCandidateReachable(goal_ptr, origin_goal_pos_);
+        }
+        if (origin_status == GoalPointStatus::FREE && original_reachable) {
+            goal_restore_confirmations_ = std::min(
+                std::max(1, gp_params_.restore_confirmations),
+                goal_restore_confirmations_ + 1);
+        } else {
+            goal_restore_confirmations_ = 0;
+        }
+        if (goal_restore_confirmations_ >=
+            std::max(1, gp_params_.restore_confirmations)) {
+            const Point3D previous = active_goal_pos_;
+            this->SetActiveGoalPosition(goal_ptr, origin_goal_pos_, false);
+            is_active_goal_explicitly_blocked_ = false;
+            goal_blocked_confirmations_ = 0;
+            goal_restore_confirmations_ = 0;
+            ROS_INFO("GP: original goal is explicitly free and reachable; "
+                     "restored (%.2f, %.2f, %.2f) from adjusted goal "
+                     "(%.2f, %.2f, %.2f).",
+                     origin_goal_pos_.x, origin_goal_pos_.y,
+                     origin_goal_pos_.z, previous.x, previous.y, previous.z);
+            return;
+        }
+
+        if (!active_became_blocked) return;
+        Point3D replacement;
+        std::size_t evaluated = 0;
+        if (this->FindGoalAdjustmentCandidate(
+                goal_ptr, replacement, evaluated)) {
+            const Point3D previous = active_goal_pos_;
+            this->SetActiveGoalPosition(goal_ptr, replacement, true);
+            is_active_goal_explicitly_blocked_ = false;
+            ROS_WARN("GP: adjusted goal became occupied; replaced "
+                     "(%.2f, %.2f) with (%.2f, %.2f) after %zu complete "
+                     "candidate checks.",
+                     previous.x, previous.y, replacement.x, replacement.y,
+                     evaluated);
+        } else {
+            ROS_WARN_THROTTLE(
+                1.0,
+                "GP: adjusted goal is occupied and no safe reachable "
+                "replacement was found within %.2f m after %zu complete "
+                "candidate checks; normal goal-edge validation will stop "
+                "the robot.",
+                gp_params_.adjust_radius, evaluated);
+        }
+        return;
+    }
+
+    const bool adjustment_trigger =
+        origin_status == GoalPointStatus::STATIC_BLOCKED ||
+        (gp_params_.adjust_on_dynamic_obstacle &&
+         origin_status == GoalPointStatus::DYNAMIC_BLOCKED);
+    if (!adjustment_trigger) {
+        goal_blocked_confirmations_ = 0;
+        return;
+    }
+    goal_blocked_confirmations_ = std::min(
+        std::max(1, gp_params_.adjust_block_confirmations),
+        goal_blocked_confirmations_ + 1);
+    if (goal_blocked_confirmations_ <
+        std::max(1, gp_params_.adjust_block_confirmations)) {
+        ROS_WARN_THROTTLE(
+            1.0,
+            "GP: original goal is explicitly occupied (%d/%d confirmations); "
+            "retaining it while normal edge validation stops the robot.",
+            goal_blocked_confirmations_,
+            std::max(1, gp_params_.adjust_block_confirmations));
+        return;
+    }
+
+    Point3D replacement;
+    std::size_t evaluated = 0;
+    if (!this->FindGoalAdjustmentCandidate(
+            goal_ptr, replacement, evaluated)) {
+        ROS_WARN_THROTTLE(
+            1.0,
+            "GP: original goal is occupied but no safe reachable substitute "
+            "was found within %.2f m after %zu complete candidate checks; "
+            "retaining the command for a later retry.",
+            gp_params_.adjust_radius, evaluated);
+        return;
+    }
+
+    this->SetActiveGoalPosition(goal_ptr, replacement, true);
+    is_active_goal_explicitly_blocked_ = false;
+    goal_restore_confirmations_ = 0;
+    ROS_WARN("GP: original goal (%.2f, %.2f, %.2f) is occupied; selected "
+             "reachable substitute (%.2f, %.2f, %.2f), offset %.2f m, "
+             "after %zu complete candidate checks.",
+             origin_goal_pos_.x, origin_goal_pos_.y, origin_goal_pos_.z,
+             replacement.x, replacement.y, replacement.z,
+             (replacement - origin_goal_pos_).norm_flat(), evaluated);
 }
 
 void GraphPlanner::AttemptStatusCallBack(const std_msgs::Bool& msg) {

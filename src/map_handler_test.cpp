@@ -450,6 +450,14 @@ private:
         PointCloudPtr static_wall = make_row(0.0f);
         PointCloudPtr empty_dynamic(new PointCloud());
         ContourGraph::SetLocalCollisionCloud(static_wall, empty_dynamic);
+        reporter_.Check(
+            !ContourGraph::IsPointCollisionFreeStaticLayer(
+                Point3D(1.0f, 0.0f, 0.5f)) &&
+                ContourGraph::IsPointCollisionFreeDynamicLayer(
+                    Point3D(1.0f, 0.0f, 0.5f)) &&
+                ContourGraph::IsPointCollisionFreeStaticLayer(
+                    Point3D(1.0f, 1.0f, 0.5f)),
+            "Goal-point clearance distinguishes a static endpoint blocker from a clear point");
         const EdgeValidationResult clear =
             ContourGraph::ValidateContourFollowEdge(first, second);
         reporter_.Check(
@@ -478,6 +486,10 @@ private:
         dynamic_block->height = 1;
         dynamic_block->is_dense = true;
         ContourGraph::SetLocalCollisionCloud(static_wall, dynamic_block);
+        reporter_.Check(
+            !ContourGraph::IsPointCollisionFreeDynamicLayer(
+                Point3D(blocker.x, blocker.y, blocker.z)),
+            "Goal-point clearance immediately identifies a dynamic endpoint blocker");
         const EdgeValidationResult blocked =
             ContourGraph::ValidateContourFollowEdge(first, second);
         reporter_.Check(

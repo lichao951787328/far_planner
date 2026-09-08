@@ -24,6 +24,9 @@
   <arg name="startPathFollower" default="false"/>
   <arg name="localPathTopic" default="/path"/>
   <arg name="cmdVelTopic" default="/far_cmd_vel"/>
+  <arg name="enableLegacyRaycastClearing" default="false"/>
+  <arg name="enableTwoLayerAngularClearing" default="false"/>
+  <arg name="enableGoalAdjustment" default="true"/>
 
   <param name="/use_sim_time" value="true"/>
   <rosparam command="load" file="$(arg semanticSchema)"/>
@@ -37,6 +40,8 @@
     <arg name="reference_frame" value="map_start"/>
     <arg name="local_cost_frame" value="wuba_base"/>
     <arg name="ssmi_topic" value="/semantic_pcl/five_class_global_admitted"/>
+    <arg name="enable_two_layer_angular_clearing"
+         value="$(arg enableTwoLayerAngularClearing)"/>
     <arg name="rviz" value="false"/>
   </include>
 
@@ -55,6 +60,10 @@
     <arg name="use_initial_pose_reference" value="false"/>
     <arg name="reference_frame_id" value="map_start"/>
     <arg name="enable_explicit_revocation" value="true"/>
+    <arg name="enable_raycast_clearing"
+         value="$(arg enableLegacyRaycastClearing)"/>
+    <arg name="enable_two_layer_angular_clearing"
+         value="$(arg enableTwoLayerAngularClearing)"/>
     <arg name="rviz" value="false"/>
   </include>
 
@@ -71,6 +80,8 @@
     <param name="local_voxel_topic"
            value="/local_3d_semantic_voxel_map/voxel_cloud"/>
     <param name="local_voxel_timeout" value="1.0"/>
+    <param name="GPlanner/enable_goal_adjustment"
+           value="$(arg enableGoalAdjustment)"/>
     <remap from="odom_world" to="/fusion_localization"/>
     <remap from="goal_point" to="/goal_point"/>
   </node>

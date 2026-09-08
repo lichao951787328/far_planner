@@ -1,0 +1,52 @@
+<?xml version="1.0"?>
+<launch>
+  <!-- Replay the 2026-08-13 recording through the exact live five-class
+       navigation pipeline. In the Docker image, HOME is /root. -->
+  <arg name="bag"
+       default="$(env HOME)/social_nav/src/2026-08-13-02-24-30.bag"/>
+  <arg name="bagStart" default="0"/>
+  <arg name="bagPlayArgs" default="--clock --delay=1"/>
+
+  <!-- Frequently changed live-pipeline options are forwarded so they remain
+       configurable from the roslaunch command line. -->
+  <arg name="rviz" default="true"/>
+  <arg name="rvizConfig" default="navigation_demo"/>
+  <arg name="startLocalPlanner" default="true"/>
+  <arg name="startPathFollower" default="false"/>
+  <arg name="localPathTopic" default="/path"/>
+  <arg name="cmdVelTopic" default="/far_cmd_vel"/>
+  <arg name="goalTimeout" default="0.0"/>
+  <arg name="maxSpeed" default="0.3"/>
+  <arg name="autonomySpeed" default="0.3"/>
+  <arg name="enableLegacyRaycastClearing" default="false"/>
+  <arg name="enableTwoLayerAngularClearing" default="true"/>
+  <arg name="enableGoalAdjustment" default="true"/>
+
+  <include file="$(find far_planner)/launch/five_class_live_navigation.launch">
+    <arg name="useSimTime" value="true"/>
+    <arg name="recordTimingTopics" value="false"/>
+    <arg name="rviz" value="$(arg rviz)"/>
+    <arg name="rvizConfig" value="$(arg rvizConfig)"/>
+    <arg name="startLocalPlanner" value="$(arg startLocalPlanner)"/>
+    <arg name="startPathFollower" value="$(arg startPathFollower)"/>
+    <arg name="localPathTopic" value="$(arg localPathTopic)"/>
+    <arg name="cmdVelTopic" value="$(arg cmdVelTopic)"/>
+    <arg name="goalTimeout" value="$(arg goalTimeout)"/>
+    <arg name="maxSpeed" value="$(arg maxSpeed)"/>
+    <arg name="autonomySpeed" value="$(arg autonomySpeed)"/>
+    <arg name="enableLegacyRaycastClearing"
+         value="$(arg enableLegacyRaycastClearing)"/>
+    <arg name="enableTwoLayerAngularClearing"
+         value="$(arg enableTwoLayerAngularClearing)"/>
+    <arg name="enableGoalAdjustment" value="$(arg enableGoalAdjustment)"/>
+  </include>
+
+  <!-- Rebuild map_start from the first usable cloud. The bag contains an old
+       recorded map -> map_start transform, which must not enter the live TF
+       tree. Ending the required player also shuts down the full pipeline. -->
+  <node pkg="rosbag" type="play" name="five_class_bag_player"
+        args="$(arg bagPlayArgs) --start=$(arg bagStart) $(arg bag)"
+        output="screen" required="true">
+    <remap from="/tf_static" to="/recorded_tf_static"/>
+  </node>
+</launch>

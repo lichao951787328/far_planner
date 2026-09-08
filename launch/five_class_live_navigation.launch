@@ -8,6 +8,9 @@
   <arg name="planningFrameId" default="map_start"/>
   <arg name="vehicleFrameId" default="wuba_base"/>
   <arg name="useInitialPoseReference" default="true"/>
+  <!-- Keep wall time for live sensors, while allowing a bag wrapper to reuse
+       this exact pipeline with rosbag's simulated clock. -->
+  <arg name="useSimTime" default="false"/>
 
   <arg name="rvizGoalTopic" default="/move_base_simple/goal"/>
   <arg name="farGoalTopic" default="/goal_point"/>
@@ -28,6 +31,15 @@
        default="$(find far_planner)/config/five_class_semantic_schema.yaml"/>
   <arg name="rviz" default="true"/>
   <arg name="rvizConfig" default="navigation_demo"/>
+  <!-- Independent clearing paths. The legacy path reconstructs rays from a
+       fused local grid and therefore remains off by default. -->
+<!-- 新的两层过滤方案，旧的方案enableTwoLayerAngularClearing:=false
+  enableLegacyRaycastClearing:=true -->
+  <arg name="enableLegacyRaycastClearing" default="false"/>
+  <arg name="enableTwoLayerAngularClearing" default="true"/>
+  <arg name="enableGoalAdjustment" default="true"/>
+  <arg name="twoLayerClearingTopic"
+       default="/local_3d_semantic_voxel_map/two_layer_clearing_rays"/>
   <arg name="startLocalPlanner" default="true"/>
   <arg name="startPathFollower" default="false"/>
   <arg name="localPathTopic" default="/path"/>
@@ -42,8 +54,8 @@
   <arg name="timingBagPrefix"
        default="$(env HOME)/.ros/five_class_live_tf_timing"/>
 
-  <!-- Deployment uses wall/ROS time supplied by the host, not bag /clock. -->
-  <param name="/use_sim_time" value="false"/>
+  <!-- Live deployment defaults to host time; bag wrappers opt into /clock. -->
+  <param name="/use_sim_time" value="$(arg useSimTime)"/>
   <!-- Load the class table before any consumer starts. roslaunch uploads all
        parameters before starting nodes, so every component sees one snapshot. -->
   <rosparam command="load" file="$(arg semanticSchema)"/>
@@ -57,6 +69,9 @@
     <arg name="reference_frame" value="$(arg planningFrameId)"/>
     <arg name="local_cost_frame" value="$(arg vehicleFrameId)"/>
     <arg name="ssmi_topic" value="$(arg ssmiTopic)"/>
+    <arg name="enable_two_layer_angular_clearing"
+         value="$(arg enableTwoLayerAngularClearing)"/>
+    <arg name="two_layer_clearing_topic" value="$(arg twoLayerClearingTopic)"/>
     <arg name="rviz" value="false"/>
   </include>
 
@@ -72,6 +87,11 @@
     <arg name="use_initial_pose_reference" value="false"/>
     <arg name="reference_frame_id" value="$(arg planningFrameId)"/>
     <arg name="enable_explicit_revocation" value="true"/>
+    <arg name="enable_raycast_clearing"
+         value="$(arg enableLegacyRaycastClearing)"/>
+    <arg name="enable_two_layer_angular_clearing"
+         value="$(arg enableTwoLayerAngularClearing)"/>
+    <arg name="two_layer_clearing_topic" value="$(arg twoLayerClearingTopic)"/>
     <arg name="rviz" value="false"/>
   </include>
 
@@ -84,6 +104,8 @@
     <param name="semantic_map_topic" value="$(arg semanticMapTopic)"/>
     <param name="local_voxel_topic" value="$(arg localVoxelTopic)"/>
     <param name="local_voxel_timeout" value="1.0"/>
+    <param name="GPlanner/enable_goal_adjustment"
+           value="$(arg enableGoalAdjustment)"/>
     <remap from="odom_world" to="$(arg odometryTopic)"/>
     <remap from="goal_point" to="$(arg farGoalTopic)"/>
   </node>

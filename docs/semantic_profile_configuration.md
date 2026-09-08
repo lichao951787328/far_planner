@@ -47,12 +47,13 @@ roslaunch far_planner five_class_live_navigation.launch \
 
 ## `unknown` 参数
 
-这里的 unknown 是无效、未配置或 `UINT32_MAX` 标签，不是有真实点的 label 0。
+这里的 unknown 是无效、未配置或 `UINT32_MAX` 标签。默认五分类配置还把 label 0
+声明成 `geometry_only`，所以局部 voxel 会把它归一化到同一条“无可靠语义”路径。
 
 | 参数 | 类型/可选值 | 含义 |
 |---|---|---|
-| `unknown/policy` | `exclude`、`map_to_fallback` | 丢弃无效标签，或将其映射到一个已配置类别。导航建议使用 `exclude`。 |
-| `unknown/fallback_label` | 非负整数 | `map_to_fallback` 时使用的目标类别。`exclude` 时不会使用。 |
+| `unknown/policy` | `exclude`、`map_to_fallback`、`cost_based` | 分别表示始终丢弃、固定映射，或只把高融合代价 unknown 映射成 `traversability/obstacle_label`。五分类使用 `cost_based`。 |
+| `unknown/fallback_label` | 非负整数 | `map_to_fallback` 时使用的目标类别；其他策略不直接使用。 |
 | `unknown/name` | 字符串 | 日志和图例中的名称。 |
 | `unknown/meaning` | 字符串 | 给维护者阅读的说明，不参与算法。 |
 | `unknown/rgb` | `[R,G,B]`，每项 0–255 | 无效类别显示颜色，不能与已配置类别颜色重复。 |
@@ -79,6 +80,7 @@ roslaunch far_planner five_class_live_navigation.launch \
 | `role` | `ignore` | 不参与导航，`global_map` 必须为 `false`。 |
 | `semantic_cost` | 浮点数 `[0,1]` | 类别先验代价。当前局部 voxel 使用 `maximum` 融合，因此最终代价不会低于 measured traversability。 |
 | `global_map` | 布尔值 | 是否允许类别进入持久 SemanticOctomap。 |
+| `geometry_only` | 可选布尔值 | `true` 表示输入 label 仅代表缺少可靠语义，必须配成 `role=ignore`、`global_map=false`；局部代价只由几何决定。 |
 
 ## 自动派生关系
 
@@ -107,21 +109,27 @@ FAR 当前的局部障碍阈值为 `0.55`。如果一个 `terrain` 类别希望�
 `semantic_cost` 通常应小于 `0.55`。即使语义代价较低，只要输入的 measured
 traversability 达到 `0.55`，该体素仍会进入瞬时障碍层。
 
-## label 0 与真正 unknown 的区别
+## label 0、真正 unknown 与几何障碍
 
-label 0 已经有真实的 3D 体素、语义观测和 measured traversability，只是语义含义
-不明确。因此建议保持：
+label 0 和真正 unknown 都保留真实的 3D 体素，但都不作为语义证据。label 0 在
+`classes` 中保留，是为了明确输入协议并通过 `geometry_only` 触发归一化：
 
 ```yaml
-role: static_obstacle
-semantic_cost: 1.00
+role: ignore
+semantic_cost: 0.00
+global_map: false
+geometry_only: true
 ```
 
-恢复算法会处理所有真实存在的 `static_obstacle` 体素，包括 label 0 和 manhole。
-闭运算产生但没有真实点的位置不会创建新体素。位于闭运算后完整地面支持区内、与
-半径内最近原始 `terrain` 体素高差不超过阈值的静态体素，才复制该参考体素的 label、
-置信度和代价；否则仍保持原静态障碍。完整支持区既包含闭运算新增的小孔/窄缝，也
-包含同一 XY 原本已有 terrain、其他 Z 又出现静态噪点的位置。
+存在 measured traversability 时，最终代价只由该几何测量决定；几何也缺失时，点仍
+保留，使用 `missing_traversability_cost: 1.0`，同时保持
+`has_measured_traversability=false`。FAR 用最终融合代价提取局部轮廓；全局适配器只把
+达到 `0.75` 的无语义点编码成专用 label 5 `geometric_obstacle`。后来若同一全局
+0.40 m 体素连续获得低代价真实几何测量，局部撤销跟踪器会在帧数、时长和证据阈值
+均满足后发布删除点；缺失代价本身永远不算自由证据。
+
+OpenCV 恢复算法只处理输入中真实存在的 `static_obstacle` 体素，例如 manhole；label 0
+不再进入恢复候选。闭运算产生但没有真实点的位置不会创建新体素。
 
 ## 案例一：grass 和 rough_ground 都可通行
 
@@ -192,16 +200,17 @@ semantic_cost: 1.00
 global_map: true
 ```
 
-结果：只有 flat_ground 构成白色地面；label 0、grass、rough_ground 和
-manhole_cover 默认都是静态障碍，但位于闭运算地面支持区且高差通过时仍会按统一
+结果：只有 flat_ground 构成白色地面；grass、rough_ground 和 manhole_cover
+是静态障碍，但位于闭运算地面支持区且高差通过时仍会按统一
 规则恢复为 flat_ground。
 
 ## 案例五：新增 gravel 类别
 
-假设上游新增 label 5，颜色为 `[100,100,60]`，允许通行且可作为恢复参考：
+label 5 已保留为合成 `geometric_obstacle`。假设上游新增 label 6，颜色为
+`[100,100,60]`，允许通行且可作为恢复参考：
 
 ```yaml
-- label: 5
+- label: 6
   name: gravel
   meaning: traversable compact gravel
   rgb: [100, 100, 60]
@@ -210,8 +219,8 @@ manhole_cover 默认都是静态障碍，但位于闭运算地面支持区且高
   global_map: true
 ```
 
-重启后 label 5 自动进入局部/FAR 地形集合、全局地形颜色组和恢复参考集合，不需要
-修改 C++ 或其他 label 数组。必须保证输入点云确实使用 label 5 和相同语义含义。
+重启后 label 6 自动进入局部/FAR 地形集合、全局地形颜色组和恢复参考集合，不需要
+修改 C++ 或其他 label 数组。必须保证输入点云确实使用 label 6 和相同语义含义。
 
 ## 案例六：新增动态类别
 
@@ -232,7 +241,7 @@ manhole_cover 默认都是静态障碍，但位于闭运算地面支持区且高
 
 ## 常见错误
 
-- 不要把有真实观测的 label 0 从 `classes` 删除；否则它会落入真正 unknown 策略。
+- 不要删除 label 0 的 `geometry_only`，否则它会重新成为普通语义先验。
 - 不要为了“禁止恢复”把行人、车辆写成 `static_obstacle`；动态类别必须使用 `dynamic_obstacle`。
 - 所有 `static_obstacle` 都使用同一套闭运算和高差规则；当前没有按单个静态类别设置例外。
 - 不要给不同类别重复使用同一个 RGB；FAR 的全局语义匹配会产生歧义。
