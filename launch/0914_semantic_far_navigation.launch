@@ -1,0 +1,37 @@
+<launch>
+  <arg name="bag"
+       default="$(env HOME)/social_nav/src/mapless_navigation_old/src/dateset/0914/2026-09-14-13-47-53.bag"/>
+  <arg name="start_paused" default="false"/>
+  <arg name="rate" default="1.0"/>
+  <arg name="rviz" default="true"/>
+  <arg name="world_frame" default="map"/>
+  <arg name="vehicle_frame" default="wuba_base"/>
+  <arg name="registered_scan_topic"
+       default="/far_scan/registered_scan"/>
+  <arg name="registered_scan_origin_topic"
+       default="/far_scan/registered_scan_origin"/>
+
+  <!-- Bag + local semantic voxel map + dual-format raw scan adapter. -->
+  <include file="$(find far_planner)/launch/0914_local_map_bag.launch">
+    <arg name="bag" value="$(arg bag)"/>
+    <arg name="start_paused" value="$(arg start_paused)"/>
+    <arg name="rate" value="$(arg rate)"/>
+    <arg name="rviz" value="false"/>
+    <arg name="global_frame" value="$(arg world_frame)"/>
+    <arg name="vehicle_frame" value="$(arg vehicle_frame)"/>
+    <arg name="registered_scan_topic" value="$(arg registered_scan_topic)"/>
+    <arg name="registered_scan_origin_topic"
+         value="$(arg registered_scan_origin_topic)"/>
+  </include>
+
+  <!-- Semantic terrain bridge + FAR. -->
+  <include file="$(find far_planner)/launch/semantic_interface.launch">
+    <arg name="odom_topic" value="/fusion_localization"/>
+    <arg name="registered_scan_topic" value="$(arg registered_scan_topic)"/>
+    <arg name="registered_scan_origin_topic"
+         value="$(arg registered_scan_origin_topic)"/>
+    <arg name="world_frame" value="$(arg world_frame)"/>
+    <arg name="rviz" value="$(arg rviz)"/>
+    <arg name="graph_decoder" value="false"/>
+  </include>
+</launch>

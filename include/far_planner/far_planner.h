@@ -1,6 +1,8 @@
 #ifndef FAR_PLANNER_H
 #define FAR_PLANNER_H
 
+#include <deque>
+
 #include "utility.h"
 #include "dynamic_graph.h"
 #include "contour_detector.h"
@@ -29,6 +31,7 @@ struct FARMasterParams {
     bool  is_pub_boundary;
     bool  is_debug_output;
     bool  is_attempt_autoswitch;
+    bool  require_scan_origin;
     std::string world_frame;
 };
 
@@ -43,7 +46,8 @@ public:
 private:
     ros::NodeHandle nh;
     ros::Subscriber reset_graph_sub_, joy_command_sub_, update_command_sub_;
-    ros::Subscriber odom_sub_, terrain_sub_, terrain_local_sub_, scan_sub_, waypoint_sub_;
+    ros::Subscriber odom_sub_, terrain_sub_, terrain_local_sub_, scan_sub_;
+    ros::Subscriber scan_origin_sub_, waypoint_sub_;
     ros::Subscriber read_command_sub_, save_command_sub_; // only use for terminal formatting
     ros::Publisher  goal_pub_, boundary_pub_;
     ros::Publisher  dynamic_obs_pub_, surround_free_debug_, surround_obs_debug_;
@@ -135,6 +139,8 @@ private:
     ros::Time last_terrain_stamp_;
     ros::Time last_terrain_local_stamp_;
     ros::Time last_scan_stamp_;
+    std::deque<geometry_msgs::PointStamped> scan_origin_cache_;
+    std::deque<sensor_msgs::PointCloud2ConstPtr> pending_scan_clouds_;
 
     Point3D ExtendViewpointOnObsCloud(const NavNodePtr& nav_node_ptr, const PointCloudPtr& obsCloudIn, float& free_dist);
 
@@ -192,6 +198,11 @@ private:
     }
 
     void ScanCallBack(const sensor_msgs::PointCloud2ConstPtr& pc);
+    void ScanOriginCallBack(const geometry_msgs::PointStampedConstPtr& origin);
+    void ProcessScanWithOrigin(const sensor_msgs::PointCloud2ConstPtr& pc,
+                               const Point3D& scan_origin);
+    bool FindScanOrigin(const ros::Time& stamp, Point3D* scan_origin) const;
+    void ProcessPendingScans();
     void WaypointCallBack(const geometry_msgs::PointStamped& route_goal);
 
     void ExtractDynamicObsFromScan(const PointCloudPtr& scanCloudIn, 

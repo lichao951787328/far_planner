@@ -16,6 +16,7 @@ void FARMaster::Init() {
   odom_sub_           = nh.subscribe("/odom_world", 5, &FARMaster::OdomCallBack, this);
   terrain_sub_        = nh.subscribe("/terrain_cloud", 1, &FARMaster::TerrainCallBack, this);
   scan_sub_           = nh.subscribe("/scan_cloud", 5, &FARMaster::ScanCallBack, this);
+  scan_origin_sub_    = nh.subscribe("/scan_origin", 5, &FARMaster::ScanOriginCallBack, this);
   waypoint_sub_       = nh.subscribe("/goal_point", 1, &FARMaster::WaypointCallBack, this);
   terrain_local_sub_  = nh.subscribe("/terrain_local_cloud", 1, &FARMaster::TerrainLocalCallBack, this);
   joy_command_sub_    = nh.subscribe("/joy", 5, &FARMaster::JoyCommandCallBack, this);
@@ -123,6 +124,8 @@ void FARMaster::ResetEnvironmentAndGraph() {
   FARUtil::stack_dyobs_cloud_->clear();
   FARUtil::cur_new_cloud_->clear();
   FARUtil::cur_dyobs_cloud_->clear();
+  scan_origin_cache_.clear();
+  pending_scan_clouds_.clear();
   /* Stop the robot if it is moving */
   goal_waypoint_stamped_.header.stamp = ros::Time::now();
   goal_waypoint_stamped_.point = FARUtil::Point3DToGeoMsgPoint(robot_pos_);
@@ -441,6 +444,7 @@ void FARMaster::LoadROSParams() {
   nh.param<bool>(master_prefix  + "is_pub_boundary",       master_params_.is_pub_boundary, true);
   nh.param<bool>(master_prefix  + "is_debug_output",       master_params_.is_debug_output, false);
   nh.param<bool>(master_prefix  + "is_attempt_autoswitch", master_params_.is_attempt_autoswitch, true);
+  nh.param<bool>(master_prefix  + "require_scan_origin",   master_params_.require_scan_origin, false);
   nh.param<std::string>(master_prefix + "world_frame",     master_params_.world_frame, "map");
   master_params_.terrain_range = std::min(master_params_.terrain_range, master_params_.sensor_range);
 
@@ -570,6 +574,7 @@ void FARMaster::OdomCallBack(const nav_msgs::OdometryConstPtr& msg) {
   }
 
   is_odom_init_ = true;
+  this->ProcessPendingScans();
 }
 
 bool FARMaster::PrcocessCloud(const sensor_msgs::PointCloud2ConstPtr& pc,
@@ -591,7 +596,8 @@ bool FARMaster::PrcocessCloud(const sensor_msgs::PointCloud2ConstPtr& pc,
       FARUtil::TransformPCLFrame(cloud_frame, 
                                 master_params_.world_frame, 
                                 tf_listener_,
-                                cloudOut);
+                                cloudOut,
+                                pc->header.stamp);
     }
     catch(tf::TransformException ex)
     {
@@ -624,9 +630,9 @@ bool FARMaster::ProcessTerrainCloud(const sensor_msgs::PointCloud2ConstPtr& pc,
     }
     try {
       FARUtil::TransformPCLFrame(cloud_frame, master_params_.world_frame,
-                                 tf_listener_, freeCloudOut);
+                                 tf_listener_, freeCloudOut, pc->header.stamp);
       FARUtil::TransformPCLFrame(cloud_frame, master_params_.world_frame,
-                                 tf_listener_, obsCloudOut);
+                                 tf_listener_, obsCloudOut, pc->header.stamp);
     } catch (tf::TransformException& ex) {
       ROS_ERROR("Tracking terrain cloud TF lookup: %s", ex.what());
       freeCloudOut->clear();
@@ -671,11 +677,81 @@ void FARMaster::ResetInputStamps() {
 }
 
 void FARMaster::ScanCallBack(const sensor_msgs::PointCloud2ConstPtr& scan_pc) {
-  if (master_params_.is_static_env || !is_odom_init_) return;
-  if (!this->IsStrictlyNewStamp(scan_pc->header.stamp, last_scan_stamp_, "scan")) return;
+  if (master_params_.is_static_env) return;
+  Point3D scan_origin;
+  if (this->FindScanOrigin(scan_pc->header.stamp, &scan_origin) && is_odom_init_) {
+    this->ProcessScanWithOrigin(scan_pc, scan_origin);
+    return;
+  }
+  if (!master_params_.require_scan_origin && is_odom_init_) {
+    this->ProcessScanWithOrigin(scan_pc, robot_pos_);
+    return;
+  }
+  const bool duplicate = std::any_of(
+      pending_scan_clouds_.begin(), pending_scan_clouds_.end(),
+      [&scan_pc](const sensor_msgs::PointCloud2ConstPtr& queued) {
+        return queued->header.stamp == scan_pc->header.stamp;
+      });
+  if (duplicate) return;
+  if (pending_scan_clouds_.size() >= 5U) {
+    ROS_WARN_THROTTLE(1.0, "FARMaster: scan/origin queue full; drop oldest scan");
+    pending_scan_clouds_.pop_front();
+  }
+  pending_scan_clouds_.push_back(scan_pc);
+}
+
+bool FARMaster::FindScanOrigin(const ros::Time& stamp,
+                               Point3D* scan_origin) const {
+  for (const auto& origin : scan_origin_cache_) {
+    if (origin.header.stamp == stamp) {
+      *scan_origin = Point3D(origin.point.x, origin.point.y, origin.point.z);
+      return true;
+    }
+  }
+  return false;
+}
+
+void FARMaster::ProcessScanWithOrigin(
+    const sensor_msgs::PointCloud2ConstPtr& scan_pc,
+    const Point3D& scan_origin) {
+  if (!this->IsStrictlyNewStamp(scan_pc->header.stamp, last_scan_stamp_,
+                                "scan")) {
+    return;
+  }
   if (!this->PrcocessCloud(scan_pc, FARUtil::cur_scan_cloud_)) return;
   last_scan_stamp_ = scan_pc->header.stamp;
-  scan_handler_.UpdateRobotPosition(robot_pos_);
+  scan_handler_.UpdateRobotPosition(scan_origin);
+}
+
+void FARMaster::ProcessPendingScans() {
+  if (!is_odom_init_) return;
+  auto scan = pending_scan_clouds_.begin();
+  while (scan != pending_scan_clouds_.end()) {
+    Point3D origin;
+    if (this->FindScanOrigin((*scan)->header.stamp, &origin)) {
+      this->ProcessScanWithOrigin(*scan, origin);
+      scan = pending_scan_clouds_.erase(scan);
+    } else if (!master_params_.require_scan_origin) {
+      this->ProcessScanWithOrigin(*scan, robot_pos_);
+      scan = pending_scan_clouds_.erase(scan);
+    } else {
+      ++scan;
+    }
+  }
+}
+
+void FARMaster::ScanOriginCallBack(
+    const geometry_msgs::PointStampedConstPtr& origin) {
+  if (origin->header.stamp.isZero()) return;
+  if (!FARUtil::IsSameFrameID(origin->header.frame_id,
+                              master_params_.world_frame)) {
+    ROS_WARN_THROTTLE(1.0,
+                      "FARMaster: reject scan origin outside world frame");
+    return;
+  }
+  scan_origin_cache_.push_back(*origin);
+  while (scan_origin_cache_.size() > 10U) scan_origin_cache_.pop_front();
+  this->ProcessPendingScans();
 }
 
 void FARMaster::TerrainLocalCallBack(const sensor_msgs::PointCloud2ConstPtr& pc) {

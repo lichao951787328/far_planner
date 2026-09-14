@@ -1,0 +1,24 @@
+<launch>
+  <arg name="config"
+       default="$(find far_planner)/config/scan_input_adapter.yaml"/>
+  <arg name="input_topic" default="/livox/lidar"/>
+  <arg name="output_topic" default="/far_scan/registered_scan"/>
+  <arg name="origin_topic" default="/far_scan/registered_scan_origin"/>
+  <arg name="world_frame" default="map"/>
+  <arg name="vehicle_frame" default="wuba_base"/>
+  <arg name="lidar_frame" default="livox_frame"/>
+  <arg name="pointcloud_origin_frame" default="$(arg vehicle_frame)"/>
+
+  <node pkg="far_planner" type="far_scan_input_adapter"
+        name="far_scan_input_adapter" output="screen" required="true">
+    <rosparam command="load" file="$(arg config)"/>
+    <param name="input_topic" value="$(arg input_topic)"/>
+    <param name="output_topic" value="$(arg output_topic)"/>
+    <param name="origin_topic" value="$(arg origin_topic)"/>
+    <param name="world_frame" value="$(arg world_frame)"/>
+    <param name="vehicle_frame" value="$(arg vehicle_frame)"/>
+    <param name="lidar_frame" value="$(arg lidar_frame)"/>
+    <param name="pointcloud_origin_frame"
+           value="$(arg pointcloud_origin_frame)"/>
+  </node>
+</launch>

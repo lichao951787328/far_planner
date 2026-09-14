@@ -160,14 +160,15 @@ void FARUtil::CropCloudWithinHeight(const PointCloudPtr& cloudInOut, const float
 void FARUtil::TransformPCLFrame(const std::string& from_frame_id,
                                const std::string& to_frame_id,
                                const tf::TransformListener* tf_listener,
-                               const PointCloudPtr& cloudInOut) 
+                               const PointCloudPtr& cloudInOut,
+                               const ros::Time& stamp)
 {
   if (cloudInOut->empty()) return;
   pcl::PointCloud<PCLPoint> aft_tf_cloud;
   tf::StampedTransform cloud_to_map_tf;
   try {
-    tf_listener->waitForTransform(to_frame_id, from_frame_id, ros::Time(0), ros::Duration(1.0));
-    tf_listener->lookupTransform(to_frame_id, from_frame_id, ros::Time(0), cloud_to_map_tf);
+    tf_listener->waitForTransform(to_frame_id, from_frame_id, stamp, ros::Duration(1.0));
+    tf_listener->lookupTransform(to_frame_id, from_frame_id, stamp, cloud_to_map_tf);
   } catch (tf::TransformException ex){
     throw ex;
     return;

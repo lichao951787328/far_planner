@@ -11,9 +11,12 @@ set(CMAKE_MODULE_PATH ${PROJECT_SOURCE_DIR}/cmake)
 ## Find catkin macros and libraries
 find_package(catkin REQUIRED COMPONENTS
   roscpp
+  geometry_msgs
+  rosgraph_msgs
   std_msgs
   sensor_msgs
   tf
+  topic_tools
   visibility_graph_msg
   pcl_ros
 )
@@ -29,9 +32,12 @@ find_package(OpenCV REQUIRED)
 catkin_package(
   CATKIN_DEPENDS
   roscpp
+  geometry_msgs
+  rosgraph_msgs
   std_msgs
   sensor_msgs
   tf
+  topic_tools
   pcl_ros
 )
 
@@ -80,11 +86,32 @@ add_executable(semantic_voxel_to_far_terrain
 add_dependencies(semantic_voxel_to_far_terrain
   ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
 
+add_library(livox_custom_decoder src/livox_custom_decoder.cpp)
+add_dependencies(livox_custom_decoder
+  ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
+
+add_executable(far_scan_input_adapter src/scan_input_adapter.cpp)
+add_dependencies(far_scan_input_adapter
+  ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
+
 ## Specify libraries to link a library or executable target against
 target_link_libraries(${PROJECT_NAME} ${catkin_LIBRARIES} ${PCL_LIBRARIES} ${OpenCV_LIBS})
 target_link_libraries(semantic_voxel_to_far_terrain ${catkin_LIBRARIES})
+target_link_libraries(livox_custom_decoder ${catkin_LIBRARIES})
+target_link_libraries(far_scan_input_adapter
+  livox_custom_decoder ${catkin_LIBRARIES} ${PCL_LIBRARIES})
+
+if(CATKIN_ENABLE_TESTING)
+  catkin_add_gtest(test_livox_custom_decoder
+    test/test_livox_custom_decoder.cpp)
+  if(TARGET test_livox_custom_decoder)
+    target_link_libraries(test_livox_custom_decoder
+      livox_custom_decoder ${catkin_LIBRARIES})
+  endif()
+endif()
 
 install(TARGETS ${PROJECT_NAME} semantic_voxel_to_far_terrain
+                livox_custom_decoder far_scan_input_adapter
   ARCHIVE DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
   LIBRARY DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
   RUNTIME DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
@@ -100,4 +127,8 @@ install(DIRECTORY config/
 
 install(FILES FAR_Planner_Local3D语义Voxel接口改造方案.md
   DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}/docs
+)
+
+install(DIRECTORY include/${PROJECT_NAME}/
+  DESTINATION ${CATKIN_PACKAGE_INCLUDE_DESTINATION}
 )

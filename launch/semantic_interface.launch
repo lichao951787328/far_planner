@@ -4,6 +4,8 @@
   <arg name="binary_terrain_topic" default="/far_binary/terrain_map"/>
   <arg name="odom_topic" default="/state_estimation"/>
   <arg name="registered_scan_topic" default="/registered_scan"/>
+  <arg name="registered_scan_origin_topic"
+       default="/far_scan/registered_scan_origin"/>
   <arg name="world_frame" default="map"/>
   <arg name="schema_file"
        default="$(find far_planner)/config/five_class_semantic_schema.yaml"/>
@@ -34,6 +36,7 @@
     <remap from="/terrain_cloud" to="$(arg binary_terrain_topic)"/>
     <remap from="/terrain_local_cloud" to="$(arg binary_terrain_topic)"/>
     <remap from="/scan_cloud" to="$(arg registered_scan_topic)"/>
+    <remap from="/scan_origin" to="$(arg registered_scan_origin_topic)"/>
   </node>
 
   <group if="$(arg rviz)">

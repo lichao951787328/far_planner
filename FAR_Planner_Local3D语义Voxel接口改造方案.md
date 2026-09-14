@@ -38,13 +38,20 @@ MichaelFYang/far_planner: 2799b6964c141cacd1c32a14b19bc7abffbe0e52
               +------------------> FAR /terrain_cloud
                                    持久 free/obstacle grid、轮廓和 NavGraph
 
-/registered_scan ----------------> FAR /scan_cloud
-                                   当前射线和动态障碍清除
+/livox/lidar (CustomMsg) --+
+                           +--> far_scan_input_adapter
+/raw_scan (PointCloud2) ---+          |               |
+                                      |               +--> /far_scan/registered_scan_origin
+                                      +--> /far_scan/registered_scan
+                                                     |
+                                                     +--> FAR /scan_cloud
+                                                          当前射线和动态障碍清除
 
 /state_estimation ---------------> FAR /odom_world
 ```
 
-启动文件：
+只启动 semantic bridge 和 FAR（需要外部已经提供 registered scan 及
+同 stamp origin）：
 
 ```bash
 roslaunch far_planner semantic_interface.launch
@@ -56,14 +63,70 @@ roslaunch far_planner semantic_interface.launch
 roslaunch far_planner semantic_interface.launch \
   voxel_cloud_topic:=/local_3d_semantic_voxel_map/voxel_cloud \
   registered_scan_topic:=/registered_scan \
+  registered_scan_origin_topic:=/far_scan/registered_scan_origin \
   odom_topic:=/state_estimation \
   world_frame:=map
 ```
+
+如果上游只有原始 `PointCloud2` 或 Livox `CustomMsg`，还必须启动
+`scan_input_adapter.launch`。本分支的 0914 数据集整链路启动文件已经
+同时包含 Local 3D map、scan adapter、bridge 和 FAR。
 
 如果系统没有安装 `graph_decoder`，使用：
 
 ```bash
 roslaunch far_planner semantic_interface.launch graph_decoder:=false
+```
+
+### 2.1 原始点云双格式适配
+
+新增 `far_scan_input_adapter`，同一个输入 topic 可接受：
+
+| 输入格式 | 时间处理 | 强度处理 |
+|---|---|---|
+| `sensor_msgs/PointCloud2` | 使用 `header.stamp` 查 TF | 保留 intensity；缺少时填 0 |
+| `livox_ros_driver2/CustomMsg` | `timebase + offset_time`，默认按 2 ms 分桶去畸变 | reflectivity 写入 intensity |
+
+适配器用 `topic_tools/ShapeShifter` 判断线上 datatype 和 MD5，因此 FAR
+包不需要在编译时依赖 `livox_ros_driver2`。当前内置解码器严格对应
+`livox_ros_driver2/CustomMsg` 的 MD5
+`e4d6829bdfe657cb6c21a746c86b21a6`；其他 MD5 会被明确拒绝，不会
+按错误布局解码。
+
+Livox 每个点使用自己的采集时刻进行配准，并用整包中点时刻作为
+输出帧的参考 stamp。`PointCloud2` 没有通用的逐点时间字段契约，
+因此按整帧 `header.stamp` 变换。两者最终都输出 `map` 坐标下的
+`PointXYZI` PointCloud2。
+
+### 2.2 TF、外参和 scan origin
+
+当前数据集已确认 `wuba_base <- livox_frame` 是单位变换：
+
+```yaml
+extrinsic_source: params
+extrinsic_xyz: [0.0, 0.0, 0.0]
+extrinsic_rpy: [0.0, 0.0, 0.0]
+```
+
+所以 Livox 点的配准链为：
+
+```text
+map <- wuba_base(scan acquisition time) <- livox_frame(identity)
+```
+
+不使用“最新 TF”。TF 暂时还没有播放到所需时刻时，帧会进入有界
+队列；如果 TF 时间线已经越过该帧，或 wall-time 等待超时，则明确丢帧。
+用 wall time 而非 ROS time 计超时，避免 bag 的 `/clock` 暂停导致永久阻塞。
+
+除点云外，适配器还发布同 stamp 的
+`/far_scan/registered_scan_origin`。FAR 按精确 stamp 配对点云与光束原点，
+再执行动态障碍射线清除。这避免在回调延迟时把“当前里程计位置”
+误当成旧扫描的发射位置。
+
+0914 bag 的整链路启动方式为：
+
+```bash
+roslaunch far_planner 0914_semantic_far_navigation.launch rviz:=false
 ```
 
 ## 3. Bridge 的输入与输出契约
@@ -278,8 +341,9 @@ bridge 当前不做 footprint 膨胀，保留 FAR 原有安全距离和 TerrainP
 ### 8.7 TF 时间一致性
 
 bridge 使用 voxel cloud 的消息时间查询 TF。TF 缓存中缺少该时刻变换时整帧
-会被丢弃。原始 FAR 对非 world-frame scan 仍使用其原有 TF 路径，因此最安全
-的约束是让 `/registered_scan` 在发布前已经位于 `map` 坐标系。
+会被丢弃。适配器同样只使用采集时刻 TF；输出在 `map` 坐标系。
+FAR 对绕过适配器的非 world-frame scan/terrain 也已改为使用消息 stamp，
+不再使用 `ros::Time(0)`。
 
 ### 8.8 动态障碍清除的误判
 
@@ -294,6 +358,21 @@ registered scan 的量程裁剪、遮挡或配准误差都可能被解释为历�
 设计边界；若以后需要“可走但尽量避开”的行为，需要独立的连续代价规划层，
 不能通过修改 FAR 的二值 intensity 阈值隐式实现。
 
+### 8.10 CustomMsg ABI 和数据质量
+
+CustomMsg 的线上字段布局受 MD5 保护，但升级 Livox driver 后如果消息定义
+变化，必须同步更新解码器和测试。`point_num` 与序列化 points 数量不一致时
+只使用两者较小值。NaN/Inf 和原点零值会被删除，因此输出点数不一定
+等于包内 `point_num`。
+
+### 8.11 PointCloud2 的原点契约
+
+如果 PointCloud2 已经在 `world_frame`，单凭点云不能推出扫描发射原点，
+必须正确设置 `pointcloud_origin_frame`（当前为 `wuba_base`），并保证该帧时刻
+TF 可用。如果 PointCloud2 仍在传感器或车体坐标，其 `header.frame_id`
+就是变换和光束原点的依据。普通 PointCloud2 当前不做逐点去畸变；
+如需要，上游必须提供可明确解释的逐点时间字段契约。
+
 ## 9. 验证清单
 
 1. bridge 输出只有 intensity 0 和 1；
@@ -306,3 +385,24 @@ registered scan 的量程裁剪、遮挡或配准误差都可能被解释为历�
 8. 障碍移走后，registered scan 能提供清除证据；
 9. Local 3D map 边界内的实际覆盖能够满足 `terrain_range`；
 10. rosbag 时间回退后执行 FAR reset，三个输入能重新开始消费。
+11. `PointCloud2` 有/无 intensity 都能输出标准 `PointXYZI`；
+12. Livox 点使用 `timebase + offset_time` 的采集时刻配准；
+13. 输出 scan 和 scan origin 的 frame/stamp 完全一致；
+14. bag 开头早于首个 TF 的帧被明确丢弃，不会卡住后续队列；
+15. 整链路能稳定发布 registered scan/origin，并初始化 FAR V-Graph。
+
+## 10. 本分支实测结果
+
+在 ROS Noetic 容器中已完成：
+
+- `catkin_make --pkg far_planner -j2`：通过；
+- Livox 线上解码器 3 个 gtest：全部通过；
+- 合成 PointCloud2 运行时测试：有/无 intensity 两帧都通过，无字段时
+  输出 intensity 为 0，已有值 42.5 被保留，scan/origin 精确同 stamp；
+- 0914 真实 bag 的 Livox CustomMsg：输出约 10 Hz，实测单帧约 8 万点；
+- 整链路测试：实测收到 80064 点 registered scan、7098 点二值 terrain、
+  精确配对的 scan/origin 和 `/robot_vgraph`，V-Graph 持续更新。
+
+bag 最开头 14 帧 Livox 扫描的采集时间早于记录中第一个
+`map -> wuba_base` TF，它们无法在不外推位姿的前提下配准，因此被按设计
+明确丢弃；首个可配准帧之后的输出和 FAR 更新正常。

@@ -16,6 +16,9 @@ is_static_env                           : false
 is_pub_boundary                         : false
 is_debug_output                         : false
 is_attempt_autoswitch                   : true
+# Pair every registered scan with the acquisition-time sensor origin published
+# by far_scan_input_adapter. This avoids using the latest odometry as ray origin.
+require_scan_origin                     : true
 world_frame                             : map
 
 GraphMsger/robot_id                     : 1

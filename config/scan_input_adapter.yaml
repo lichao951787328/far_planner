@@ -1,0 +1,31 @@
+# Unified raw-scan adapter for FAR dynamic-obstacle ray clearing.
+input_topic: /livox/lidar
+output_topic: /far_scan/registered_scan
+origin_topic: /far_scan/registered_scan_origin
+
+world_frame: map
+vehicle_frame: wuba_base
+lidar_frame: livox_frame
+# Used when a PointCloud2 input is already registered in world_frame.
+pointcloud_origin_frame: wuba_base
+
+# The confirmed wuba_base <- livox_frame extrinsic is identity.
+extrinsic_source: params
+extrinsic_xyz: [0.0, 0.0, 0.0]
+extrinsic_rpy: [0.0, 0.0, 0.0]
+
+# The recorded Livox packet spans about 104.5 ms. Register points in small
+# timestamp buckets instead of applying one pose to the complete packet.
+deskew_enabled: true
+deskew_time_bin: 0.002
+
+# TF availability is measured with wall time because this bag's record clock
+# and sensor header clock use different epochs.
+transform_timeout_wall: 2.0
+# Keep roughly two seconds of 10 Hz scans while waiting for future TF. Scans
+# older than the first available TF are detected and explicitly discarded.
+pending_queue_size: 20
+
+drop_non_increasing_stamp: true
+remove_zero_points: true
+zero_point_epsilon: 1.0e-6

@@ -40,7 +40,15 @@ void TerrainPlanner::UpdateCenterNode(const NavNodePtr& node_ptr) {
 }
 
 void TerrainPlanner::SetLocalTerrainObsCloud(const PointCloudPtr& obsCloudIn) {
-    if (!is_grids_init_ || obsCloudIn->empty()) return;
+    if (!is_grids_init_) return;
+    // local_terrain_obs_ is a complete current snapshot. Rebuild occupancy on
+    // every update so a dynamic obstacle that disappeared cannot leave a
+    // stale occupied/inflated cell behind.
+    this->ResetGridsOccupancy();
+    if (obsCloudIn->empty()) {
+        this->GridVisualCloud();
+        return;
+    }
     const int N_IF = tp_params_.inflate_size;
     for (const auto& point : obsCloudIn->points) {
         Eigen::Vector3i c_sub = terrain_grids_->Pos2Sub(Eigen::Vector3d(point.x, point.y, center_pos_.z));
@@ -186,4 +194,3 @@ void TerrainPlanner::VisualPaths() {
     local_path_pub_.publish(terrain_paths_marker);
     viz_path_stack_.clear();
 }
-

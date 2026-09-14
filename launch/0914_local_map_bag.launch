@@ -8,9 +8,8 @@
       /fusion_localization  nav_msgs/Odometry
       /tf                   tf2_msgs/TFMessage
 
-    /livox/lidar is deliberately left in its recorded CustomMsg format. It
-    must be converted to sensor_msgs/PointCloud2 and registered in the FAR
-    world frame before it can be connected to FAR's /scan_cloud input.
+    far_scan_input_adapter accepts the recorded Livox CustomMsg directly,
+    deskews it with acquisition-time TF, and emits registered PointCloud2.
   -->
   <arg name="bag"
        default="$(env HOME)/social_nav/src/mapless_navigation_old/src/dateset/0914/2026-09-14-13-47-53.bag"/>
@@ -22,6 +21,11 @@
 
   <arg name="grids_points_topic" default="/grids_points"/>
   <arg name="raw_lidar_topic" default="/livox/lidar"/>
+  <arg name="start_scan_adapter" default="true"/>
+  <arg name="registered_scan_topic"
+       default="/far_scan/registered_scan"/>
+  <arg name="registered_scan_origin_topic"
+       default="/far_scan/registered_scan_origin"/>
   <arg name="global_frame" default="map"/>
   <arg name="reference_frame" default="map_start"/>
   <arg name="vehicle_frame" default="wuba_base"/>
@@ -38,6 +42,17 @@
     <arg name="rviz_frame" value="$(arg reference_frame)"/>
     <arg name="rviz" value="$(arg rviz)"/>
   </include>
+
+  <group if="$(arg start_scan_adapter)">
+    <include file="$(find far_planner)/launch/scan_input_adapter.launch">
+      <arg name="input_topic" value="$(arg raw_lidar_topic)"/>
+      <arg name="output_topic" value="$(arg registered_scan_topic)"/>
+      <arg name="origin_topic" value="$(arg registered_scan_origin_topic)"/>
+      <arg name="world_frame" value="$(arg global_frame)"/>
+      <arg name="vehicle_frame" value="$(arg vehicle_frame)"/>
+      <arg name="lidar_frame" value="livox_frame"/>
+    </include>
+  </group>
 
   <!-- Two nodes make start_paused selectable without shell command syntax. -->
   <group if="$(arg play_bag)">

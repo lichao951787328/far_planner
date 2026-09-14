@@ -170,7 +170,8 @@ public:
     static void TransformPCLFrame(const std::string& from_frame_id,
                                   const std::string& to_frame_id,
                                   const tf::TransformListener* tf_listener,
-                                  const PointCloudPtr& cloudInOut);
+                                  const PointCloudPtr& cloudInOut,
+                                  const ros::Time& stamp = ros::Time(0));
 
     static void TransformPoint3DFrame(const std::string& from_frame_id,
                                       const std::string& to_frame_id,
