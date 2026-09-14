@@ -1,8 +1,8 @@
 # FAR parameters for the binary local semantic voxel-map interface.
 # The graph remains binary; continuous traversability is consumed by the
 # semantic_voxel_to_far_terrain bridge before this node.
-main_run_freq                           : 2.5
-voxel_dim                               : 0.15
+main_run_freq                           : 8
+voxel_dim                               : 0.10
 robot_dim                               : 0.8
 vehicle_height                          : 0.75
 sensor_range                            : 30.0
@@ -19,6 +19,11 @@ is_attempt_autoswitch                   : true
 # Pair every registered scan with the acquisition-time sensor origin published
 # by far_scan_input_adapter. This avoids using the latest odometry as ray origin.
 require_scan_origin                     : true
+# When the bridge marks a terrain point with uint8 static_obstacle=1, keep it
+# in the obstacle map and exclude it from raw-scan ray based dynamic clearing.
+# Disable only when consuming a legacy terrain producer whose semantic roles
+# must not influence FAR's geometric disappearance detector.
+protect_static_obstacles                : true
 world_frame                             : map
 
 GraphMsger/robot_id                     : 1
@@ -49,7 +54,7 @@ Util/terrain_free_Z                     : 0.5
 # 历史障碍落在当前 scan 可通过射线上的清除证据点数阈值。
 # 源码使用 size > threshold，因此值 4 表示至少 5 个证据点才删除旧障碍。
 # 调大可减少配准误差造成的误清除，但小型动态障碍移走后清除更慢。
-Util/dyosb_update_thred                 : 4
+Util/dyosb_update_thred                 : 2
 # 判断拓扑节点附近是否有足够“最近环境变化点”的计数阈值。
 # 搜索半径为 robot_dim*2+voxel_dim；值 5 时，创建新节点需至少
 # 4 个变化点，普通已有节点检查需至少 6 个。调大更稳定但更迟钝。
@@ -57,13 +62,13 @@ Util/new_point_counter                  : 5
 # 已判定为“消失”的动态障碍点的抑制保留时间，单位秒。
 # 保留期内会过滤同位置 terrain 障碍，防止旧地图反复加回已移走的障碍。
 # 调大能抑制闪烁，但同一位置真实重新出现障碍时可能被更久忽略。
-Util/dynamic_obs_dacay_time             : 10.0
+Util/dynamic_obs_dacay_time             : 0.8
 # 新增障碍和已清除障碍作为“近期变化点”影响拓扑图的保留时间，单位秒。
 # 调大会让节点重检查/连接重置持续更久；调小更稳定，但可能过早丢失变化证据。
-Util/new_points_decay_time              : 1.0
+Util/new_points_decay_time              : 0.3
 
-Graph/connect_votes_size                : 10
-Graph/clear_dumper_thred                : 4
+Graph/connect_votes_size                : 3
+Graph/clear_dumper_thred                : 2
 Graph/node_finalize_thred               : 6
 Graph/filter_pool_size                  : 12
 

@@ -5,12 +5,11 @@ Panels:
     Property Tree Widget:
       Expanded: ~
       Splitter Ratio: 0.8294117450714111
-    Tree Height: 667
+    Tree Height: 1258
   - Class: rviz/Selection
     Name: Selection
   - Class: rviz/Tool Properties
-    Expanded:
-      - /Goalpoint1
+    Expanded: ~
     Name: Tool Properties
     Splitter Ratio: 0.5886790156364441
   - Class: rviz/Views
@@ -19,10 +18,9 @@ Panels:
     Name: Views
     Splitter Ratio: 0.5
   - Class: rviz/Time
-    Experimental: false
     Name: Time
     SyncMode: 0
-    SyncSource: OverallMap
+    SyncSource: ""
   - Class: rviz/ControlPanel
     Name: ControlPanel
 Preferences:
@@ -32,15 +30,17 @@ Toolbars:
 Visualization Manager:
   Class: ""
   Displays:
-    - Class: rviz/Axes
+    - Alpha: 1
+      Class: rviz/Axes
       Enabled: true
       Length: 3
       Name: Vehicle
       Radius: 0.30000001192092896
       Reference Frame: vehicle
+      Show Trail: false
       Value: true
     - Class: rviz/Image
-      Enabled: true
+      Enabled: false
       Image Topic: /camera/image
       Max Value: 1
       Median window: 5
@@ -50,7 +50,7 @@ Visualization Manager:
       Queue Size: 2
       Transport Hint: raw
       Unreliable: false
-      Value: true
+      Value: false
     - Alpha: 0.20000000298023224
       Autocompute Intensity Bounds: true
       Autocompute Value Bounds:
@@ -66,9 +66,7 @@ Visualization Manager:
       Enabled: false
       Invert Rainbow: false
       Max Color: 255; 255; 255
-      Max Intensity: 0
       Min Color: 0; 0; 0
-      Min Intensity: 0
       Name: RegScan
       Position Transformer: XYZ
       Queue Size: 10
@@ -156,9 +154,7 @@ Visualization Manager:
       Enabled: true
       Invert Rainbow: false
       Max Color: 255; 255; 255
-      Max Intensity: 0
       Min Color: 0; 0; 0
-      Min Intensity: 0
       Name: OverallMap
       Position Transformer: XYZ
       Queue Size: 10
@@ -186,9 +182,7 @@ Visualization Manager:
       Enabled: false
       Invert Rainbow: false
       Max Color: 255; 255; 255
-      Max Intensity: 0
       Min Color: 0; 0; 0
-      Min Intensity: 0
       Name: CoveredAreas
       Position Transformer: XYZ
       Queue Size: 10
@@ -216,9 +210,7 @@ Visualization Manager:
       Enabled: false
       Invert Rainbow: false
       Max Color: 255; 255; 255
-      Max Intensity: 264.1810302734375
       Min Color: 0; 0; 0
-      Min Intensity: 0
       Name: Trajectory
       Position Transformer: XYZ
       Queue Size: 10
@@ -237,6 +229,7 @@ Visualization Manager:
       Enabled: false
       History Length: 1
       Name: Waypoint
+      Queue Size: 10
       Radius: 1.2000000476837158
       Topic: /way_point
       Unreliable: false
@@ -288,6 +281,7 @@ Visualization Manager:
         Z: 0
       Pose Color: 255; 85; 255
       Pose Style: None
+      Queue Size: 10
       Radius: 0.029999999329447746
       Shaft Diameter: 0.10000000149011612
       Shaft Length: 0.10000000149011612
@@ -308,12 +302,8 @@ Visualization Manager:
       Name: Goalpoint
       Namespaces:
         clear_nodes: false
-        free_goal: true
         free_odom_position: false
         last_nav_node: false
-        original_goal: false
-        out_contour: false
-        waypoint: true
       Queue Size: 100
       Value: true
     - Class: rviz/Marker
@@ -321,7 +311,7 @@ Visualization Manager:
       Marker Topic: /viz_path_topic
       Name: GlobalPath
       Namespaces:
-        global_path: true
+        {}
       Queue Size: 100
       Value: true
     - Class: rviz/MarkerArray
@@ -332,19 +322,17 @@ Visualization Manager:
         angle_direct: false
         freespace_vertex: false
         freespace_vgraph: true
+        frontier_vertex: false
         global_vertex: false
         global_vgraph: false
         localrange_vertex: false
-        frontier_vertex: false
         odom_edge: false
-        visibility_edge : false
         polygon_edge: true
-        to_goal_edge: false
-        trajectory_edge: true
         trajectory_vertex: false
         updating_vertex: false
         vertex_angle: false
         vertices_matches: false
+        visibility_edge: false
       Queue Size: 100
       Value: true
     - Class: rviz/MarkerArray
@@ -386,9 +374,7 @@ Visualization Manager:
       Enabled: false
       Invert Rainbow: false
       Max Color: 255; 255; 255
-      Max Intensity: -999999
       Min Color: 0; 0; 0
-      Min Intensity: 999999
       Name: DynamicObs
       Position Transformer: XYZ
       Queue Size: 10
@@ -416,9 +402,7 @@ Visualization Manager:
       Enabled: false
       Invert Rainbow: false
       Max Color: 255; 255; 255
-      Max Intensity: -999999
       Min Color: 0; 0; 0
-      Min Intensity: 999999
       Name: NewPoints
       Position Transformer: XYZ
       Queue Size: 10
@@ -446,9 +430,7 @@ Visualization Manager:
       Enabled: false
       Invert Rainbow: false
       Max Color: 255; 255; 255
-      Max Intensity: 0.19989579916000366
       Min Color: 0; 0; 0
-      Min Intensity: 0
       Name: FreePoints
       Position Transformer: XYZ
       Queue Size: 10
@@ -476,22 +458,20 @@ Visualization Manager:
       Enabled: false
       Invert Rainbow: false
       Max Color: 255; 255; 255
-      Max Intensity: 1.4996461868286133
       Min Color: 0; 0; 0
-      Min Intensity: 0.20002777874469757
       Name: ObsPoints
       Position Transformer: XYZ
       Queue Size: 10
       Selectable: true
       Size (Pixels): 3
-      Size (m): 0.05
+      Size (m): 0.05000000074505806
       Style: Flat Squares
       Topic: /FAR_obs_debug
       Unreliable: false
       Use Fixed Frame: true
       Use rainbow: true
       Value: false
-    - Alpha: 0.15
+    - Alpha: 0.15000000596046448
       Autocompute Intensity Bounds: true
       Autocompute Value Bounds:
         Max Value: 10
@@ -518,7 +498,7 @@ Visualization Manager:
       Unreliable: false
       Use Fixed Frame: true
       Use rainbow: true
-      Value: true
+      Value: false
     - Class: rviz/MarkerArray
       Enabled: true
       Marker Topic: /viz_viewpoint_extend_topic
@@ -526,6 +506,15 @@ Visualization Manager:
       Namespaces:
         {}
       Queue Size: 100
+      Value: true
+    - Alpha: 1
+      Class: rviz/Axes
+      Enabled: true
+      Length: 1
+      Name: Axes
+      Radius: 0.10000000149011612
+      Reference Frame: wuba_base
+      Show Trail: false
       Value: true
   Enabled: true
   Global Options:
@@ -537,21 +526,26 @@ Visualization Manager:
   Tools:
     - Class: rviz/MoveCamera
     - Class: rviz/GoalPointTool
-      Topic: goalpoint
+      Goal Frame: map
+      Goal Topic: /goal_point
+      Joy Topic: /joy
+      Odometry Topic: /fusion_localization
+      Publish Joy Start: true
   Value: true
   Views:
     Current:
       Class: rviz/Orbit
-      Distance: 130.9629364013672
+      Distance: 45.752113342285156
       Enable Stereo Rendering:
         Stereo Eye Separation: 0.05999999865889549
         Stereo Focal Distance: 1
         Swap Stereo Eyes: false
         Value: false
+      Field of View: 0.7853981852531433
       Focal Point:
-        X: 62.62998580932617
-        Y: 20.543689727783203
-        Z: -0.5233291387557983
+        X: 17.942123413085938
+        Y: 3.2910284996032715
+        Z: -0.5407519340515137
       Focal Shape Fixed Size: false
       Focal Shape Size: 0.05000000074505806
       Invert Z Axis: false
@@ -559,20 +553,19 @@ Visualization Manager:
       Near Clip Distance: 0.009999999776482582
       Pitch: 1.5697963237762451
       Target Frame: map
-      Value: Orbit (rviz)
       Yaw: 4.708582878112793
     Saved: ~
 Window Geometry:
   ControlPanel:
-    collapsed: false
-  Displays:
     collapsed: true
-  Height: 818
-  Hide Left Dock: true
-  Hide Right Dock: false
-  Image:
+  Displays:
     collapsed: false
-  QMainWindow State: 000000ff00000000fd000000040000000000000156000002d8fc0200000009fb0000001200530065006c0065006300740069006f006e000000003d000001b80000005c00fffffffb0000001e0054006f006f006c002000500072006f007000650072007400690065007302000001ed000001df00000185000000a3fb000000120056006900650077007300200054006f006f02000001df000002110000018500000122fb000000200054006f006f006c002000500072006f0070006500720074006900650073003203000002880000011d000002210000017afb000000100044006900730070006c006100790073000000003d000002d8000000c900fffffffb0000002000730065006c0065006300740069006f006e00200062007500660066006500720200000138000000aa0000023a00000294fb00000014005700690064006500530074006500720065006f02000000e6000000d2000003ee0000030bfb0000000c004b0069006e0065006300740200000186000001060000030c00000261fb0000001400430061006d0065007200610049006e006900740100000474000000160000000000000000000000010000013b000002d8fc0200000007fb0000000a0049006d006100670065010000003d000000c70000001600fffffffb0000000a0049006d006100670065010000003d000000c70000000000000000fb000000180043006f006e00740072006f006c00500061006e0065006c010000010a0000020b000000a000fffffffb0000001600540065006c0065006f007000500061006e0065006c000000003d0000050f0000000000000000fb0000001e0054006f006f006c002000500072006f00700065007200740069006500730100000041000000780000000000000000fb0000000a005600690065007700730000000355000001f7000000a400fffffffb0000001200530065006c0065006300740069006f006e010000025a000000b200000000000000000000000200000490000000a9fc0100000001fb0000000a00560069006500770073030000004e00000080000002e100000197000000030000073d0000003efc0100000002fb0000000800540069006d006500000000000000073d000004f300fffffffb0000000800540069006d0065010000000000000450000000000000000000000466000002d800000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730100000000ffffffff0000000000000000
+  Height: 1403
+  Hide Left Dock: false
+  Hide Right Dock: true
+  Image:
+    collapsed: true
+  QMainWindow State: 000000ff00000000fd0000000400000000000001ba00000525fc0200000009fb0000001200530065006c0065006300740069006f006e000000003d000001b80000005c00fffffffb0000001e0054006f006f006c002000500072006f007000650072007400690065007302000001ed000001df00000185000000a3fb000000120056006900650077007300200054006f006f02000001df000002110000018500000122fb000000200054006f006f006c002000500072006f0070006500720074006900650073003203000002880000011d000002210000017afb000000100044006900730070006c006100790073010000003b00000525000000c700fffffffb0000002000730065006c0065006300740069006f006e00200062007500660066006500720200000138000000aa0000023a00000294fb00000014005700690064006500530074006500720065006f02000000e6000000d2000003ee0000030bfb0000000c004b0069006e0065006300740200000186000001060000030c00000261fb0000001400430061006d0065007200610049006e006900740100000474000000160000000000000000000000010000013b000002dcfc0200000007fb0000000a0049006d006100670065000000003b000000c80000001600fffffffb0000000a0049006d006100670065010000003d000000c70000000000000000fb000000180043006f006e00740072006f006c00500061006e0065006c00000001090000020e0000006e00fffffffb0000001600540065006c0065006f007000500061006e0065006c000000003d0000050f0000000000000000fb0000001e0054006f006f006c002000500072006f00700065007200740069006500730100000041000000780000000000000000fb0000000a005600690065007700730000000355000001f7000000a000fffffffb0000001200530065006c0065006300740069006f006e010000025a000000b200000000000000000000000200000490000000a9fc0100000001fb0000000a00560069006500770073030000004e00000080000002e100000197000000030000073d0000003efc0100000002fb0000000800540069006d006500000000000000073d0000035c00fffffffb0000000800540069006d00650100000000000004500000000000000000000008400000052500000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730100000000ffffffff0000000000000000
   Selection:
     collapsed: false
   Time:
@@ -581,6 +574,6 @@ Window Geometry:
     collapsed: false
   Views:
     collapsed: false
-  Width: 1447
-  X: 51
-  Y: 27
+  Width: 2560
+  X: 0
+  Y: 0

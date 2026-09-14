@@ -26,6 +26,7 @@ struct BinaryPoint {
   float y;
   float z;
   float intensity;
+  std::uint8_t static_obstacle;
 };
 
 std::string NormalizeFrameId(const std::string& frame_id) {
@@ -93,6 +94,9 @@ class SemanticVoxelToFarTerrain {
           "free_debug", 1);
       obstacle_debug_pub_ = private_nh_.advertise<sensor_msgs::PointCloud2>(
           "obstacle_debug", 1);
+      protected_static_debug_pub_ =
+          private_nh_.advertise<sensor_msgs::PointCloud2>(
+              "protected_static_debug", 1);
     }
     cloud_sub_ = nh_.subscribe(input_topic_, 1,
                                &SemanticVoxelToFarTerrain::CloudCallback, this);
@@ -136,9 +140,22 @@ class SemanticVoxelToFarTerrain {
       }
       const std::uint32_t label = static_cast<std::uint32_t>(signed_label);
       const std::string role = static_cast<std::string>(item["role"]);
-      if (!roles_.emplace(label, ParseRole(role)).second) {
+      const SemanticRole parsed_role = ParseRole(role);
+      if (!roles_.emplace(label, parsed_role).second) {
         throw std::runtime_error("duplicate semantic class label");
       }
+      bool far_static_protection =
+          parsed_role == SemanticRole::kStaticObstacle;
+      if (item.hasMember("far_static_protection")) {
+        far_static_protection = XmlBool(
+            item["far_static_protection"], "far_static_protection");
+      }
+      if (far_static_protection &&
+          parsed_role != SemanticRole::kStaticObstacle) {
+        throw std::runtime_error(
+            "far_static_protection=true requires role=static_obstacle");
+      }
+      far_static_protection_[label] = far_static_protection;
       if (item.hasMember("geometry_only") &&
           XmlBool(item["geometry_only"], "geometry_only")) {
         geometry_only_[label] = true;
@@ -159,6 +176,12 @@ class SemanticVoxelToFarTerrain {
            found->second == SemanticRole::kDynamicObstacle;
   }
 
+  bool IsProtectedStaticObstacle(std::uint32_t label) const {
+    if (geometry_only_.count(label) != 0u) return false;
+    const auto found = far_static_protection_.find(label);
+    return found != far_static_protection_.end() && found->second;
+  }
+
   sensor_msgs::PointCloud2 MakeCloud(const std_msgs::Header& source_header,
                                      const std::vector<BinaryPoint>& points) const {
     sensor_msgs::PointCloud2 output;
@@ -167,26 +190,34 @@ class SemanticVoxelToFarTerrain {
     output.height = 1u;
     output.is_dense = true;
     sensor_msgs::PointCloud2Modifier modifier(output);
+    // Keep intensity binary for stock FAR compatibility.  The extra field is
+    // consumed only by the semantic-aware FAR build and travels in the same
+    // message/stamp, avoiding a second topic that would need synchronization.
     modifier.setPointCloud2Fields(
-        4, "x", 1, sensor_msgs::PointField::FLOAT32,
+        5, "x", 1, sensor_msgs::PointField::FLOAT32,
         "y", 1, sensor_msgs::PointField::FLOAT32,
         "z", 1, sensor_msgs::PointField::FLOAT32,
-        "intensity", 1, sensor_msgs::PointField::FLOAT32);
+        "intensity", 1, sensor_msgs::PointField::FLOAT32,
+        "static_obstacle", 1, sensor_msgs::PointField::UINT8);
     modifier.resize(points.size());
 
     sensor_msgs::PointCloud2Iterator<float> x(output, "x");
     sensor_msgs::PointCloud2Iterator<float> y(output, "y");
     sensor_msgs::PointCloud2Iterator<float> z(output, "z");
     sensor_msgs::PointCloud2Iterator<float> intensity(output, "intensity");
+    sensor_msgs::PointCloud2Iterator<std::uint8_t> static_obstacle(
+        output, "static_obstacle");
     for (const auto& point : points) {
       *x = point.x;
       *y = point.y;
       *z = point.z;
       *intensity = point.intensity;
+      *static_obstacle = point.static_obstacle;
       ++x;
       ++y;
       ++z;
       ++intensity;
+      ++static_obstacle;
     }
     return output;
   }
@@ -234,11 +265,13 @@ class SemanticVoxelToFarTerrain {
     std::vector<BinaryPoint> all_points;
     std::vector<BinaryPoint> free_points;
     std::vector<BinaryPoint> obstacle_points;
+    std::vector<BinaryPoint> protected_static_points;
     const std::size_t point_count =
         static_cast<std::size_t>(cloud->width) * cloud->height;
     all_points.reserve(point_count);
     free_points.reserve(point_count);
     obstacle_points.reserve(point_count);
+    protected_static_points.reserve(point_count);
 
     try {
       sensor_msgs::PointCloud2ConstIterator<float> x(*cloud, "x");
@@ -257,6 +290,7 @@ class SemanticVoxelToFarTerrain {
           continue;
         }
 
+        const bool protected_static = IsProtectedStaticObstacle(*label);
         bool obstacle = IsHardObstacle(*label);
         if (!obstacle) {
           obstacle = std::isfinite(*cost) ?
@@ -270,10 +304,12 @@ class SemanticVoxelToFarTerrain {
             static_cast<float>(position.x()),
             static_cast<float>(position.y()),
             static_cast<float>(position.z()),
-            obstacle ? 1.0f : 0.0f};
+            obstacle ? 1.0f : 0.0f,
+            protected_static ? std::uint8_t{1} : std::uint8_t{0}};
         all_points.push_back(point);
         if (obstacle) {
           obstacle_points.push_back(point);
+          if (protected_static) protected_static_points.push_back(point);
         } else {
           free_points.push_back(point);
         }
@@ -289,6 +325,8 @@ class SemanticVoxelToFarTerrain {
     if (publish_debug_clouds_) {
       free_debug_pub_.publish(MakeCloud(cloud->header, free_points));
       obstacle_debug_pub_.publish(MakeCloud(cloud->header, obstacle_points));
+      protected_static_debug_pub_.publish(
+          MakeCloud(cloud->header, protected_static_points));
     }
   }
 
@@ -298,6 +336,7 @@ class SemanticVoxelToFarTerrain {
   ros::Publisher terrain_pub_;
   ros::Publisher free_debug_pub_;
   ros::Publisher obstacle_debug_pub_;
+  ros::Publisher protected_static_debug_pub_;
   tf::TransformListener tf_listener_;
 
   std::string input_topic_;
@@ -310,6 +349,7 @@ class SemanticVoxelToFarTerrain {
   bool missing_cost_is_obstacle_;
   bool publish_debug_clouds_;
   std::unordered_map<std::uint32_t, SemanticRole> roles_;
+  std::unordered_map<std::uint32_t, bool> far_static_protection_;
   std::unordered_map<std::uint32_t, bool> geometry_only_;
 };
 

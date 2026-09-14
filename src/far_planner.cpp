@@ -8,7 +8,21 @@
 
 #include "far_planner/far_planner.h"
 
+#include <sensor_msgs/point_cloud2_iterator.h>
+
 /***************************************************************************************/
+
+namespace {
+
+bool HasPointCloudField(const sensor_msgs::PointCloud2& cloud,
+                        const std::string& field_name) {
+  for (const auto& field : cloud.fields) {
+    if (field.name == field_name) return true;
+  }
+  return false;
+}
+
+}  // namespace
 
 void FARMaster::Init() {
   /* initialize subscriber and publisher */
@@ -39,6 +53,8 @@ void FARMaster::Init() {
   scan_grid_debug_     = nh.advertise<sensor_msgs::PointCloud2>("/FAR_scanGrid_debug",1);
   new_PCL_pub_         = nh.advertise<sensor_msgs::PointCloud2>("/FAR_new_debug",1);
   terrain_height_pub_  = nh.advertise<sensor_msgs::PointCloud2>("/FAR_terrain_height_debug",1);
+  protected_static_debug_pub_ =
+      nh.advertise<sensor_msgs::PointCloud2>("/FAR_protected_static_debug", 1);
 
   this->LoadROSParams();
 
@@ -71,6 +87,8 @@ void FARMaster::Init() {
   new_vertices_ptr_     = PointCloudPtr(new pcl::PointCloud<PCLPoint>());
   temp_obs_ptr_         = PointCloudPtr(new pcl::PointCloud<PCLPoint>());
   temp_free_ptr_        = PointCloudPtr(new pcl::PointCloud<PCLPoint>());
+  temp_protected_static_ptr_ =
+      PointCloudPtr(new pcl::PointCloud<PCLPoint>());
   scan_grid_ptr_        = PointCloudPtr(new pcl::PointCloud<PCLPoint>());
   terrain_height_ptr_   = PointCloudPtr(new pcl::PointCloud<PCLPoint>());
   viewpoint_around_ptr_ = PointCloudPtr(new pcl::PointCloud<PCLPoint>());
@@ -124,6 +142,7 @@ void FARMaster::ResetEnvironmentAndGraph() {
   FARUtil::stack_dyobs_cloud_->clear();
   FARUtil::cur_new_cloud_->clear();
   FARUtil::cur_dyobs_cloud_->clear();
+  temp_protected_static_ptr_->clear();
   scan_origin_cache_.clear();
   pending_scan_clouds_.clear();
   /* Stop the robot if it is moving */
@@ -445,6 +464,8 @@ void FARMaster::LoadROSParams() {
   nh.param<bool>(master_prefix  + "is_debug_output",       master_params_.is_debug_output, false);
   nh.param<bool>(master_prefix  + "is_attempt_autoswitch", master_params_.is_attempt_autoswitch, true);
   nh.param<bool>(master_prefix  + "require_scan_origin",   master_params_.require_scan_origin, false);
+  nh.param<bool>(master_prefix  + "protect_static_obstacles",
+                 master_params_.protect_static_obstacles, false);
   nh.param<std::string>(master_prefix + "world_frame",     master_params_.world_frame, "map");
   master_params_.terrain_range = std::min(master_params_.terrain_range, master_params_.sensor_range);
 
@@ -611,10 +632,47 @@ bool FARMaster::PrcocessCloud(const sensor_msgs::PointCloud2ConstPtr& pc,
 
 bool FARMaster::ProcessTerrainCloud(const sensor_msgs::PointCloud2ConstPtr& pc,
                                     const PointCloudPtr& freeCloudOut,
-                                    const PointCloudPtr& obsCloudOut) {
+                                    const PointCloudPtr& obsCloudOut,
+                                    const PointCloudPtr& protectedStaticCloudOut) {
   PointCloudPtr unfiltered_cloud(new PointCloud());
   pcl::fromROSMsg(*pc, *unfiltered_cloud);
   FARUtil::RemoveNanInfPoints(unfiltered_cloud);
+
+  if (protectedStaticCloudOut) {
+    protectedStaticCloudOut->clear();
+    if (master_params_.protect_static_obstacles &&
+        HasPointCloudField(*pc, "static_obstacle")) {
+      try {
+        sensor_msgs::PointCloud2ConstIterator<float> x(*pc, "x");
+        sensor_msgs::PointCloud2ConstIterator<float> y(*pc, "y");
+        sensor_msgs::PointCloud2ConstIterator<float> z(*pc, "z");
+        sensor_msgs::PointCloud2ConstIterator<std::uint8_t> protected_static(
+            *pc, "static_obstacle");
+        for (; x != x.end(); ++x, ++y, ++z, ++protected_static) {
+          if (*protected_static == 0u || !std::isfinite(*x) ||
+              !std::isfinite(*y) || !std::isfinite(*z)) {
+            continue;
+          }
+          PCLPoint point;
+          point.x = *x;
+          point.y = *y;
+          point.z = *z;
+          point.intensity = 1.0f;
+          protectedStaticCloudOut->push_back(point);
+        }
+      } catch (const std::runtime_error& ex) {
+        ROS_ERROR("FARMaster: static_obstacle field decode failed: %s",
+                  ex.what());
+        freeCloudOut->clear();
+        obsCloudOut->clear();
+        protectedStaticCloudOut->clear();
+        return false;
+      }
+    } else if (master_params_.protect_static_obstacles) {
+      ROS_WARN_ONCE("FARMaster: terrain has no uint8 static_obstacle field; "
+                    "semantic static-obstacle protection is unavailable");
+    }
+  }
 
   // Classification deliberately happens before PCL VoxelGrid.  Averaging
   // PointXYZI first can turn one obstacle plus several free samples into a
@@ -633,10 +691,16 @@ bool FARMaster::ProcessTerrainCloud(const sensor_msgs::PointCloud2ConstPtr& pc,
                                  tf_listener_, freeCloudOut, pc->header.stamp);
       FARUtil::TransformPCLFrame(cloud_frame, master_params_.world_frame,
                                  tf_listener_, obsCloudOut, pc->header.stamp);
+      if (protectedStaticCloudOut && !protectedStaticCloudOut->empty()) {
+        FARUtil::TransformPCLFrame(cloud_frame, master_params_.world_frame,
+                                   tf_listener_, protectedStaticCloudOut,
+                                   pc->header.stamp);
+      }
     } catch (tf::TransformException& ex) {
       ROS_ERROR("Tracking terrain cloud TF lookup: %s", ex.what());
       freeCloudOut->clear();
       obsCloudOut->clear();
+      if (protectedStaticCloudOut) protectedStaticCloudOut->clear();
       return false;
     }
   }
@@ -646,6 +710,9 @@ bool FARMaster::ProcessTerrainCloud(const sensor_msgs::PointCloud2ConstPtr& pc,
   }
   if (!obsCloudOut->empty()) {
     FARUtil::FilterCloud(obsCloudOut, master_params_.voxel_dim);
+  }
+  if (protectedStaticCloudOut && !protectedStaticCloudOut->empty()) {
+    FARUtil::FilterCloud(protectedStaticCloudOut, master_params_.voxel_dim);
   }
   FARUtil::RemoveFreeInObstacleVoxels(freeCloudOut, obsCloudOut,
                                       master_params_.voxel_dim);
@@ -772,14 +839,23 @@ void FARMaster::TerrainCallBack(const sensor_msgs::PointCloud2ConstPtr& pc) {
   if (is_stop_update_) return;
   // update map grid robot center
   map_handler_.UpdateRobotPosition(FARUtil::robot_pos);
-  if (this->ProcessTerrainCloud(pc, temp_free_ptr_, temp_obs_ptr_)) {
+  if (this->ProcessTerrainCloud(pc, temp_free_ptr_, temp_obs_ptr_,
+                                temp_protected_static_ptr_)) {
     FARUtil::CropBoxCloud(temp_free_ptr_, robot_pos_, Point3D(master_params_.terrain_range,
                                                               master_params_.terrain_range,
                                                               FARUtil::kTolerZ));
     FARUtil::CropBoxCloud(temp_obs_ptr_, robot_pos_, Point3D(master_params_.terrain_range,
                                                              master_params_.terrain_range,
                                                              FARUtil::kTolerZ));
+    FARUtil::CropBoxCloud(temp_protected_static_ptr_, robot_pos_,
+                          Point3D(master_params_.terrain_range,
+                                  master_params_.terrain_range,
+                                  FARUtil::kTolerZ));
     if (!master_params_.is_static_env) {
+      // A current semantic static obstacle overrides an earlier geometric
+      // "disappeared obstacle" decision at the same FAR voxel.
+      FARUtil::RemoveOverlapCloud(FARUtil::stack_dyobs_cloud_,
+                                  temp_protected_static_ptr_, true);
       FARUtil::RemoveOverlapCloud(temp_obs_ptr_, FARUtil::stack_dyobs_cloud_, true);
     }
     map_handler_.UpdateObsCloudGrid(temp_obs_ptr_);
@@ -804,9 +880,18 @@ void FARMaster::TerrainCallBack(const sensor_msgs::PointCloud2ConstPtr& pc) {
                                     FARUtil::surround_obs_cloud_, 
                                     FARUtil::surround_free_cloud_, 
                                     FARUtil::cur_dyobs_cloud_);
+    // Geometry can only clear obstacles that are not explicitly classified as
+    // semantic static obstacles in this terrain snapshot.  Apply protection
+    // before the evidence-count threshold and before map mutation.
+    FARUtil::RemoveOverlapCloud(FARUtil::cur_dyobs_cloud_,
+                                temp_protected_static_ptr_, true);
     if (FARUtil::cur_dyobs_cloud_->size() > FARUtil::kDyObsThred) {
       if (FARUtil::IsDebug) ROS_WARN("FARMaster: dynamic obstacle detected, size: %ld", FARUtil::cur_dyobs_cloud_->size());
       FARUtil::InflateCloud(FARUtil::cur_dyobs_cloud_, master_params_.voxel_dim, 1, true);
+      // Inflation around a neighboring clearable obstacle must not expand
+      // back into a protected semantic-static voxel.
+      FARUtil::RemoveOverlapCloud(FARUtil::cur_dyobs_cloud_,
+                                  temp_protected_static_ptr_, true);
       map_handler_.RemoveObsCloudFromGrid(FARUtil::cur_dyobs_cloud_);
       FARUtil::RemoveOverlapCloud(FARUtil::surround_obs_cloud_, FARUtil::cur_dyobs_cloud_);
       FARUtil::FilterCloud(FARUtil::cur_dyobs_cloud_, master_params_.voxel_dim);
@@ -830,6 +915,8 @@ void FARMaster::TerrainCallBack(const sensor_msgs::PointCloud2ConstPtr& pc) {
   planner_viz_.VizPointCloud(surround_free_debug_, FARUtil::surround_free_cloud_);
   planner_viz_.VizPointCloud(surround_obs_debug_,  FARUtil::surround_obs_cloud_);
   planner_viz_.VizPointCloud(terrain_height_pub_, terrain_height_ptr_);
+  planner_viz_.VizPointCloud(protected_static_debug_pub_,
+                             temp_protected_static_ptr_);
   // visualize map grid
   PointStack neighbor_centers, occupancy_centers;
   map_handler_.GetNeighborCeilsCenters(neighbor_centers);

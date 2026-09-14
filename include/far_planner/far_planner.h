@@ -32,6 +32,7 @@ struct FARMasterParams {
     bool  is_debug_output;
     bool  is_attempt_autoswitch;
     bool  require_scan_origin;
+    bool  protect_static_obstacles;
     std::string world_frame;
 };
 
@@ -52,6 +53,7 @@ private:
     ros::Publisher  goal_pub_, boundary_pub_;
     ros::Publisher  dynamic_obs_pub_, surround_free_debug_, surround_obs_debug_;
     ros::Publisher  scan_grid_debug_, new_PCL_pub_, terrain_height_pub_;
+    ros::Publisher  protected_static_debug_pub_;
     ros::Publisher  runtime_pub_, planning_time_pub_, traverse_time_pub_, reach_goal_pub_;
 
     ros::Timer planning_event_;
@@ -69,6 +71,7 @@ private:
     PointCloudPtr new_vertices_ptr_;
     PointCloudPtr temp_obs_ptr_;
     PointCloudPtr temp_free_ptr_;
+    PointCloudPtr temp_protected_static_ptr_;
     PointCloudPtr scan_grid_ptr_;
     PointCloudPtr terrain_height_ptr_;
 
@@ -121,7 +124,9 @@ private:
 
     bool ProcessTerrainCloud(const sensor_msgs::PointCloud2ConstPtr& pc,
                              const PointCloudPtr& freeCloudOut,
-                             const PointCloudPtr& obsCloudOut);
+                             const PointCloudPtr& obsCloudOut,
+                             const PointCloudPtr& protectedStaticCloudOut =
+                                 PointCloudPtr());
 
     bool IsStrictlyNewStamp(const ros::Time& stamp,
                             const ros::Time& last_stamp,

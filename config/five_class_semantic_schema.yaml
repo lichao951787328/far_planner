@@ -42,7 +42,8 @@ semantic_schema:
     override_semantics: false
     # 上述语义覆盖使用的高代价阈值，范围 [0,1]。
     obstacle_threshold: 0.75
-    # 发生高代价语义覆盖时写成的静态障碍 label；必须是 global_map=true 的 static_obstacle。
+    # 发生高代价语义覆盖时写成的几何障碍 label；它仍进入全局地图，但 FAR 允许
+    # registered scan 在障碍消失后清除它。
     obstacle_label: 5
 
   # 每个类别必须填写以下字段：
@@ -54,6 +55,8 @@ semantic_schema:
   # semantic_cost：语义先验代价 [0,1]。当前 maximum 融合取它和 measured traversability
   #                的较大值，因此低语义代价不会掩盖真实的高几何代价。
   # global_map：是否允许写进持久 SemanticOctomap。dynamic_obstacle/ignore 必须为 false。
+  # far_static_protection：可选的 FAR 接口策略。默认仅 static_obstacle 为 true；显式
+  #                        设为 false 可让语义不确定的障碍继续参与 FAR 几何动态清除。
   # geometry_only：该输入 label 只表示“没有可靠语义”；局部 voxel 内归一化成无语义点，
   #                最终代价只看几何测量，几何也缺失时使用 missing_traversability_cost。
   # OpenCV 恢复角色直接由 role 派生：terrain 构成白色地面，static_obstacle 是可恢复候选，
@@ -83,6 +86,7 @@ semantic_schema:
       role: static_obstacle
       semantic_cost: 1
       global_map: true
+      far_static_protection: true
 
     - label: 3
       name: rough_ground
@@ -99,14 +103,17 @@ semantic_schema:
       role: static_obstacle
       semantic_cost: 1.00
       global_map: true
+      far_static_protection: true
 
     - label: 5
       name: geometric_obstacle
-      meaning: synthetic global-map class for high-cost points without reliable semantics
+      meaning: synthetic, dynamically clearable global-map obstacle for high-cost points without reliable semantics
       rgb: [255, 165, 0]
       role: static_obstacle
       semantic_cost: 1.00
       global_map: true
+      # 该类可能包含行人、车辆等动态物体，不能获得 manhole_cover/grass 的静态保护。
+      far_static_protection: false
 
     - label: 11
       name: reserved_dynamic

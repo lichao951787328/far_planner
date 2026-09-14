@@ -1,0 +1,9 @@
+<library path="lib/libgoalpoint_rviz_plugin">
+  <class name="rviz/GoalPointTool"
+         type="far_planner::GoalPointTool"
+         base_class_type="rviz::Tool">
+    <description>
+      Select and publish a PointStamped goal for FAR Planner.
+    </description>
+  </class>
+</library>
