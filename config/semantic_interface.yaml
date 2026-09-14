@@ -28,15 +28,38 @@ MapHandler/cell_length                  : 5.0
 MapHandler/map_grid_max_length          : 1000.0
 MapHandler/map_grad_max_height          : 100.0
 
+# 轮廓方向和拓扑连接的基础角度容差，单位为度；运行时转换为弧度。
+# 调大能容忍更多点云/轮廓抖动，但可能引入错误可见或连接关系；
+# 调小会使方向判断更严格。近距离判断时源码可能自动放宽该角度。
 Util/angle_noise                        : 15.0
+# 两段轮廓是否近似对齐/共线的最大角度偏差，单位为度。
+# 调大会合并更多不完全对齐的轮廓，但可能建立跨墙错连；4 度属于较严格设置。
 Util/accept_max_align_angle             : 4.0
+# 障碍的 voxel 膨胀层数，不是米，也不是机器人半径。
+# 值 1 表示 XY 方向多覆盖一层宽度约为 voxel_dim 的方形邻域。
+# 调大更保守，但窄通道更容易被封闭。
 Util/obs_inflate_size                   : 1
+# FAR 内部的“新障碍点”判定阈值，不是 bridge 的语义代价阈值。
+# 当前障碍先被重置为 intensity=0，历史障碍重置为 255，合并降采样后 <2 才算新点。
+# 调大会更容易判为环境变化；调小会更严格地排除已有障碍。
 Util/new_intensity_thred                : 2.0
-# The bridge publishes exact 0/1 terrain intensity.
+# terrain 二值分类阈值：intensity < 0.5 为 free，>= 0.5 为 obstacle。
+# 名字中的 Z 不代表高度。bridge 严格输出 free=0/obstacle=1，因此 0.5 是安全分界。
 Util/terrain_free_Z                     : 0.5
+# 历史障碍落在当前 scan 可通过射线上的清除证据点数阈值。
+# 源码使用 size > threshold，因此值 4 表示至少 5 个证据点才删除旧障碍。
+# 调大可减少配准误差造成的误清除，但小型动态障碍移走后清除更慢。
 Util/dyosb_update_thred                 : 4
+# 判断拓扑节点附近是否有足够“最近环境变化点”的计数阈值。
+# 搜索半径为 robot_dim*2+voxel_dim；值 5 时，创建新节点需至少
+# 4 个变化点，普通已有节点检查需至少 6 个。调大更稳定但更迟钝。
 Util/new_point_counter                  : 5
+# 已判定为“消失”的动态障碍点的抑制保留时间，单位秒。
+# 保留期内会过滤同位置 terrain 障碍，防止旧地图反复加回已移走的障碍。
+# 调大能抑制闪烁，但同一位置真实重新出现障碍时可能被更久忽略。
 Util/dynamic_obs_dacay_time             : 10.0
+# 新增障碍和已清除障碍作为“近期变化点”影响拓扑图的保留时间，单位秒。
+# 调大会让节点重检查/连接重置持续更久；调小更稳定，但可能过早丢失变化证据。
 Util/new_points_decay_time              : 1.0
 
 Graph/connect_votes_size                : 10
@@ -44,13 +67,31 @@ Graph/clear_dumper_thred                : 4
 Graph/node_finalize_thred               : 6
 Graph/filter_pool_size                  : 12
 
+# 轮廓提取前将二值地形图放大的倍数，无单位。
+# 调大可让插值后的轮廓边界更细致，但不会增加原始点云信息，内存和计算量约按平方增长。
+# 当前 3.0 同时用于图像尺寸、坐标换算和轮廓简化尺度。
 CDetector/resize_ratio                  : 3.0
+# 动态环境中投影格的障碍点计数阈值；OpenCV 判定为 count > value。
+# 值 3 表示一个格子需要至少 4 次投影累加才保留为障碍。
+# 调大可过滤稀疏噪点，但会侵蚀细/稀疏障碍；调小保留更多障碍，也更容易留下噪点。
 CDetector/filter_count_value            : 3
 CDetector/is_save_img                   : false
 CDetector/img_folder_path               : /tmp
 
+# 目标到达距离，单位米；也用于跳过距离机器人太近的中间 waypoint。
+# 调大更容易宣布到达但终点精度降低；调小时定位/控制抖动可能导致无法收敛。
 GPlanner/converge_distance              : 0.5
+# 用户目标落入障碍或不可达区时，在附近搜索替代目标的半径，单位米。
+# 也参与旧路径惯性的 waypoint 距离判断。调大更容易找到可行点，但可能偏离原目标更远。
 GPlanner/goal_adjust_radius             : 2.0
+# 原始 FAR 遗留参数：当前只加载到 gp_params_.free_thred，但后续代码没有读取它。
+# 因此修改该值目前不会对规划结果产生任何效果。
 GPlanner/free_counter_thred             : 7
+# 导航节点与目标直连可行性的历史投票队列长度。
+# 值 3 时最多保留 3 次结果；队列满时通常至少 2/3 次可行才保留连接。
+# 调大能降低单帧噪声影响，但障碍变化后建立/删除目标连接更慢。
 GPlanner/reach_goal_vote_size           : 3
+# 新一轮规划短暂失败或 waypoint 突变时，允许继续沿用上一条路径的规划周期数。
+# 值 3 在 main_run_freq=2.5 Hz 下最多约为 1.2 s（实际取决于执行分支）。
+# 调大可减少路径抖动，但可能对真实新障碍反应更慢。
 GPlanner/path_momentum_thred             : 3
