@@ -109,11 +109,14 @@ public:
     static std::string worldFrameId;
     // PCL Clouds
     static PointCloudPtr surround_obs_cloud_;   // surround obstacle cloud
+    static PointCloudPtr surround_free_cloud_;  // surround free space cloud
     static PointCloudPtr stack_new_cloud_;      // new obstacle points cloud      
     static PointCloudPtr stack_dyobs_cloud_;
     static PointCloudPtr cur_new_cloud_;
     static PointCloudPtr cur_dyobs_cloud_;
     static PointCloudPtr cur_scan_cloud_;
+    static PointCloudPtr local_terrain_obs_;
+    static PointCloudPtr local_terrain_free_;
     // kdTree cloud
     static PointKdTreePtr kdtree_new_cloud_;
     static PointKdTreePtr kdtree_filter_cloud_;

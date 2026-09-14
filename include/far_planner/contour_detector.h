@@ -1,131 +1,29 @@
 #ifndef CONTOUR_DETECTOR_H
 #define CONTOUR_DETECTOR_H
 
-#include <cmath>
-#include <cstdint>
-
 #include "utility.h"
 
 
 struct ContourDetectParams {
     ContourDetectParams() = default;
     float sensor_range;
-    float contour_grid_resolution;
-    // Robot-centre configuration-space radius.  Raw occupied cells are
-    // inflated exactly once by this metric distance after image refinement.
-    float configuration_space_clearance = 0.45f;
+    float voxel_dim;
     float kRatio;
     int   kThredValue;
-    // FAR topology-raster smoothing kernel.  This is deliberately independent
-    // of robot_collision_clearance: topology extraction and robot-centre
-    // collision checking no longer share one inflated image.
-    int   topology_blur_size = 1;
-    float dynamic_simplify_ratio = 2.0f;
-    // Legacy compatibility parameters. The FAR sparse path no longer runs a
-    // second world-space collinear pass after AdjacentDistanceFilter.
-    float collinear_tolerance = 0.20f;
-    float collinear_angle_deg = 8.0f;
+    int   kBlurSize;
     bool  is_save_img;
     std::string img_path;
 };
 
-/** Anchor a robot-centred contour raster to the fixed world grid.
- *
- * The raster window may move with the robot, but its cell centres must not
- * move continuously with odometry. Otherwise world obstacle coordinates are
- * rounded relative to a different origin on every frame and reconstructed
- * contour vertices exhibit a +/- half-cell sawtooth motion. */
-inline float AlignContourRasterCoordinate(const float coordinate,
-                                          const float resolution) {
-    if (!std::isfinite(coordinate) || !std::isfinite(resolution) ||
-        resolution <= 0.0f) {
-        return coordinate;
-    }
-    return std::round(coordinate / resolution) * resolution;
-}
-
-/** Remove B only when its closed-contour neighbours A-B-C describe the same
- * straight wall in world coordinates. This is independent of image resize
- * and prevents voxel stair-steps from becoming persistent graph corners. */
-inline void SimplifyClosedContourCollinearVertices(
-    PointStack& contour, const float distance_tolerance,
-    const float angle_tolerance_deg) {
-    if (contour.size() <= 3) return;
-    const float tolerance = std::max(0.0f, distance_tolerance);
-    const float angle_rad = std::max(0.0f, angle_tolerance_deg) *
-                            static_cast<float>(M_PI) / 180.0f;
-    const float min_straight_cos = std::cos(angle_rad);
-    bool changed = true;
-    while (changed && contour.size() > 3) {
-        changed = false;
-        const std::size_t count = contour.size();
-        for (std::size_t index = 0; index < count; ++index) {
-            const Point3D& previous = contour[(index + count - 1) % count];
-            const Point3D& current = contour[index];
-            const Point3D& next = contour[(index + 1) % count];
-            const Point3D first = previous - current;
-            const Point3D second = next - current;
-            const float first_length = first.norm_flat();
-            const float second_length = second.norm_flat();
-            if (first_length <= 1e-6f || second_length <= 1e-6f) {
-                contour.erase(contour.begin() + index);
-                changed = true;
-                break;
-            }
-            const float straight_cos =
-                -(first.x * second.x + first.y * second.y) /
-                (first_length * second_length);
-            const float chord_x = next.x - previous.x;
-            const float chord_y = next.y - previous.y;
-            const float chord_squared =
-                chord_x * chord_x + chord_y * chord_y;
-            float ratio = chord_squared <= 1e-12f ? 0.0f :
-                ((current.x - previous.x) * chord_x +
-                 (current.y - previous.y) * chord_y) / chord_squared;
-            ratio = std::max(0.0f, std::min(1.0f, ratio));
-            const float projection_x = previous.x + ratio * chord_x;
-            const float projection_y = previous.y + ratio * chord_y;
-            const float chord_distance = std::hypot(
-                current.x - projection_x, current.y - projection_y);
-            if (straight_cos >= min_straight_cos &&
-                chord_distance <= tolerance) {
-                contour.erase(contour.begin() + index);
-                changed = true;
-                break;
-            }
-        }
-    }
-}
-
 class ContourDetector {
 private:
     Point3D odom_pos_;
-    Point3D raster_center_;
     cv::Point2f free_odom_resized_;
     ContourDetectParams cd_params_;
     PointCloudPtr new_corners_cloud_;
     cv::Mat img_mat_;
-    // Debug-only snapshots of the most recent extraction. They are cloned by
-    // FAR before the next static/dynamic layer overwrites this detector.
-    cv::Mat debug_base_img_;
-    cv::Mat debug_processed_img_;
-    // FAR-style image used only to extract obstacle topology.  It contains
-    // the original 3x3 occupied-cell expansion, INTER_LINEAR resize and
-    // boxFilter stages; it is not a robot-centre collision map.
-    cv::Mat topology_img_;
-    // Binary CV_8UC1 robot-centre configuration-space occupancy used only by
-    // graph/waypoint collision validation.  It deliberately remains separate
-    // from the topology image above.
-    cv::Mat configuration_space_img_;
     std::size_t img_counter_;
     std::vector<CVPointStack> refined_contours_;
-    // FAR's TC89_L1 source chains kept in lockstep with refined_contours_.
-    // The legacy "dense" names are retained temporarily because the current
-    // Graph interface still consumes this correspondence; they are no longer
-    // pixel-faithful CHAIN_APPROX_NONE contours.
-    std::vector<CVPointStack> dense_contours_;
-    std::vector<PointStack> dense_world_contours_;
-    std::vector<std::vector<std::size_t>> simplified_dense_indices_;
     std::vector<cv::Vec4i> refined_hierarchy_;
     NavNodePtr odom_node_ptr_;
 
@@ -136,44 +34,29 @@ private:
     float VOXEL_DIM_INV;
     
 
-    void UpdateImgMatWithCloud(const PointCloudPtr& pc,
-                               cv::Mat& img_mat,
-                               const bool& is_verified_occupied);
+    void UpdateImgMatWithCloud(const PointCloudPtr& pc, cv::Mat& img_mat);
 
     void ExtractContourFromImg(const cv::Mat& img,
                                std::vector<CVPointStack>& img_contours,
-                               std::vector<PointStack>& realworld_contour,
-                               float simplify_ratio);
+                               std::vector<PointStack>& realworld_contour);
 
     void ExtractRefinedContours(const cv::Mat& imgIn,
-                                std::vector<CVPointStack>& refined_contours,
-                                float distance_limit);
+                                std::vector<CVPointStack>& refined_contours);
 
-    void BuildConfigurationSpaceImg(const cv::Mat& img, cv::Mat& Rimg);
-
-    void BuildFarTopologyImg(const cv::Mat& img, cv::Mat& Rimg);
+    void ResizeAndBlurImg(const cv::Mat& img, cv::Mat& Rimg);
 
     void ConvertContoursToRealWorld(const std::vector<CVPointStack>& ori_contours,
                                     std::vector<PointStack>& realWorld_contours);
 
-    void TopoFilterContours(std::vector<CVPointStack>& contoursInOut,
-                            std::vector<CVPointStack>& denseContoursInOut);
+    void TopoFilterContours(std::vector<CVPointStack>& contoursInOut);
 
-    void AdjecentDistanceFilter(std::vector<CVPointStack>& contoursInOut,
-                                std::vector<CVPointStack>& denseContoursInOut,
-                                float distance_limit);
+    void AdjecentDistanceFilter(std::vector<CVPointStack>& contoursInOut);
 
     /* inline functions */
     inline void UpdateOdom(const NavNodePtr& odom_node_ptr) {
         odom_pos_ = odom_node_ptr->position;
-        raster_center_ = odom_pos_;
-        raster_center_.x = AlignContourRasterCoordinate(
-            odom_pos_.x, cd_params_.contour_grid_resolution);
-        raster_center_.y = AlignContourRasterCoordinate(
-            odom_pos_.y, cd_params_.contour_grid_resolution);
         odom_node_ptr_ = odom_node_ptr;
-        free_odom_resized_ = ConvertPoint3DToCVPoint(
-            FARUtil::free_odom_p, raster_center_, true);
+        free_odom_resized_ = ConvertPoint3DToCVPoint(FARUtil::free_odom_p, odom_pos_, true);
     }
 
     inline void ConvertCVToPoint3DVector(const CVPointStack& cv_vec,
@@ -183,8 +66,7 @@ private:
         p_vec.clear(), p_vec.resize(vec_size);
         for (std::size_t i=0; i<vec_size; i++) {
             cv::Point2f cv_p = cv_vec[i];
-            Point3D p = ConvertCVPointToPoint3D(
-                cv_p, raster_center_, is_resized_img);
+            Point3D p = ConvertCVPointToPoint3D(cv_p, odom_pos_, is_resized_img);
             p_vec[i] = p;
         }
     }
@@ -276,8 +158,8 @@ private:
         Point3D p;
         const int c_idx = is_resized_img ? CMAT_RESIZE : CMAT;
         const float ratio = is_resized_img ? cd_params_.kRatio : 1.0f;
-        p.x = (cv_p.y - c_idx) * cd_params_.contour_grid_resolution / ratio + c_pos.x;
-        p.y = (cv_p.x - c_idx) * cd_params_.contour_grid_resolution / ratio + c_pos.y;
+        p.x = (cv_p.y - c_idx) * cd_params_.voxel_dim / ratio + c_pos.x;
+        p.y = (cv_p.x - c_idx) * cd_params_.voxel_dim / ratio + c_pos.y;
         p.z = odom_pos_.z;
         return p;
     }
@@ -350,9 +232,7 @@ public:
     */
     void BuildTerrainImgAndExtractContour(const NavNodePtr& odom_node_ptr, 
                                           const PointCloudPtr& surround_cloud,
-                                          std::vector<PointStack>& realworl_contour,
-                                          const bool& is_verified_occupied = false,
-                                          float simplify_ratio = 1.0f);
+                                          std::vector<PointStack>& realworl_contour);
 
     /**
      * Show Corners on Pointcloud projection image
@@ -364,25 +244,6 @@ public:
     /* Get Internal Values */
     const PointCloudPtr GetNewVertices() const { return new_corners_cloud_;};
     const cv::Mat       GetCloudImgMat() const { return img_mat_;};
-    const cv::Mat& GetDebugBaseImage() const { return debug_base_img_; }
-    const cv::Mat& GetDebugProcessedImage() const {
-        return debug_processed_img_;
-    }
-    const cv::Mat& GetConfigurationSpaceImage() const {
-        return configuration_space_img_;
-    }
-    const cv::Mat& GetTopologyImage() const { return topology_img_; }
-    const std::vector<PointStack>& GetDenseWorldContours() const {
-        return dense_world_contours_;
-    }
-    const std::vector<std::vector<std::size_t>>&
-    GetSimplifiedDenseIndices() const {
-        return simplified_dense_indices_;
-    }
-    const Point3D& GetRasterCenter() const { return raster_center_; }
-    float GetConfigurationSpaceResolution() const {
-        return cd_params_.contour_grid_resolution / cd_params_.kRatio;
-    }
 };
 
 #endif

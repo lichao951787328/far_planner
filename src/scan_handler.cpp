@@ -44,18 +44,12 @@ void ScanHandler::UpdateRobotPosition(const Point3D& robot_pos) {
     center_p_ = FARUtil::Point3DToPCLPoint(robot_pos);
 }
 
-// 把“当前帧扫描点云”写入体素状态图，并同时构建射线穿过区域，用于后续动态障碍提取。
 void ScanHandler::SetCurrentScanCloud(const PointCloudPtr& scanCloudIn, const PointCloudPtr& freeCloudIn) {
     if (!is_grids_init_ || scanCloudIn->empty()) return;
     // remove free scan points
     PointCloudPtr copyObsScanCloud(new pcl::PointCloud<PCLPoint>());
     pcl::copyPointCloud(*scanCloudIn, *copyObsScanCloud);
     FARUtil::RemoveOverlapCloud(copyObsScanCloud, freeCloudIn, true);
-    // 从机器人中心向每个扫描点做射线标记（RAY_BIT）
-    // 对原始 scanCloudIn 每个点：
-    // 转成体素下标 sub
-    // 调 SetRayCloud(sub) 从中心沿线遍历
-    // 沿途体素标记 RAY_BIT，直到碰到 SCAN_BIT 为止
     for (const auto& point : copyObsScanCloud->points) { // assign obstacle scan voxels
         const float r = pcl::euclideanDistance(point, center_p_);
         const int L = static_cast<int>(std::ceil((r * ANG_RES_X)/scan_params_.voxel_size/2.0f))+FARUtil::kObsInflate;
@@ -80,7 +74,6 @@ void ScanHandler::SetCurrentScanCloud(const PointCloudPtr& scanCloudIn, const Po
     }
 }
 
-// 把“周围障碍点云”写入体素网格，并给对应体素打上 OBS_BIT 标记。
 void ScanHandler::SetSurroundObsCloud(const PointCloudPtr& obsCloudIn, const bool& is_filter_cloud) {
     if (!is_grids_init_ || obsCloudIn->empty()) return;
     if (is_filter_cloud) FARUtil::FilterCloud(obsCloudIn, scan_params_.voxel_size);
@@ -91,9 +84,7 @@ void ScanHandler::SetSurroundObsCloud(const PointCloudPtr& obsCloudIn, const boo
         voxel_grids_->GetCell(ind) = voxel_grids_->GetCell(ind) | OBS_BIT;
     }
 }
-// 在同文件里，SetRayCloud 会从机器人中心向扫描点打射线，把“射线路径经过的体素”标成 RAY_BIT（直到碰到 SCAN_BIT 停止）。
-// 所以 RAY_BIT 可以理解为“当前帧可见/被射线扫过的空间”。
-// ExtractDyObsCloud 再拿某个障碍点云去筛，凡是落在这些可见射线体素里的点，就被当作动态障碍候选输出（通常意味着它出现在当前可见通道中，需要重点处理）
+
 void ScanHandler::ExtractDyObsCloud(const PointCloudPtr& cloudIn, const PointCloudPtr& dyObsCloudOut) {
     if (!is_grids_init_ || cloudIn->empty()) return;
     dyObsCloudOut->clear();
@@ -108,7 +99,6 @@ void ScanHandler::ExtractDyObsCloud(const PointCloudPtr& cloudIn, const PointClo
     }
 }
 
-// 这个函数是在体素网格里“从机器人中心向目标点打一条射线”，把途中经过的格子标成 RAY_BIT。
 void ScanHandler::SetRayCloud(const Eigen::Vector3i& point_sub) {
     Eigen::Vector3i dir_sub = point_sub - center_sub_; 
     if (dir_sub.squaredNorm() < 1.0) return;

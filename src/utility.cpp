@@ -498,8 +498,7 @@ void FARUtil::ExtractOverlapCloud(const PointCloudPtr& cloudIn,
   }
   cloudOverlapOut->resize(idx);
 }
-// 从 cloudInOut 里删掉与 cloudRef 重叠的点，保留“不重叠的那部分”。
-// 这个删除逻辑很简单，因为在体素滤波的时候，体素内的点云会被压缩成一个点，先给cloudInOut的点打上255的标签，给cloudRef的点打上0的标签，然后把两朵云拼接起来做一次体素滤波，滤波后体素内如果两类点都出现，滤波后的点的intensity会变成介于0和255之间的值，这样就可以通过intensity来判断哪些点是重叠的，哪些点是不重叠的。
+
 void FARUtil::RemoveOverlapCloud(const PointCloudPtr& cloudInOut,
                                  const PointCloudPtr& cloudRef,
                                  const bool& is_copy_cloud) 
@@ -512,17 +511,13 @@ void FARUtil::RemoveOverlapCloud(const PointCloudPtr& cloudInOut,
     pcl::copyPointCloud(*cloudRef, *copyRefCloud);
     ref_cloud = copyRefCloud;
   }
-  // 给 cloudInOut 所有点打标签 intensity=255，给 cloudRef 打标签 intensity=0。
   FARUtil::ResetCloudIntensity(cloudInOut, true);
   FARUtil::ResetCloudIntensity(ref_cloud, false);
   *temp_cloud = *cloudInOut + *ref_cloud;
   const float leaf_size = FARUtil::kLeafSize * 1.2;
-  // 把两朵云拼接后做一次体素滤波（leaf_size = 1.2 × kLeafSize）。
-  // 在同一个体素里如果两类点都出现，滤波后 intensity 会变成介于 0 和 255 的值。
   FARUtil::FilterCloud(temp_cloud, leaf_size);
   cloudInOut->clear(), cloudInOut->resize(temp_cloud->size());
   std::size_t idx = 0;
-  // 最后只保留 intensity==255 的点
   for (const auto& p : temp_cloud->points) {
     if (p.intensity < 255.0) continue;
     cloudInOut->points[idx] = p;
@@ -710,7 +705,6 @@ void FARUtil::ConvertCTNodeStackToPCL(const CTNodeStack& ctnode_stack,
   }
 }
 
-// 把点云裁剪成“以 center_p 为中心的一个长方体盒子”内的点，只保留盒子内点，其他点删掉
 void FARUtil::CropBoxCloud(const PointCloudPtr& cloudInOut, 
                           const Point3D& center_p, 
                           const Point3D& crop_size) 

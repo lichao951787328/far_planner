@@ -22,8 +22,8 @@ void TerrainPlanner::Init(const ros::NodeHandle& nh, const TerrainPlannerParams&
     this->AllocateGridNodes(); 
     viz_path_stack_.clear();
 
-    local_path_pub_   = nh_.advertise<Marker>("local_terrain_path_debug", 5);
-    terrain_map_pub_  = nh_.advertise<sensor_msgs::PointCloud2>("local_terrain_map_debug", 5);
+    local_path_pub_   = nh_.advertise<Marker>("/local_terrain_path_debug", 5);
+    terrain_map_pub_  = nh_.advertise<sensor_msgs::PointCloud2>("/local_terrain_map_debug", 5);
 }
 
 void TerrainPlanner::UpdateCenterNode(const NavNodePtr& node_ptr) {
@@ -39,24 +39,8 @@ void TerrainPlanner::UpdateCenterNode(const NavNodePtr& node_ptr) {
     this->ResetGridsOccupancy();
 }
 
-// 根据障碍点云设置某一区域内的地形栅格占据标记，供地形规划使用。
-// 把“机器人附近的局部地形障碍点云”写进 TerrainPlanner 自己的局部二维栅格里，标记哪些格子被障碍占住，供后续局部地形通路检查使用。
-// 先判断地形规划栅格是否已经初始化，以及输入障碍点云是否为空。
-// 遍历每个障碍点。
-// 把障碍点坐标投影到 terrain_grids_ 的二维网格下标。
-// 以这个格子为中心，按 inflate_size 做一个小范围膨胀。
-// 把膨胀范围内的格子都标成 is_occupied = true。
-// 每次机器人位置更新时，都会把 FARUtil::surround_obs_cloud_ 送给 terrain_planner_。这表示 TerrainPlanner 一直维护一张“当前机器人周围的局部障碍地图”。
-// 目的：让 TerrainPlanner 能判断两点之间是否被障碍挡住
 void TerrainPlanner::SetLocalTerrainObsCloud(const PointCloudPtr& obsCloudIn) {
-    if (!is_grids_init_) return;
-    // Rebuild from the latest snapshot. Merely adding occupied cells leaves a
-    // disappeared dynamic obstacle permanently stuck in this grid.
-    this->ResetGridsOccupancy();
-    if (!obsCloudIn || obsCloudIn->empty()) {
-        this->GridVisualCloud();
-        return;
-    }
+    if (!is_grids_init_ || obsCloudIn->empty()) return;
     const int N_IF = tp_params_.inflate_size;
     for (const auto& point : obsCloudIn->points) {
         Eigen::Vector3i c_sub = terrain_grids_->Pos2Sub(Eigen::Vector3d(point.x, point.y, center_pos_.z));
@@ -91,14 +75,6 @@ void TerrainPlanner::GridVisualCloud() {
     terrain_map_pub_.publish(msg_pc);
 }
 
-// 触发时机在动态拓扑图更新流程里：
-// 在 src/far_planner/src/dynamic_graph.cpp 附近，会遍历周围中间导航点的 trajectory_connects（轨迹连接边）。
-// 对每条边调用 ReEvaluateConnectUsingTerrian，位置在 src/far_planner/src/dynamic_graph.cpp。
-// ReEvaluateConnectUsingTerrian 内部再调用 PlanPathFromNodeToNode，最终就是你问的 PlanPathFromPToP（定义在 src/far_planner/src/terrain_planner.cpp）。
-// 它的用途是：
-// 如果地形栅格内能从点 A 规划到点 B，就保留并记录这条轨迹边（RecordValidTrajEdge）。
-// 如果规划失败，就删除这条轨迹边（RemoveInValidTrajEdge）。
-// 所以一句话：它用于动态图更新阶段，对已有局部连接做“地形可通行性复核”。
 bool TerrainPlanner::PlanPathFromPToP(const Point3D& from_p, const Point3D& to_p, PointStack& path) {
     path.clear();
     if (!is_grids_init_) return false;
@@ -210,3 +186,4 @@ void TerrainPlanner::VisualPaths() {
     local_path_pub_.publish(terrain_paths_marker);
     viz_path_stack_.clear();
 }
+

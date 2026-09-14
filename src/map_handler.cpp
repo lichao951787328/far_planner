@@ -7,1327 +7,324 @@
 
 
 #include "far_planner/map_handler.h"
-#include "far_planner/semantic_confidence.h"
-#include <algorithm>
-#include <cmath>
-#include <limits>
-#include <octomap/OcTree.h>
-#include <semantic_octree/SemanticOcTree.h>
-#include <semantic_octree/Semantics.h>
-#include <octomap_msgs/conversions.h>
-#include <octomap_msgs/Octomap.h>
 
-using octomap::ColorOcTreeNode;
-using octomap::point3d;
+/***************************************************************************************/
 
-namespace {
+void MapHandler::Init(const MapHandlerParams& params) {
+    map_params_ = params;
+    const int row_num = std::ceil(map_params_.grid_max_length / map_params_.cell_length);
+    const int col_num = row_num;
+    int level_num = std::ceil(map_params_.grid_max_height / map_params_.cell_height);
+    neighbor_Lnum_ = std::ceil(map_params_.sensor_range * 2.0f / map_params_.cell_length) + 1; 
+    neighbor_Hnum_ = 5; 
+    if (level_num % 2 == 0) level_num ++;         // force to odd number, robot will be at center
+    if (neighbor_Lnum_ % 2 == 0) neighbor_Lnum_ ++; // force to odd number
 
-inline uint32_t MakeRgbKey(uint8_t r, uint8_t g, uint8_t b) {
-    return (static_cast<uint32_t>(r) << 16) |
-           (static_cast<uint32_t>(g) << 8) |
-           static_cast<uint32_t>(b);
+    // inlitialize grid 
+    Eigen::Vector3i pointcloud_grid_size(row_num, col_num, level_num);
+    Eigen::Vector3d pointcloud_grid_origin(0,0,0);
+    Eigen::Vector3d pointcloud_grid_resolution(map_params_.cell_length, map_params_.cell_length, map_params_.cell_height);
+    PointCloudPtr cloud_ptr_tmp;
+    world_obs_cloud_grid_ = std::make_unique<grid_ns::Grid<PointCloudPtr>>(
+        pointcloud_grid_size, cloud_ptr_tmp, pointcloud_grid_origin, pointcloud_grid_resolution, 3);
+
+    world_free_cloud_grid_ = std::make_unique<grid_ns::Grid<PointCloudPtr>>(
+        pointcloud_grid_size, cloud_ptr_tmp, pointcloud_grid_origin, pointcloud_grid_resolution, 3);
+
+    const int n_cell  = world_obs_cloud_grid_->GetCellNumber();
+    for (int i = 0; i < n_cell; i++) {
+        world_obs_cloud_grid_->GetCell(i) = PointCloudPtr(new PointCloud);
+        world_free_cloud_grid_->GetCell(i) = PointCloudPtr(new PointCloud);
+    }
+    global_visited_induces_.resize(n_cell), util_remove_check_list_.resize(n_cell);
+    util_obs_modified_list_.resize(n_cell), util_free_modified_list_.resize(n_cell);
+    std::fill(global_visited_induces_.begin(), global_visited_induces_.end(), 0);
+    std::fill(util_obs_modified_list_.begin(), util_obs_modified_list_.end(), 0);
+    std::fill(util_free_modified_list_.begin(), util_free_modified_list_.end(), 0);
+    std::fill(util_remove_check_list_.begin(), util_remove_check_list_.end(), 0);
+
+    // init terrain height map
+    int height_dim = std::ceil((map_params_.sensor_range + map_params_.cell_length) * 2.0f / FARUtil::robot_dim);
+    if (height_dim % 2 == 0) height_dim ++;
+    Eigen::Vector3i height_grid_size(height_dim, height_dim, 1);
+    Eigen::Vector3d height_grid_origin(0,0,0);
+    Eigen::Vector3d height_grid_resolution(FARUtil::robot_dim, FARUtil::robot_dim, FARUtil::kLeafSize);
+    std::vector<float> temp_vec;
+    terrain_height_grid_ = std::make_unique<grid_ns::Grid<std::vector<float>>>(
+        height_grid_size, temp_vec, height_grid_origin, height_grid_resolution, 3);
+    
+    const int n_terrain_cell = terrain_height_grid_->GetCellNumber();
+    terrain_grid_occupy_list_.resize(n_terrain_cell), terrain_grid_traverse_list_.resize(n_terrain_cell);
+    std::fill(terrain_grid_occupy_list_.begin(), terrain_grid_occupy_list_.end(), 0);
+    std::fill(terrain_grid_traverse_list_.begin(), terrain_grid_traverse_list_.end(), 0);
+
+    INFLATE_N = 1;
+    flat_terrain_cloud_    = PointCloudPtr(new pcl::PointCloud<PCLPoint>());
+    kdtree_terrain_clould_ = PointKdTreePtr(new pcl::KdTreeFLANN<PCLPoint>());
+    kdtree_terrain_clould_->setSortedResults(false);
 }
 
-using SemanticOctree = octomap::SemanticOcTree<octomap::SemanticsLogOdds>;
-using SemanticOcTreeNode = octomap::SemanticOcTreeNode<octomap::SemanticsLogOdds>;
+void MapHandler::ResetGripMapCloud() {
+    const int n_cell = world_obs_cloud_grid_->GetCellNumber();
+    for (int i=0; i<n_cell; i++) {
+        world_obs_cloud_grid_->GetCell(i)->clear();
+        world_free_cloud_grid_->GetCell(i)->clear();
+    }
+    std::fill(global_visited_induces_.begin(),     global_visited_induces_.end(),     0);
+    std::fill(util_obs_modified_list_.begin(),     util_obs_modified_list_.end(),     0);
+    std::fill(util_free_modified_list_.begin(),    util_free_modified_list_.end(),    0);
+    std::fill(util_remove_check_list_.begin(),     util_remove_check_list_.end(),     0);
+    std::fill(terrain_grid_occupy_list_.begin(),   terrain_grid_occupy_list_.end(),   0);
+    std::fill(terrain_grid_traverse_list_.begin(), terrain_grid_traverse_list_.end(), 0);
+}
 
-template <typename GroupContainer>
-inline bool MatchRgbKey(const GroupContainer& groups, uint32_t rgb_key) {
-    for (const auto& group : groups) {
-        if (group.rgb_key == rgb_key) return true;
+void MapHandler::ClearObsCellThroughPosition(const Point3D& point) {
+    const Eigen::Vector3i psub = world_obs_cloud_grid_->Pos2Sub(point.x, point.y, point.z);
+    std::vector<Eigen::Vector3i> ray_subs;
+    world_obs_cloud_grid_->RayTraceSubs(robot_cell_sub_, psub, ray_subs);
+    const int H = neighbor_Hnum_ / 2;
+    for (const auto& sub : ray_subs) {
+        for (int k = -H; k <= H; k++) {
+            Eigen::Vector3i csub = sub;
+            csub.z() += k;
+            const int ind = world_obs_cloud_grid_->Sub2Ind(csub);
+            if (!world_obs_cloud_grid_->InRange(csub) || neighbor_obs_indices_.find(ind) == neighbor_obs_indices_.end()) continue; 
+            world_obs_cloud_grid_->GetCell(ind)->clear();
+            if (world_free_cloud_grid_->GetCell(ind)->empty()) {
+                global_visited_induces_[ind] = 0;
+            }
+        }
+    }
+}
+
+void MapHandler::GetCloudOfPoint(const Point3D& center, 
+                                 const PointCloudPtr& cloudOut,
+                                 const CloudType& type,
+                                 const bool& is_large) 
+{
+    cloudOut->clear();
+    const Eigen::Vector3i sub = world_obs_cloud_grid_->Pos2Sub(center.x, center.y, center.z);
+    const int N = is_large ? 1 : 0;
+    const int H = neighbor_Hnum_ / 2;
+    for (int i = -N; i <= N; i++) {
+        for (int j = -N; j <= N; j++) {
+            for (int k = -H; k <= H; k++) {
+                Eigen::Vector3i csub = sub;
+                csub.x() += i, csub.y() += j, csub.z() += k;
+                if (!world_obs_cloud_grid_->InRange(csub)) continue;
+                if (type == CloudType::FREE_CLOUD) {
+                    *cloudOut += *(world_free_cloud_grid_->GetCell(csub));
+                } else if (type == CloudType::OBS_CLOUD) {
+                    *cloudOut += *(world_obs_cloud_grid_->GetCell(csub));
+                } else {
+                    if (FARUtil::IsDebug) ROS_ERROR("MH: Assigned cloud type invalid.");
+                    return;
+                }
+            }
+        }
+    }
+}
+
+
+void MapHandler::SetMapOrigin(const Point3D& ori_robot_pos) {
+    Point3D map_origin;
+    const Eigen::Vector3i dim = world_obs_cloud_grid_->GetSize();
+    map_origin.x = ori_robot_pos.x - (map_params_.cell_length * dim.x()) / 2.0f;
+    map_origin.y = ori_robot_pos.y - (map_params_.cell_length * dim.y()) / 2.0f;
+    map_origin.z = ori_robot_pos.z - (map_params_.cell_height * dim.z()) / 2.0f - FARUtil::vehicle_height; // From Ground Level
+    Eigen::Vector3d pointcloud_grid_origin(map_origin.x, map_origin.y, map_origin.z);
+    world_obs_cloud_grid_->SetOrigin(pointcloud_grid_origin);
+    world_free_cloud_grid_->SetOrigin(pointcloud_grid_origin);
+    is_init_ = true;
+    if (FARUtil::IsDebug) ROS_INFO("MH: Global Cloud Map Grid Initialized.");
+}
+
+void MapHandler::UpdateRobotPosition(const Point3D& odom_pos) {
+    if (!is_init_) this->SetMapOrigin(odom_pos);
+    robot_cell_sub_ = world_obs_cloud_grid_->Pos2Sub(Eigen::Vector3d(odom_pos.x, odom_pos.y, odom_pos.z));
+    // Get neighbor indices
+    neighbor_free_indices_.clear(), neighbor_obs_indices_.clear();
+    const int N = neighbor_Lnum_ / 2;
+    const int H = neighbor_Hnum_ / 2;
+    Eigen::Vector3i neighbor_sub;
+    for (int i = -N; i <= N; i++) {
+        neighbor_sub.x() = robot_cell_sub_.x() + i;
+        for (int j = -N; j <= N; j++) {
+            neighbor_sub.y() = robot_cell_sub_.y() + j;
+            // additional terrain points -1
+            neighbor_sub.z() = robot_cell_sub_.z() - H - 1;
+            if (world_obs_cloud_grid_->InRange(neighbor_sub)) {
+                int ind = world_obs_cloud_grid_->Sub2Ind(neighbor_sub);
+                neighbor_free_indices_.insert(ind);
+            }
+            for (int k =-H; k <= H; k++) {
+                neighbor_sub.z() = robot_cell_sub_.z() + k;
+                if (world_obs_cloud_grid_->InRange(neighbor_sub)) {
+                    int ind = world_obs_cloud_grid_->Sub2Ind(neighbor_sub);
+                    neighbor_obs_indices_.insert(ind), neighbor_free_indices_.insert(ind);
+                }
+            }
+        }
+    }
+    this->SetTerrainHeightGridOrigin(odom_pos);
+}
+
+void MapHandler::SetTerrainHeightGridOrigin(const Point3D& robot_pos) {
+    // update terrain height grid center
+    const Eigen::Vector3d res = terrain_height_grid_->GetResolution();
+    const Eigen::Vector3i dim = terrain_height_grid_->GetSize();
+    Eigen::Vector3d grid_origin;
+    grid_origin.x() = robot_pos.x - (res.x() * dim.x()) / 2.0f;
+    grid_origin.y() = robot_pos.y - (res.y() * dim.y()) / 2.0f;
+    grid_origin.z() = 0.0f        - (res.z() * dim.z()) / 2.0f;
+    terrain_height_grid_->SetOrigin(grid_origin);
+}
+
+void MapHandler::GetSurroundObsCloud(const PointCloudPtr& obsCloudOut) {
+    if (!is_init_) return;
+    obsCloudOut->clear();
+    for (const auto& neighbor_ind : neighbor_obs_indices_) {
+        if (world_obs_cloud_grid_->GetCell(neighbor_ind)->empty()) continue;
+        *obsCloudOut += *(world_obs_cloud_grid_->GetCell(neighbor_ind));
+    }
+}
+
+void MapHandler::GetSurroundFreeCloud(const PointCloudPtr& freeCloudOut) {
+    if (!is_init_) return;
+    freeCloudOut->clear();
+    for (const auto& neighbor_ind : neighbor_free_indices_) {
+        if (world_free_cloud_grid_->GetCell(neighbor_ind)->empty()) continue;
+        *freeCloudOut += *(world_free_cloud_grid_->GetCell(neighbor_ind));
+    }
+}
+
+void MapHandler::UpdateObsCloudGrid(const PointCloudPtr& obsCloudInOut) {
+    if (!is_init_ || obsCloudInOut->empty()) return;
+    std::fill(util_obs_modified_list_.begin(), util_obs_modified_list_.end(), 0);
+    PointCloudPtr obs_valid_ptr(new pcl::PointCloud<PCLPoint>());
+    for (const auto& point : obsCloudInOut->points) {
+        Eigen::Vector3i sub = world_obs_cloud_grid_->Pos2Sub(Eigen::Vector3d(point.x, point.y, point.z));
+        if (!world_obs_cloud_grid_->InRange(sub)) continue;
+        const int ind = world_obs_cloud_grid_->Sub2Ind(sub);
+        if (neighbor_obs_indices_.find(ind) != neighbor_obs_indices_.end()) {
+            world_obs_cloud_grid_->GetCell(ind)->points.push_back(point);
+            obs_valid_ptr->points.push_back(point);
+            util_obs_modified_list_[ind] = 1;
+            global_visited_induces_[ind] = 1;
+        }
+    }
+    *obsCloudInOut = *obs_valid_ptr;
+    // Filter Modified Ceils
+    for (int i = 0; i < world_obs_cloud_grid_->GetCellNumber(); ++i) {
+      if (util_obs_modified_list_[i] == 1) FARUtil::FilterCloud(world_obs_cloud_grid_->GetCell(i), FARUtil::kLeafSize);
+    }
+}
+
+void MapHandler::UpdateFreeCloudGrid(const PointCloudPtr& freeCloudIn){
+    if (!is_init_ || freeCloudIn->empty()) return;
+    std::fill(util_free_modified_list_.begin(), util_free_modified_list_.end(), 0);
+    for (const auto& point : freeCloudIn->points) {
+        Eigen::Vector3i sub = world_free_cloud_grid_->Pos2Sub(Eigen::Vector3d(point.x, point.y, point.z));
+        if (!world_free_cloud_grid_->InRange(sub)) continue;
+        const int ind = world_free_cloud_grid_->Sub2Ind(sub);
+        world_free_cloud_grid_->GetCell(ind)->points.push_back(point);
+        util_free_modified_list_[ind] = 1;
+        global_visited_induces_[ind]  = 1;
+    }
+    // Filter Modified Ceils
+    for (int i = 0; i < world_free_cloud_grid_->GetCellNumber(); ++i) {
+      if (util_free_modified_list_[i] == 1) FARUtil::FilterCloud(world_free_cloud_grid_->GetCell(i), FARUtil::kLeafSize);
+    }
+}
+
+float MapHandler::TerrainHeightOfPoint(const Point3D& p, bool& is_matched, const bool& is_search) {
+    is_matched = false;
+    const Eigen::Vector3i sub = terrain_height_grid_->Pos2Sub(Eigen::Vector3d(p.x, p.y, 0.0f));
+    if (terrain_height_grid_->InRange(sub)) {
+        const int ind = terrain_height_grid_->Sub2Ind(sub);
+        if (terrain_grid_traverse_list_[ind] != 0) {
+            is_matched = true;
+            return terrain_height_grid_->GetCell(ind)[0];
+        }
+    }
+    if (is_search) {
+        float matched_dist_squre;
+        const float terrain_h = NearestHeightOfPoint(p, matched_dist_squre);
+        return terrain_h;
+    }
+    return p.z; 
+}
+
+float MapHandler::NearestTerrainHeightofNavPoint(const Point3D& point, bool& is_associated) {
+    const float p_th = point.z-FARUtil::vehicle_height;
+    const Eigen::Vector3i ori_sub = world_free_cloud_grid_->Pos2Sub(Eigen::Vector3d(point.x, point.y, p_th));
+    is_associated = false;
+    if (world_free_cloud_grid_->InRange(ori_sub)) {
+        // downward seach
+        bool is_dw_associated = false;
+        Eigen::Vector3i dw_near_sub = ori_sub;
+        float dw_terrain_h = p_th;
+        while (world_free_cloud_grid_->InRange(dw_near_sub)) {
+            if (!world_free_cloud_grid_->GetCell(dw_near_sub)->empty()) {
+                int counter = 0;
+                dw_terrain_h = 0.0f;
+                for (const auto& pcl_p : world_free_cloud_grid_->GetCell(dw_near_sub)->points) {
+                    dw_terrain_h += pcl_p.z, counter ++;
+                }
+                dw_terrain_h /= (float)counter;
+                is_dw_associated = true;
+                break;
+            }
+            dw_near_sub.z() --;
+        }
+        // upward search
+        bool is_up_associated = false;
+        Eigen::Vector3i up_near_sub = ori_sub;
+        float up_terrain_h = p_th;
+        while (world_free_cloud_grid_->InRange(up_near_sub)) {
+            if (!world_free_cloud_grid_->GetCell(up_near_sub)->empty()) {
+                int counter = 0;
+                up_terrain_h = 0.0f;
+                for (const auto& pcl_p : world_free_cloud_grid_->GetCell(up_near_sub)->points) {
+                    up_terrain_h += pcl_p.z, counter ++;
+                }
+                up_terrain_h /= (float)counter;
+                is_up_associated = true;
+                break;
+            }
+            up_near_sub.z() ++;
+            
+        }
+        is_associated = (is_up_associated || is_dw_associated) ? true : false;
+        if (is_up_associated && is_dw_associated) { // compare nearest
+            if (up_near_sub.z() - ori_sub.z() < ori_sub.z() - dw_near_sub.z()) return up_terrain_h;
+            else return dw_terrain_h;
+        } else if (is_up_associated) return up_terrain_h;
+        else return dw_terrain_h;
+    }
+    return p_th;
+}
+
+
+bool MapHandler::IsNavPointOnTerrainNeighbor(const Point3D& point, const bool& is_extend) {
+    const float h = point.z - FARUtil::vehicle_height; 
+    const Eigen::Vector3i sub = world_obs_cloud_grid_->Pos2Sub(Eigen::Vector3d(point.x, point.y, h));
+    if (!world_obs_cloud_grid_->InRange(sub)) return false;
+    const int ind = world_obs_cloud_grid_->Sub2Ind(sub);
+    if (is_extend && extend_obs_indices_.find(ind) != extend_obs_indices_.end()) {
+        return true;
+    }
+    if (!is_extend && neighbor_obs_indices_.find(ind) != neighbor_obs_indices_.end()) {
+        return true;
     }
     return false;
 }
 
-inline bool GetConfidentSemanticColor(
-    const SemanticOcTreeNode& node,
-    const float min_probability,
-    ColorOcTreeNode::Color& color_out) {
-    if (!node.isSemanticsSet()) {
-        // A zero threshold explicitly restores the legacy RGB fallback.
-        if (min_probability <= 0.0f) {
-            color_out = node.getColor();
-            return true;
-        }
-        return false;
-    }
-    const octomap::SemanticsLogOdds semantics = node.getSemantics();
-    if (!SemanticConfidence::AcceptTop1(semantics, min_probability)) {
-        return false;
-    }
-    color_out = semantics.getSemanticColor();
-    return true;
-}
 
-// Three signed 21-bit grid coordinates. At 0.2 m resolution this remains
-// unique for roughly +/-209 km, far beyond the intended mapping workspace.
-inline uint64_t PersistentStaticKey(const PCLPoint& point,
-                                    const float resolution) {
-    const double inverse = 1.0 / std::max(1e-3f, resolution);
-    const int64_t ix = static_cast<int64_t>(std::floor(point.x * inverse));
-    const int64_t iy = static_cast<int64_t>(std::floor(point.y * inverse));
-    const int64_t iz = static_cast<int64_t>(std::floor(point.z * inverse));
-    constexpr uint64_t mask = (1ULL << 21) - 1ULL;
-    return ((static_cast<uint64_t>(ix) & mask) << 42) |
-           ((static_cast<uint64_t>(iy) & mask) << 21) |
-           (static_cast<uint64_t>(iz) & mask);
-}
-
-inline PCLPoint PersistentStaticCellCenter(const PCLPoint& point,
-                                           const float resolution) {
-    const float safe_resolution = std::max(1e-3f, resolution);
-    PCLPoint center = point;
-    center.x = (std::floor(point.x / safe_resolution) + 0.5f) * safe_resolution;
-    center.y = (std::floor(point.y / safe_resolution) + 0.5f) * safe_resolution;
-    center.z = (std::floor(point.z / safe_resolution) + 0.5f) * safe_resolution;
-    center.intensity = 0.0f;
-    return center;
-}
-
-struct QueryBox {
-    point3d min;
-    point3d max;
-};
-
-inline bool BoxIntersectsVoxel(const point3d& center,
-                               const double size,
-                               const QueryBox& box) {
-    const double half = size * 0.5;
-    return center.x() + half >= box.min.x() && center.x() - half <= box.max.x() &&
-           center.y() + half >= box.min.y() && center.y() - half <= box.max.y() &&
-           center.z() + half >= box.min.z() && center.z() - half <= box.max.z();
-}
-
-inline bool PointInsideBox(const point3d& point, const QueryBox& box) {
-    return point.x() >= box.min.x() && point.x() <= box.max.x() &&
-           point.y() >= box.min.y() && point.y() <= box.max.y() &&
-           point.z() >= box.min.z() && point.z() <= box.max.z();
-}
-
-inline bool PointInsideBox(const PCLPoint& point, const QueryBox& box) {
-    return point.x >= box.min.x() && point.x <= box.max.x() &&
-           point.y >= box.min.y() && point.y <= box.max.y() &&
-           point.z >= box.min.z() && point.z <= box.max.z();
-}
-
-void AppendExpandedVoxelCenters(const point3d& node_center,
-                                const double node_size,
-                                const double resolution,
-                                const QueryBox& box,
-                                const PointCloudPtr& cloud_out) {
-    if (!BoxIntersectsVoxel(node_center, node_size, box)) return;
-    if (node_size <= resolution + 1e-6) {
-        if (!PointInsideBox(node_center, box)) return;
-        PCLPoint point;
-        point.x = node_center.x();
-        point.y = node_center.y();
-        point.z = node_center.z();
-        point.intensity = 0.0f;
-        cloud_out->points.push_back(point);
-        return;
-    }
-
-    const double child_size = node_size * 0.5;
-    const double offset = child_size * 0.5;
-    for (int i = 0; i < 8; ++i) {
-        point3d child_center = node_center;
-        child_center.x() += (i & 1) ? offset : -offset;
-        child_center.y() += (i & 2) ? offset : -offset;
-        child_center.z() += (i & 4) ? offset : -offset;
-        AppendExpandedVoxelCenters(child_center, child_size, resolution,
-                                   box, cloud_out);
-    }
-}
-
-inline void FinalizeCloud(const PointCloudPtr& cloud) {
-    cloud->width = static_cast<uint32_t>(cloud->size());
-    cloud->height = 1;
-    cloud->is_dense = true;
-}
-
-inline void AppendCloud(const PointCloudPtr& source,
-                        const PointCloudPtr& destination) {
-    if (!source || !destination || source->empty()) return;
-    destination->points.insert(destination->points.end(),
-                               source->points.begin(), source->points.end());
-}
-
-template <typename TreeType, typename ColorGetter>
-void ExtractClassifiedCloudInBox(
-    const TreeType& tree,
-    const QueryBox& box,
-    const std::vector<SemanticClassGroup>& groups,
-    const ColorGetter& color_getter,
-    const PointCloudPtr& cloud_out) {
-    cloud_out->clear();
-    const double resolution = tree.getResolution();
-    for (auto it = tree.begin_leafs_bbx(box.min, box.max),
-              end = tree.end_leafs_bbx(); it != end; ++it) {
-        if (!tree.isNodeOccupied(*it)) continue;
-        ColorOcTreeNode::Color color;
-        if (!color_getter(it, color)) continue;
-        if (!MatchRgbKey(groups, MakeRgbKey(color.r, color.g, color.b))) continue;
-        AppendExpandedVoxelCenters(it.getCoordinate(), it.getSize(), resolution,
-                                   box, cloud_out);
-    }
-    FinalizeCloud(cloud_out);
-}
-
-template <typename TreeType>
-void BuildDenseVoxelMap(const TreeType& tree,
-                        const PointCloudPtr& cloud,
-                        std::unordered_map<uint64_t, PCLPoint>& voxel_map) {
-    voxel_map.clear();
-    for (const auto& point : cloud->points) {
-        octomap::OcTreeKey key;
-        if (!tree.coordToKeyChecked(point.x, point.y, point.z, key)) continue;
-        const uint64_t packed = (static_cast<uint64_t>(key[0]) << 32) |
-                                (static_cast<uint64_t>(key[1]) << 16) |
-                                static_cast<uint64_t>(key[2]);
-        voxel_map.emplace(packed, point);
-    }
-}
-
-void BuildPointVoxelMap(
-    const PointCloudPtr& cloud, const float resolution,
-    std::unordered_map<uint64_t, PCLPoint>& voxel_map) {
-    voxel_map.clear();
-    if (!cloud) return;
-    voxel_map.reserve(cloud->size());
-    for (const auto& point : cloud->points) {
-        voxel_map[PersistentStaticKey(point, resolution)] = point;
-    }
-}
-
-}  // namespace
-
-std::shared_ptr<octomap::OcTree> MapHandler::local_terrain_support_octree_;
-float MapHandler::terrain_search_radius_ = 0.8f;
-float MapHandler::terrain_neighbor_radius_ = 1.0f;
-
-MapHandler::MapHandler() {
-    // SemanticOcTree is a class template, so merely including its header does
-    // not guarantee that OctoMap's factory-registration static is emitted by
-    // the linker. Construct one process-lifetime probe before the first
-    // octomap_msgs::msgToMap(); its constructor calls ensureLinking().
-    static SemanticOctree semantic_registration_probe(0.1);
-    (void)semantic_registration_probe;
-}
-
-void MapHandler::Init(const MapHandlerParams& params) {
-    map_params_ = params;
-    semantic_params_ = params.semantic_params;
-    obstacle_groups_ = params.obstacle_groups;
-    terrain_support_groups_ = params.terrain_support_groups;
-    dynamic_obstacle_groups_ = params.dynamic_obstacle_groups;
-    if (semantic_params_.local_window_radius <= 0.0f) {
-        semantic_params_.local_window_radius = std::max(0.0f, map_params_.sensor_range);
-    }
-    if (!std::isfinite(semantic_params_.min_semantic_prob)) {
-        ROS_WARN("MH: semantic_min_probability is not finite; using 0.55.");
-        semantic_params_.min_semantic_prob = 0.55f;
-    } else if (semantic_params_.min_semantic_prob < 0.0f ||
-               semantic_params_.min_semantic_prob > 1.0f) {
-        const float configured = semantic_params_.min_semantic_prob;
-        semantic_params_.min_semantic_prob = std::max(
-            0.0f, std::min(1.0f, semantic_params_.min_semantic_prob));
-        ROS_WARN("MH: semantic_min_probability %.3f is outside [0, 1]; clamped to %.3f.",
-                 configured, semantic_params_.min_semantic_prob);
-    }
-    terrain_search_radius_ = semantic_params_.terrain_search_radius > 0.0f
-        ? semantic_params_.terrain_search_radius : 0.8f;
-    terrain_neighbor_radius_ = semantic_params_.terrain_neighbor_radius > 0.0f
-        ? semantic_params_.terrain_neighbor_radius : 1.0f;
-    semantic_obs_cloud_.reset(new pcl::PointCloud<PCLPoint>());
-    confirmed_global_static_cloud_.reset(new pcl::PointCloud<PCLPoint>());
-    persistent_static_obs_cloud_.reset(new pcl::PointCloud<PCLPoint>());
-    semantic_terrain_support_cloud_.reset(new pcl::PointCloud<PCLPoint>());
-    current_dynamic_obs_cloud_.reset(new pcl::PointCloud<PCLPoint>());
-    effective_dynamic_obs_cloud_.reset(new pcl::PointCloud<PCLPoint>());
-    collision_obs_cloud_.reset(new pcl::PointCloud<PCLPoint>());
-    dynamic_added_cloud_.reset(new pcl::PointCloud<PCLPoint>());
-    dynamic_removed_cloud_.reset(new pcl::PointCloud<PCLPoint>());
-    changed_obs_cloud_.reset(new pcl::PointCloud<PCLPoint>());
-    local_static_evidence_kdtree_.reset(
-        new pcl::KdTreeFLANN<PCLPoint>());
-    local_dynamic_evidence_kdtree_.reset(
-        new pcl::KdTreeFLANN<PCLPoint>());
-    local_terrain_evidence_kdtree_.reset(
-        new pcl::KdTreeFLANN<PCLPoint>());
-    local_static_evidence_kdtree_->setSortedResults(false);
-    local_dynamic_evidence_kdtree_->setSortedResults(false);
-    local_terrain_evidence_kdtree_->setSortedResults(false);
-    previous_local_obs_voxels_.clear();
-    previous_local_dynamic_voxels_.clear();
-    persistent_static_obs_voxels_.clear();
-    flat_terrain_cloud_.reset(new pcl::PointCloud<PCLPoint>());
-    if (!local_terrain_support_octree_) {
-        local_terrain_support_octree_.reset(new octomap::OcTree(FARUtil::kLeafSize));
-    } else {
-        local_terrain_support_octree_->clear();
-    }
-    if (!kdtree_terrain_clould_) {
-        kdtree_terrain_clould_.reset(new pcl::KdTreeFLANN<PCLPoint>());
-    }
-    FARUtil::ClearKdTree(flat_terrain_cloud_, kdtree_terrain_clould_);
-}
-
-void MapHandler::RefreshLocalTerrainSupportOctomap() {
-    if (!semantic_tree_snapshot_ || !is_init_) return;
-
-    const auto* semantic_tree =
-        dynamic_cast<const SemanticOctree*>(semantic_tree_snapshot_.get());
-    const auto* color_tree =
-        dynamic_cast<const octomap::ColorOcTree*>(semantic_tree_snapshot_.get());
-    if (!semantic_tree && !color_tree) {
-        if (local_terrain_support_octree_) local_terrain_support_octree_->clear();
-        if (semantic_obs_cloud_) semantic_obs_cloud_->clear();
-        // Do not erase persistent static collision memory merely because one
-        // message cannot be decoded. Only Reset or explicit-free evidence is
-        // authorised to remove it.
-        if (semantic_terrain_support_cloud_) semantic_terrain_support_cloud_->clear();
-        if (current_dynamic_obs_cloud_) current_dynamic_obs_cloud_->clear();
-        if (effective_dynamic_obs_cloud_) effective_dynamic_obs_cloud_->clear();
-        if (collision_obs_cloud_) collision_obs_cloud_->clear();
-        if (dynamic_added_cloud_) dynamic_added_cloud_->clear();
-        if (dynamic_removed_cloud_) dynamic_removed_cloud_->clear();
-        if (changed_obs_cloud_) changed_obs_cloud_->clear();
-        FARUtil::ClearKdTree(flat_terrain_cloud_, kdtree_terrain_clould_);
-        return;
-    }
-
-    const double source_resolution = semantic_tree_snapshot_->getResolution();
-    if (!local_terrain_support_octree_ || std::abs(local_terrain_support_octree_->getResolution() - source_resolution) > 1e-6) {
-        local_terrain_support_octree_.reset(new octomap::OcTree(source_resolution));
-    }
-    local_terrain_support_octree_->clear();
-
-    const float horizontal_half_extent = semantic_params_.local_window_radius;
-    const float vertical_half_extent = std::max(
-        std::max(FARUtil::kTolerZ, FARUtil::kCellHeight * 2.0f),
-        FARUtil::vehicle_height + static_cast<float>(source_resolution));
-    const QueryBox local_box{
-        point3d(robot_pos_cache_.x - horizontal_half_extent,
-                robot_pos_cache_.y - horizontal_half_extent,
-                robot_pos_cache_.z - vertical_half_extent),
-        point3d(robot_pos_cache_.x + horizontal_half_extent,
-                robot_pos_cache_.y + horizontal_half_extent,
-                robot_pos_cache_.z + vertical_half_extent)};
-
-    std::unordered_map<uint64_t, PCLPoint> current_obs_voxels;
-    std::unordered_map<uint64_t, PCLPoint> current_dynamic_voxels;
-
-    if (semantic_tree) {
-        const auto get_semantic_color = [this](
-            const SemanticOctree::leaf_bbx_iterator& it,
-            ColorOcTreeNode::Color& color) {
-            const SemanticOcTreeNode* node = it.operator->();
-            return GetConfidentSemanticColor(
-                *node, semantic_params_.min_semantic_prob, color);
-        };
-        ExtractClassifiedCloudInBox(*semantic_tree, local_box, obstacle_groups_,
-                                    get_semantic_color, semantic_obs_cloud_);
-        ExtractClassifiedCloudInBox(*semantic_tree, local_box,
-                                    dynamic_obstacle_groups_,
-                                    get_semantic_color,
-                                    current_dynamic_obs_cloud_);
-        ExtractClassifiedCloudInBox(*semantic_tree, local_box, terrain_support_groups_,
-                                    get_semantic_color, semantic_terrain_support_cloud_);
-        BuildDenseVoxelMap(*semantic_tree, semantic_obs_cloud_, current_obs_voxels);
-        BuildDenseVoxelMap(*semantic_tree, current_dynamic_obs_cloud_,
-                           current_dynamic_voxels);
-    } else {
-        const auto get_color = [](
-            const octomap::ColorOcTree::leaf_bbx_iterator& it,
-            ColorOcTreeNode::Color& color) {
-            color = it->getColor();
-            return true;
-        };
-        ExtractClassifiedCloudInBox(*color_tree, local_box, obstacle_groups_,
-                                    get_color, semantic_obs_cloud_);
-        ExtractClassifiedCloudInBox(*color_tree, local_box,
-                                    dynamic_obstacle_groups_, get_color,
-                                    current_dynamic_obs_cloud_);
-        ExtractClassifiedCloudInBox(*color_tree, local_box, terrain_support_groups_,
-                                    get_color, semantic_terrain_support_cloud_);
-        BuildDenseVoxelMap(*color_tree, semantic_obs_cloud_, current_obs_voxels);
-        BuildDenseVoxelMap(*color_tree, current_dynamic_obs_cloud_,
-                           current_dynamic_voxels);
-    }
-
-    // Navigation-corner matching may simplify, merge or retire a vertex, but
-    // it must never delete the physical wall used by later visibility checks.
-    // Maintain that static collision authority once per accepted semantic
-    // snapshot, independently of the Graph topology.
-    this->UpdatePersistentStaticObstacleLayer(
-        semantic_obs_cloud_, static_cast<float>(source_resolution));
-
-    dynamic_added_cloud_->clear();
-    dynamic_removed_cloud_->clear();
-    for (const auto& entry : current_dynamic_voxels) {
-        if (previous_local_dynamic_voxels_.count(entry.first) == 0) {
-            dynamic_added_cloud_->points.push_back(entry.second);
-        }
-    }
-    // The map builder owns dynamic-object tracking. FAR treats the newest
-    // robot-local semantic snapshot as the sole source of truth: a dynamic
-    // voxel that disappeared, was reclassified, became unknown/free, or left
-    // the moving query window is removed in this same update. Every
-    // previous-minus-current point must be emitted so the changed-point
-    // KD-tree invalidates its old contour and Graph connections, including
-    // points that have just crossed the local-window boundary.
-    for (const auto& entry : previous_local_dynamic_voxels_) {
-        if (current_dynamic_voxels.count(entry.first) == 0) {
-            dynamic_removed_cloud_->points.push_back(entry.second);
-        }
-    }
-    FinalizeCloud(dynamic_added_cloud_);
-    FinalizeCloud(dynamic_removed_cloud_);
-
-    // FAR adds no downstream persistence or clearance timer.
-    *effective_dynamic_obs_cloud_ = *current_dynamic_obs_cloud_;
-
-    collision_obs_cloud_->clear();
-    AppendCloud(semantic_obs_cloud_, collision_obs_cloud_);
-    AppendCloud(effective_dynamic_obs_cloud_, collision_obs_cloud_);
-    FinalizeCloud(collision_obs_cloud_);
-
-    changed_obs_cloud_->clear();
-    for (const auto& entry : current_obs_voxels) {
-        if (previous_local_obs_voxels_.count(entry.first) == 0) {
-            changed_obs_cloud_->points.push_back(entry.second);
-        }
-    }
-    for (const auto& entry : previous_local_obs_voxels_) {
-        if (current_obs_voxels.count(entry.first) == 0) {
-            changed_obs_cloud_->points.push_back(entry.second);
-        }
-    }
-    AppendCloud(dynamic_added_cloud_, changed_obs_cloud_);
-    AppendCloud(dynamic_removed_cloud_, changed_obs_cloud_);
-    FinalizeCloud(changed_obs_cloud_);
-    previous_local_obs_voxels_.swap(current_obs_voxels);
-    previous_local_dynamic_voxels_.swap(current_dynamic_voxels);
-
-    for (const auto& point : semantic_terrain_support_cloud_->points) {
-        local_terrain_support_octree_->updateNode(
-            point3d(point.x, point.y, point.z), true);
-    }
-
-    local_terrain_support_octree_->prune();
-    if (local_terrain_support_octree_->size() == 0) {
-        FARUtil::ClearKdTree(flat_terrain_cloud_, kdtree_terrain_clould_);
-        return;
-    }
-
-    this->AssignFlatTerrainCloud(semantic_terrain_support_cloud_, flat_terrain_cloud_);
-    kdtree_terrain_clould_->setInputCloud(flat_terrain_cloud_);
-}
-
-void MapHandler::RefreshConfirmedGlobalStaticOctomap() {
-    if (!semantic_tree_snapshot_ || !is_init_) return;
-
-    const auto* semantic_tree =
-        dynamic_cast<const SemanticOctree*>(semantic_tree_snapshot_.get());
-    const auto* color_tree =
-        dynamic_cast<const octomap::ColorOcTree*>(semantic_tree_snapshot_.get());
-    if (!semantic_tree && !color_tree) {
-        if (confirmed_global_static_cloud_) {
-            confirmed_global_static_cloud_->clear();
-        }
-        return;
-    }
-
-    const double source_resolution = semantic_tree_snapshot_->getResolution();
-    const float horizontal_half_extent = semantic_params_.local_window_radius;
-    const float vertical_half_extent = std::max(
-        std::max(FARUtil::kTolerZ, FARUtil::kCellHeight * 2.0f),
-        FARUtil::vehicle_height + static_cast<float>(source_resolution));
-    const QueryBox local_box{
-        point3d(robot_pos_cache_.x - horizontal_half_extent,
-                robot_pos_cache_.y - horizontal_half_extent,
-                robot_pos_cache_.z - vertical_half_extent),
-        point3d(robot_pos_cache_.x + horizontal_half_extent,
-                robot_pos_cache_.y + horizontal_half_extent,
-                robot_pos_cache_.z + vertical_half_extent)};
-
-    if (semantic_tree) {
-        const auto get_semantic_color = [this](
-            const SemanticOctree::leaf_bbx_iterator& it,
-            ColorOcTreeNode::Color& color) {
-            const SemanticOcTreeNode* node = it.operator->();
-            return GetConfidentSemanticColor(
-                *node, semantic_params_.min_semantic_prob, color);
-        };
-        ExtractClassifiedCloudInBox(
-            *semantic_tree, local_box, obstacle_groups_, get_semantic_color,
-            confirmed_global_static_cloud_);
-    } else {
-        const auto get_color = [](
-            const octomap::ColorOcTree::leaf_bbx_iterator& it,
-            ColorOcTreeNode::Color& color) {
-            color = it->getColor();
-            return true;
-        };
-        ExtractClassifiedCloudInBox(
-            *color_tree, local_box, obstacle_groups_, get_color,
-            confirmed_global_static_cloud_);
-    }
-
-    // This legacy SemanticOcTree path may extend persistent static collision
-    // memory. Local-only voxel mode never calls it and never copies current
-    // local geometry into this cache.
-    this->UpdatePersistentStaticObstacleLayer(
-        confirmed_global_static_cloud_,
-        static_cast<float>(source_resolution));
-}
-
-void MapHandler::SetLocalVoxelSnapshot(
-    const PointCloudPtr& static_obstacles,
-    const PointCloudPtr& transient_obstacles,
-    const PointCloudPtr& terrain_support) {
-    if (!semantic_params_.use_local_voxel_map) return;
-
-    *semantic_obs_cloud_ = static_obstacles
-        ? *static_obstacles : PointCloud();
-    *current_dynamic_obs_cloud_ = transient_obstacles
-        ? *transient_obstacles : PointCloud();
-    *effective_dynamic_obs_cloud_ = *current_dynamic_obs_cloud_;
-    *semantic_terrain_support_cloud_ = terrain_support
-        ? *terrain_support : PointCloud();
-    FinalizeCloud(semantic_obs_cloud_);
-    FinalizeCloud(current_dynamic_obs_cloud_);
-    FinalizeCloud(effective_dynamic_obs_cloud_);
-    FinalizeCloud(semantic_terrain_support_cloud_);
-    const auto rebuild_evidence_tree = [](
-        const PointCloudPtr& cloud, PointKdTreePtr& tree) {
-        tree.reset(new pcl::KdTreeFLANN<PCLPoint>());
-        tree->setSortedResults(false);
-        if (cloud && !cloud->empty()) tree->setInputCloud(cloud);
-    };
-    rebuild_evidence_tree(semantic_obs_cloud_,
-                          local_static_evidence_kdtree_);
-    rebuild_evidence_tree(effective_dynamic_obs_cloud_,
-                          local_dynamic_evidence_kdtree_);
-    rebuild_evidence_tree(semantic_terrain_support_cloud_,
-                          local_terrain_evidence_kdtree_);
-
-    const float resolution = std::max(
-        1e-3f, semantic_params_.local_voxel_resolution);
-    std::unordered_map<uint64_t, PCLPoint> current_static_voxels;
-    std::unordered_map<uint64_t, PCLPoint> current_transient_voxels;
-    BuildPointVoxelMap(semantic_obs_cloud_, resolution,
-                       current_static_voxels);
-    BuildPointVoxelMap(effective_dynamic_obs_cloud_, resolution,
-                       current_transient_voxels);
-
-    dynamic_added_cloud_->clear();
-    dynamic_removed_cloud_->clear();
-    for (const auto& entry : current_transient_voxels) {
-        if (previous_local_dynamic_voxels_.count(entry.first) == 0) {
-            dynamic_added_cloud_->points.push_back(entry.second);
-        }
-    }
-    for (const auto& entry : previous_local_dynamic_voxels_) {
-        if (current_transient_voxels.count(entry.first) == 0) {
-            dynamic_removed_cloud_->points.push_back(entry.second);
-        }
-    }
-    FinalizeCloud(dynamic_added_cloud_);
-    FinalizeCloud(dynamic_removed_cloud_);
-
-    changed_obs_cloud_->clear();
-    for (const auto& entry : current_static_voxels) {
-        if (previous_local_obs_voxels_.count(entry.first) == 0) {
-            changed_obs_cloud_->points.push_back(entry.second);
-        }
-    }
-    for (const auto& entry : previous_local_obs_voxels_) {
-        if (current_static_voxels.count(entry.first) == 0) {
-            changed_obs_cloud_->points.push_back(entry.second);
-        }
-    }
-    AppendCloud(dynamic_added_cloud_, changed_obs_cloud_);
-    AppendCloud(dynamic_removed_cloud_, changed_obs_cloud_);
-    FinalizeCloud(changed_obs_cloud_);
-    previous_local_obs_voxels_.swap(current_static_voxels);
-    previous_local_dynamic_voxels_.swap(current_transient_voxels);
-
-    collision_obs_cloud_->clear();
-    AppendCloud(semantic_obs_cloud_, collision_obs_cloud_);
-    AppendCloud(effective_dynamic_obs_cloud_, collision_obs_cloud_);
-    FinalizeCloud(collision_obs_cloud_);
-
-    if (!local_terrain_support_octree_ ||
-        std::abs(local_terrain_support_octree_->getResolution() - resolution) >
-            1e-6) {
-        local_terrain_support_octree_.reset(new octomap::OcTree(resolution));
-    }
-    local_terrain_support_octree_->clear();
-    for (const auto& point : semantic_terrain_support_cloud_->points) {
-        local_terrain_support_octree_->updateNode(
-            point3d(point.x, point.y, point.z), true);
-    }
-    local_terrain_support_octree_->prune();
-    if (semantic_terrain_support_cloud_->empty()) {
-        FARUtil::ClearKdTree(flat_terrain_cloud_, kdtree_terrain_clould_);
-    } else {
-        this->AssignFlatTerrainCloud(
-            semantic_terrain_support_cloud_, flat_terrain_cloud_);
-        kdtree_terrain_clould_->setInputCloud(flat_terrain_cloud_);
-    }
-}
-
-
-bool MapHandler::SetSemanticOctomap(const octomap_msgs::OctomapConstPtr& msg) {
-    if (!msg) return false;
-
-    std::unique_ptr<octomap::AbstractOcTree> tree(octomap_msgs::msgToMap(*msg));
-    if (!tree) {
-        ROS_WARN_THROTTLE(1.0, "MH: failed to deserialize semantic octomap message.");
-        return false;
-    }
-
-    if (!dynamic_cast<SemanticOctree*>(tree.get()) &&
-        !dynamic_cast<octomap::ColorOcTree*>(tree.get())) {
-        ROS_WARN_THROTTLE(1.0, "MH: octomap type has no supported semantic colors.");
-        return false;
-    }
-    if (!msg->header.frame_id.empty() && !FARUtil::worldFrameId.empty() &&
-        !FARUtil::IsSameFrameID(msg->header.frame_id, FARUtil::worldFrameId)) {
-        ROS_ERROR_THROTTLE(1.0,
-            "MH: semantic octomap frame does not match the planner world frame.");
-        return false;
-    }
-
-    const double previous_resolution = semantic_tree_snapshot_
-        ? semantic_tree_snapshot_->getResolution() : tree->getResolution();
-    if (std::fabs(previous_resolution - tree->getResolution()) > 1e-6) {
-        previous_local_obs_voxels_.clear();
-        previous_local_dynamic_voxels_.clear();
-    }
-
-    semantic_tree_snapshot_ = std::move(tree);
-    semantic_stamp_ = msg->header.stamp;
-    semantic_frame_id_ = msg->header.frame_id;
-    has_semantic_map_ = true;
-    if (is_init_) {
-        if (semantic_params_.use_local_voxel_map) {
-            this->RefreshConfirmedGlobalStaticOctomap();
-        } else {
-            this->RefreshLocalTerrainSupportOctomap();
-        }
-    }
-    return true;
-}
-
-void MapHandler::ResetGripMapCloud() {
-    semantic_tree_snapshot_.reset();
-    semantic_stamp_ = ros::Time();
-    semantic_frame_id_.clear();
-    if (semantic_obs_cloud_) semantic_obs_cloud_->clear();
-    if (confirmed_global_static_cloud_) confirmed_global_static_cloud_->clear();
-    if (persistent_static_obs_cloud_) persistent_static_obs_cloud_->clear();
-    if (semantic_terrain_support_cloud_) semantic_terrain_support_cloud_->clear();
-    if (current_dynamic_obs_cloud_) current_dynamic_obs_cloud_->clear();
-    if (effective_dynamic_obs_cloud_) effective_dynamic_obs_cloud_->clear();
-    if (collision_obs_cloud_) collision_obs_cloud_->clear();
-    if (dynamic_added_cloud_) dynamic_added_cloud_->clear();
-    if (dynamic_removed_cloud_) dynamic_removed_cloud_->clear();
-    if (changed_obs_cloud_) changed_obs_cloud_->clear();
-    local_static_evidence_kdtree_.reset(
-        new pcl::KdTreeFLANN<PCLPoint>());
-    local_dynamic_evidence_kdtree_.reset(
-        new pcl::KdTreeFLANN<PCLPoint>());
-    local_terrain_evidence_kdtree_.reset(
-        new pcl::KdTreeFLANN<PCLPoint>());
-    local_static_evidence_kdtree_->setSortedResults(false);
-    local_dynamic_evidence_kdtree_->setSortedResults(false);
-    local_terrain_evidence_kdtree_->setSortedResults(false);
-    previous_local_obs_voxels_.clear();
-    previous_local_dynamic_voxels_.clear();
-    persistent_static_obs_voxels_.clear();
-    if (!flat_terrain_cloud_) {
-        flat_terrain_cloud_.reset(new pcl::PointCloud<PCLPoint>());
-    } else {
-        flat_terrain_cloud_->clear();
-    }
-    if (local_terrain_support_octree_) local_terrain_support_octree_->clear();
-    has_semantic_map_ = false;
-    if (kdtree_terrain_clould_) {
-        FARUtil::ClearKdTree(flat_terrain_cloud_, kdtree_terrain_clould_);
-    }
-}
-
-// semantic-only 兼容接口：射线清障已由上游八叉树占用概率更新负责。
-void MapHandler::ClearObsCellThroughPosition(const Point3D& point) {
-    (void)point;
-}
-
-void MapHandler::GetCloudOfPoint(const Point3D& center, const PointCloudPtr& cloudOut, const CloudType& type, const bool& is_large)
-{
-    if (!cloudOut) return;
-    cloudOut->clear();
-    if (type != CloudType::OBS_CLOUD && type != CloudType::FREE_CLOUD) {
-        if (FARUtil::IsDebug) ROS_ERROR("MH: Assigned cloud type invalid.");
-        return;
-    }
-
-    const float horizontal_half_extent = is_large
-        ? semantic_params_.local_window_radius
-        : semantic_params_.local_window_radius * 0.5f;
-    if (horizontal_half_extent <= 0.0f) return;
-    if (semantic_params_.use_local_voxel_map) {
-        const PointCloudPtr& source = type == CloudType::OBS_CLOUD
-            ? collision_obs_cloud_ : semantic_terrain_support_cloud_;
-        if (!source) return;
-        const float vertical_half_extent = std::max(
-            std::max(FARUtil::kTolerZ, FARUtil::kCellHeight * 2.0f),
-            FARUtil::vehicle_height +
-                semantic_params_.local_voxel_resolution);
-        for (const auto& point : source->points) {
-            if (std::abs(point.x - center.x) <= horizontal_half_extent &&
-                std::abs(point.y - center.y) <= horizontal_half_extent &&
-                std::abs(point.z - center.z) <= vertical_half_extent) {
-                cloudOut->points.push_back(point);
-            }
-        }
-        FinalizeCloud(cloudOut);
-        return;
-    }
-
-    if (!has_semantic_map_ || !semantic_tree_snapshot_) return;
-    const float vertical_half_extent = std::max(
-        std::max(FARUtil::kTolerZ, FARUtil::kCellHeight * 2.0f),
-        FARUtil::vehicle_height +
-            static_cast<float>(semantic_tree_snapshot_->getResolution()));
-    const QueryBox query_box{
-        point3d(center.x - horizontal_half_extent,
-                center.y - horizontal_half_extent,
-                center.z - vertical_half_extent),
-        point3d(center.x + horizontal_half_extent,
-                center.y + horizontal_half_extent,
-                center.z + vertical_half_extent)};
-
-    const auto* semantic_tree =
-        dynamic_cast<const SemanticOctree*>(semantic_tree_snapshot_.get());
-    const auto* color_tree =
-        dynamic_cast<const octomap::ColorOcTree*>(semantic_tree_snapshot_.get());
-    if (!semantic_tree && !color_tree) return;
-
-    const auto& groups = type == CloudType::OBS_CLOUD
-        ? obstacle_groups_ : terrain_support_groups_;
-    if (semantic_tree) {
-        const auto get_semantic_color = [this](
-            const SemanticOctree::leaf_bbx_iterator& it,
-            ColorOcTreeNode::Color& color) {
-            const SemanticOcTreeNode* node = it.operator->();
-            return GetConfidentSemanticColor(
-                *node, semantic_params_.min_semantic_prob, color);
-        };
-        ExtractClassifiedCloudInBox(*semantic_tree, query_box, groups,
-                                    get_semantic_color, cloudOut);
-    } else {
-        const auto get_color = [](
-            const octomap::ColorOcTree::leaf_bbx_iterator& it,
-            ColorOcTreeNode::Color& color) {
-            color = it->getColor();
-            return true;
-        };
-        ExtractClassifiedCloudInBox(*color_tree, query_box, groups,
-                                    get_color, cloudOut);
-    }
-}
-
-// 设置随机器人移动的局部语义查询中心。
-void MapHandler::SetMapOrigin(const Point3D& ori_robot_pos) {
-    robot_pos_cache_ = ori_robot_pos;
-    is_init_ = true;
-}
-// 移动局部查询窗并从已验证快照重建障碍/地面派生缓存。
-void MapHandler::UpdateRobotPosition(const Point3D& odom_pos) {
-    if (!is_init_) this->SetMapOrigin(odom_pos);
-    robot_pos_cache_ = odom_pos;
-    if (has_semantic_map_) {
-        if (semantic_params_.use_local_voxel_map) {
-            this->RefreshConfirmedGlobalStaticOctomap();
-        } else {
-            this->RefreshLocalTerrainSupportOctomap();
-        }
-    }
-}
-
-void MapHandler::GetSurroundObsCloud(const PointCloudPtr& obsCloudOut) {
-    if (!obsCloudOut) return;
-    // FAR's original incremental graph update is driven by the obstacle
-    // contours in this cloud.  Feed it the effective collision view so a
-    // currently observed dynamic obstacle creates local contour vertices and
-    // invalidates intersecting connections.  Dynamic additions/removals are
-    // also emitted through changed_obs_cloud_, so old contour vertices are
-    // re-evaluated in the same update when the latest snapshot clears them or
-    // they leave the moving local window.
-    if (!collision_obs_cloud_) {
-        obsCloudOut->clear();
-        return;
-    }
-    *obsCloudOut = *collision_obs_cloud_;
-}
-
-void MapHandler::GetCurrentStaticObsCloud(
-    const PointCloudPtr& obsCloudOut) const {
-    if (!obsCloudOut) return;
-    if (!semantic_obs_cloud_) {
-        obsCloudOut->clear();
-        return;
-    }
-    *obsCloudOut = *semantic_obs_cloud_;
-}
-
-void MapHandler::GetPersistentStaticObsCloud(
-    const PointCloudPtr& obsCloudOut) const {
-    if (!obsCloudOut) return;
-    if (!persistent_static_obs_cloud_) {
-        obsCloudOut->clear();
-        return;
-    }
-    *obsCloudOut = *persistent_static_obs_cloud_;
-}
-
-StaticNodeEvidence MapHandler::QueryStaticTreeEvidence(
-    const Point3D& point) const {
-    if (!semantic_tree_snapshot_) return StaticNodeEvidence::UNKNOWN;
-    const auto* semantic_tree =
-        dynamic_cast<const SemanticOctree*>(semantic_tree_snapshot_.get());
-    const auto* color_tree = dynamic_cast<const octomap::ColorOcTree*>(
-        semantic_tree_snapshot_.get());
-    if (!semantic_tree && !color_tree) return StaticNodeEvidence::UNKNOWN;
-
-    const float resolution = static_cast<float>(
-        semantic_tree_snapshot_->getResolution());
-    int known_free_samples = 0;
-    const float z_samples[] = {
-        point.z,
-        point.z - FARUtil::vehicle_height * 0.5f,
-        point.z + resolution * 0.5f};
-    for (const float z : z_samples) {
-        const point3d query(point.x, point.y, z);
-        if (semantic_tree) {
-            const SemanticOcTreeNode* node = semantic_tree->search(query);
-            if (!node) continue;
-            if (!semantic_tree->isNodeOccupied(node)) {
-                ++known_free_samples;
-                continue;
-            }
-            ColorOcTreeNode::Color color;
-            if (!GetConfidentSemanticColor(
-                    *node, semantic_params_.min_semantic_prob, color)) {
-                // An occupied voxel with missing or weak semantics is unknown,
-                // never explicit-free evidence for deleting remembered walls.
-                return StaticNodeEvidence::UNKNOWN;
-            }
-            const uint32_t rgb = MakeRgbKey(color.r, color.g, color.b);
-            if (MatchRgbKey(obstacle_groups_, rgb)) {
-                return StaticNodeEvidence::STATIC_OCCUPIED;
-            }
-            if (MatchRgbKey(dynamic_obstacle_groups_, rgb)) {
-                return StaticNodeEvidence::UNKNOWN;
-            }
-            // local_grid stores traversable semantic cells as occupied
-            // endpoints because they are terrain observations, not sensor-ray
-            // free voxels.  For the lifetime of an old *obstacle* cell this is
-            // nevertheless authoritative explicit-free evidence.
-            if (MatchRgbKey(terrain_support_groups_, rgb)) {
-                return StaticNodeEvidence::EXPLICIT_FREE;
-            }
-        } else {
-            const octomap::ColorOcTreeNode* node = color_tree->search(query);
-            if (!node) continue;
-            if (!color_tree->isNodeOccupied(node)) {
-                ++known_free_samples;
-                continue;
-            }
-            const auto color = node->getColor();
-            const uint32_t rgb = MakeRgbKey(color.r, color.g, color.b);
-            if (MatchRgbKey(obstacle_groups_, rgb)) {
-                return StaticNodeEvidence::STATIC_OCCUPIED;
-            }
-            if (MatchRgbKey(dynamic_obstacle_groups_, rgb)) {
-                return StaticNodeEvidence::UNKNOWN;
-            }
-            if (MatchRgbKey(terrain_support_groups_, rgb)) {
-                return StaticNodeEvidence::EXPLICIT_FREE;
-            }
-        }
-    }
-    return known_free_samples >= 2
-        ? StaticNodeEvidence::EXPLICIT_FREE
-        : StaticNodeEvidence::UNKNOWN;
-}
-
-void MapHandler::UpdatePersistentStaticObstacleLayer(
-    const PointCloudPtr& current_static, const float source_resolution) {
-    if (!persistent_static_obs_cloud_) {
-        persistent_static_obs_cloud_.reset(new pcl::PointCloud<PCLPoint>());
-    }
-    const float resolution = std::max(1e-3f, FARUtil::kLeafSize);
-    const int samples_per_axis = std::max(
-        1, static_cast<int>(std::ceil(
-               std::max(resolution, source_resolution) / resolution)));
-    const float sample_span = samples_per_axis * resolution;
-    std::unordered_set<uint64_t> current_keys;
-    if (current_static) {
-        current_keys.reserve(current_static->size() * samples_per_axis *
-                             samples_per_axis * samples_per_axis);
-        for (const auto& point : current_static->points) {
-            const float first_x = point.x - sample_span * 0.5f +
-                                  resolution * 0.5f;
-            const float first_y = point.y - sample_span * 0.5f +
-                                  resolution * 0.5f;
-            const float first_z = point.z - sample_span * 0.5f +
-                                  resolution * 0.5f;
-            for (int ix = 0; ix < samples_per_axis; ++ix) {
-                for (int iy = 0; iy < samples_per_axis; ++iy) {
-                    for (int iz = 0; iz < samples_per_axis; ++iz) {
-                        PCLPoint sample = point;
-                        sample.x = first_x + ix * resolution;
-                        sample.y = first_y + iy * resolution;
-                        sample.z = first_z + iz * resolution;
-                        const uint64_t key =
-                            PersistentStaticKey(sample, resolution);
-                        current_keys.insert(key);
-                        persistent_static_obs_voxels_[key] =
-                            PersistentStaticCellCenter(sample, resolution);
-                    }
-                }
-            }
-        }
-    }
-
-    std::size_t explicit_free_removed = 0;
-    for (auto it = persistent_static_obs_voxels_.begin();
-         it != persistent_static_obs_voxels_.end();) {
-        const PCLPoint& point = it->second;
-        const bool in_current_square =
-            std::abs(point.x - robot_pos_cache_.x) <=
-                semantic_params_.local_window_radius &&
-            std::abs(point.y - robot_pos_cache_.y) <=
-                semantic_params_.local_window_radius;
-        if (in_current_square && current_keys.count(it->first) == 0) {
-            const Point3D query(point.x, point.y, point.z);
-            if (QueryStaticTreeEvidence(query) ==
-                StaticNodeEvidence::EXPLICIT_FREE) {
-                it = persistent_static_obs_voxels_.erase(it);
-                ++explicit_free_removed;
-                continue;
-            }
-        }
-        ++it;
-    }
-
-    persistent_static_obs_cloud_->clear();
-    persistent_static_obs_cloud_->reserve(
-        persistent_static_obs_voxels_.size());
-    for (const auto& entry : persistent_static_obs_voxels_) {
-        persistent_static_obs_cloud_->points.push_back(entry.second);
-    }
-    FinalizeCloud(persistent_static_obs_cloud_);
-    ROS_INFO_THROTTLE(
-        5.0,
-        "MH persistent static collision layer: cells=%zu current=%zu explicit_free_removed=%zu resolution=%.2fm",
-        persistent_static_obs_voxels_.size(), current_keys.size(),
-        explicit_free_removed, resolution);
-}
-
-StaticNodeEvidence MapHandler::QueryStaticNodeEvidence(
-    const Point3D& point) const {
-    if (semantic_params_.use_local_voxel_map) {
-        if (!is_init_) return StaticNodeEvidence::UNKNOWN;
-
-        const float resolution = std::max(
-            1e-3f, semantic_params_.local_voxel_resolution);
-        const float horizontal_radius = std::max(
-            resolution * 1.5f, FARUtil::kLeafSize);
-        const float obstacle_vertical_radius =
-            FARUtil::vehicle_height + resolution;
-        const auto has_obstacle_near = [horizontal_radius,
-                                        obstacle_vertical_radius,
-                                        &point](const PointCloudPtr& cloud,
-                                                const PointKdTreePtr& tree) {
-            if (!cloud || cloud->empty() || !tree ||
-                !tree->getInputCloud()) {
-                return false;
-            }
-            PCLPoint query;
-            query.x = point.x;
-            query.y = point.y;
-            query.z = point.z;
-            query.intensity = 0.0f;
-            std::vector<int> indices;
-            std::vector<float> square_distances;
-            const float search_radius = std::hypot(
-                horizontal_radius, obstacle_vertical_radius);
-            if (tree->radiusSearch(query, search_radius, indices,
-                                   square_distances) <= 0) {
-                return false;
-            }
-            for (const int index : indices) {
-                if (index < 0 ||
-                    static_cast<std::size_t>(index) >= cloud->size()) {
-                    continue;
-                }
-                const PCLPoint& sample = cloud->points[index];
-                if (std::hypot(sample.x - point.x,
-                               sample.y - point.y) <= horizontal_radius &&
-                    std::abs(sample.z - point.z) <=
-                        obstacle_vertical_radius) {
-                    return true;
-                }
-            }
-            return false;
-        };
-
-        if (has_obstacle_near(semantic_obs_cloud_,
-                              local_static_evidence_kdtree_)) {
-            return StaticNodeEvidence::STATIC_OCCUPIED;
-        }
-        // An explicitly dynamic object may currently cover the old contour.
-        // It blocks traversal, but cannot prove that the static structure
-        // underneath disappeared.
-        if (has_obstacle_near(effective_dynamic_obs_cloud_,
-                              local_dynamic_evidence_kdtree_)) {
-            return StaticNodeEvidence::UNKNOWN;
-        }
-
-        // The local voxel stream has no explicit empty-voxel layer. Ground at
-        // the old contour's XY location is therefore the positive observation
-        // that the location was seen.  Compare height as well so ground on a
-        // different floor cannot clear a historical node.
-        const float expected_ground_height =
-            point.z - FARUtil::vehicle_height;
-        const float terrain_vertical_radius = std::max(
-            resolution * 2.0f, FARUtil::kCellHeight * 0.5f);
-        if (semantic_terrain_support_cloud_ &&
-            !semantic_terrain_support_cloud_->empty() &&
-            local_terrain_evidence_kdtree_ &&
-            local_terrain_evidence_kdtree_->getInputCloud()) {
-            PCLPoint query;
-            query.x = point.x;
-            query.y = point.y;
-            query.z = expected_ground_height;
-            query.intensity = 0.0f;
-            std::vector<int> indices;
-            std::vector<float> square_distances;
-            const float search_radius = std::hypot(
-                horizontal_radius, terrain_vertical_radius);
-            local_terrain_evidence_kdtree_->radiusSearch(
-                query, search_radius, indices, square_distances);
-            for (const int index : indices) {
-                if (index < 0 || static_cast<std::size_t>(index) >=
-                                     semantic_terrain_support_cloud_->size()) {
-                    continue;
-                }
-                const PCLPoint& sample =
-                    semantic_terrain_support_cloud_->points[index];
-                if (std::hypot(sample.x - point.x,
-                               sample.y - point.y) <= horizontal_radius &&
-                    std::abs(sample.z - expected_ground_height) <=
-                        terrain_vertical_radius) {
-                    return StaticNodeEvidence::EXPLICIT_FREE;
-                }
-            }
-        }
-        return StaticNodeEvidence::UNKNOWN;
-    }
-
-    if (!has_semantic_map_ || !semantic_tree_snapshot_ || !is_init_) {
-        return StaticNodeEvidence::UNKNOWN;
-    }
-    const float dx = point.x - robot_pos_cache_.x;
-    const float dy = point.y - robot_pos_cache_.y;
-    // SetSemanticOctomap extracts an axis-aligned square BBX. Evidence must
-    // use the same footprint; a radial test incorrectly labelled the square's
-    // visible corner regions as UNKNOWN.
-    if (std::abs(dx) > semantic_params_.local_window_radius ||
-        std::abs(dy) > semantic_params_.local_window_radius) {
-        return StaticNodeEvidence::UNKNOWN;
-    }
-
-    const float resolution = static_cast<float>(
-        semantic_tree_snapshot_->getResolution());
-    const float horizontal_radius = std::max(
-        resolution * 1.25f, FARUtil::kLeafSize);
-    const float vertical_radius = FARUtil::vehicle_height + resolution;
-    const PointCloudPtr& evidence_cloud = semantic_obs_cloud_;
-    if (evidence_cloud) {
-        for (const auto& sample : evidence_cloud->points) {
-            if (std::hypot(sample.x - point.x, sample.y - point.y) <=
-                    horizontal_radius &&
-                std::abs(sample.z - point.z) <= vertical_radius) {
-                return StaticNodeEvidence::STATIC_OCCUPIED;
-            }
-        }
-    }
-
-    return QueryStaticTreeEvidence(point);
-}
-
-void MapHandler::GetCollisionObsCloud(const PointCloudPtr& obsCloudOut) const {
-    if (!obsCloudOut) return;
-    if (!collision_obs_cloud_) {
-        obsCloudOut->clear();
-        return;
-    }
-    *obsCloudOut = *collision_obs_cloud_;
-}
-
-void MapHandler::GetCurrentDynamicObsCloud(const PointCloudPtr& obsCloudOut) const {
-    if (!obsCloudOut) return;
-    if (!current_dynamic_obs_cloud_) {
-        obsCloudOut->clear();
-        return;
-    }
-    *obsCloudOut = *current_dynamic_obs_cloud_;
-}
-
-void MapHandler::GetEffectiveDynamicObsCloud(const PointCloudPtr& obsCloudOut) const {
-    if (!obsCloudOut) return;
-    if (!effective_dynamic_obs_cloud_) {
-        obsCloudOut->clear();
-        return;
-    }
-    *obsCloudOut = *effective_dynamic_obs_cloud_;
-}
-
-void MapHandler::BuildLocalPlannerObstacleCloud(
-    const PointCloudPtr& source, const PointCloudPtr& cloudOut) const {
-    if (!cloudOut) return;
-    cloudOut->clear();
-    if (!source || source->empty() || !is_init_ ||
-        (!semantic_params_.use_local_voxel_map && !semantic_tree_snapshot_)) {
-        FinalizeCloud(cloudOut);
-        return;
-    }
-
-    const float radius = semantic_params_.local_planner_radius;
-    const float output_resolution = semantic_params_.local_planner_resolution;
-    if (radius <= 0.0f || output_resolution <= 0.0f) {
-        FinalizeCloud(cloudOut);
-        return;
-    }
-
-    bool terrain_associated = false;
-    const float ground_height = NearestTerrainHeightofNavPoint(
-        robot_pos_cache_, terrain_associated);
-    const float source_resolution = semantic_params_.use_local_voxel_map
-        ? std::max(1e-3f, semantic_params_.local_voxel_resolution)
-        : static_cast<float>(semantic_tree_snapshot_->getResolution());
-    const float source_half = source_resolution * 0.5f;
-    // Keep any occupied voxel whose vertical interval intersects the robot's
-    // swept body band. The terrain-analysis local planner then performs its
-    // collision lookup in XY, so repeated wall levels are deliberately
-    // collapsed below.
-    const float body_min_z = ground_height - source_half;
-    const float body_max_z = ground_height + FARUtil::vehicle_height + source_half;
-    const float radius_with_voxel = radius + source_half;
-    const int samples_per_axis = std::max(
-        1, static_cast<int>(std::ceil(source_resolution / output_resolution)));
-    const float sample_span = samples_per_axis * output_resolution;
-
-    std::unordered_set<uint64_t> occupied_xy;
-    for (const auto& source_point : source->points) {
-        const float dx = source_point.x - robot_pos_cache_.x;
-        const float dy = source_point.y - robot_pos_cache_.y;
-        if (dx * dx + dy * dy > radius_with_voxel * radius_with_voxel) continue;
-        if (source_point.z + source_half < body_min_z ||
-            source_point.z - source_half > body_max_z) continue;
-
-        const float first_x = source_point.x - sample_span * 0.5f +
-                              output_resolution * 0.5f;
-        const float first_y = source_point.y - sample_span * 0.5f +
-                              output_resolution * 0.5f;
-        for (int ix = 0; ix < samples_per_axis; ++ix) {
-            for (int iy = 0; iy < samples_per_axis; ++iy) {
-                const float x = first_x + ix * output_resolution;
-                const float y = first_y + iy * output_resolution;
-                const float qdx = x - robot_pos_cache_.x;
-                const float qdy = y - robot_pos_cache_.y;
-                if (qdx * qdx + qdy * qdy > radius * radius) continue;
-                const int32_t qx = static_cast<int32_t>(
-                    std::floor(x / output_resolution));
-                const int32_t qy = static_cast<int32_t>(
-                    std::floor(y / output_resolution));
-                const uint64_t key =
-                    (static_cast<uint64_t>(static_cast<uint32_t>(qx)) << 32) |
-                    static_cast<uint32_t>(qy);
-                if (!occupied_xy.insert(key).second) continue;
-
-                PCLPoint output;
-                output.x = x;
-                output.y = y;
-                output.z = ground_height;
-                output.intensity =
-                    semantic_params_.local_planner_obstacle_intensity;
-                cloudOut->points.push_back(output);
-            }
-        }
-    }
-    FinalizeCloud(cloudOut);
-}
-
-void MapHandler::GetLocalPlannerStaticObsCloud(
-    const PointCloudPtr& cloudOut) const {
-    BuildLocalPlannerObstacleCloud(semantic_obs_cloud_, cloudOut);
-}
-
-void MapHandler::GetLocalPlannerDynamicObsCloud(
-    const PointCloudPtr& cloudOut) const {
-    BuildLocalPlannerObstacleCloud(effective_dynamic_obs_cloud_, cloudOut);
-}
-
-void MapHandler::GetDynamicAddedCloud(const PointCloudPtr& cloudOut) const {
-    if (!cloudOut) return;
-    if (!dynamic_added_cloud_) {
-        cloudOut->clear();
-        return;
-    }
-    *cloudOut = *dynamic_added_cloud_;
-}
-
-void MapHandler::GetDynamicRemovedCloud(const PointCloudPtr& cloudOut) const {
-    if (!cloudOut) return;
-    if (!dynamic_removed_cloud_) {
-        cloudOut->clear();
-        return;
-    }
-    *cloudOut = *dynamic_removed_cloud_;
-}
-
-void MapHandler::GetChangedObsCloud(const PointCloudPtr& changedCloudOut) const {
-    if (!changedCloudOut) return;
-    if (!changed_obs_cloud_) {
-        changedCloudOut->clear();
-        return;
-    }
-    *changedCloudOut = *changed_obs_cloud_;
-}
-
-// 以下更新接口仅为下游兼容保留；全局占用状态只由语义八叉树维护。
-void MapHandler::UpdateObsCloudGrid(const PointCloudPtr& obsCloudInOut) {
-    (void)obsCloudInOut;
-}
-
-void MapHandler::UpdateFreeCloudGrid(const PointCloudPtr& freeCloudIn){
-    (void)freeCloudIn;
-}
-
-// 在“查询某个点的地面高度”，并通过 is_matched 告诉你是否直接匹配成功。
-float MapHandler::TerrainHeightOfPoint(const Point3D& p, bool& is_matched, const bool& is_search) {
-    is_matched = false;
-    if (!local_terrain_support_octree_ ||
-        local_terrain_support_octree_->size() == 0) return p.z;
-
-    const Point3D expected_ground(p.x, p.y,
-                                  p.z - FARUtil::vehicle_height);
-    const float exact_column_radius = std::max(
-        static_cast<float>(local_terrain_support_octree_->getResolution()) * 0.75f,
-        1e-3f);
-    float distance_square = FARUtil::kINF;
-    float terrain_height = NearestHeightOfPoint(
-        expected_ground, distance_square, exact_column_radius);
-    if (distance_square < FARUtil::kINF) {
-        is_matched = true;
-        return terrain_height;
-    }
-
-    if (is_search) {
-        terrain_height = NearestHeightOfPoint(
-            expected_ground, distance_square, terrain_search_radius_);
-        if (distance_square < FARUtil::kINF) {
-            is_matched = true;
-            return terrain_height;
-        }
-    }
-    return p.z;
-}
-
-// 获取导航点最近的地形高度。
-float MapHandler::NearestTerrainHeightofNavPoint(const Point3D& point, bool& is_associated) {
-    const float fallback_height = point.z - FARUtil::vehicle_height;
-    is_associated = false;
-    if (!local_terrain_support_octree_ ||
-        local_terrain_support_octree_->size() == 0 ||
-        !kdtree_terrain_clould_ ||
-        !kdtree_terrain_clould_->getInputCloud() ||
-        kdtree_terrain_clould_->getInputCloud()->empty()) {
-        return fallback_height;
-    }
-
-    const Point3D expected_ground(point.x, point.y, fallback_height);
-    const float exact_column_radius = std::max(
-        static_cast<float>(local_terrain_support_octree_->getResolution()) * 0.75f,
-        1e-3f);
-    float distance_square = FARUtil::kINF;
-    float terrain_height = NearestHeightOfPoint(
-        expected_ground, distance_square, exact_column_radius);
-    if (distance_square >= FARUtil::kINF) {
-        terrain_height = NearestHeightOfPoint(
-            expected_ground, distance_square, terrain_search_radius_);
-    }
-    if (distance_square < FARUtil::kINF) {
-        is_associated = true;
-        return terrain_height;
-    }
-    return fallback_height;
-}
-
-
-// 判断导航点的脚底高度是否位于局部地形高度带内。
-bool MapHandler::IsNavPointOnTerrainNeighbor(const Point3D& point, const bool& is_extend) {
-    if (!local_terrain_support_octree_ ||
-        local_terrain_support_octree_->size() == 0) {
-        return false;
-    }
-
-    // 原实现查询的是导航点减去车体高度后的脚底位置，而不是语义障碍占据状态。
-    const Point3D ground_point(point.x, point.y,
-                               point.z - FARUtil::vehicle_height);
-
-    // ObsNeighborCloudWithTerrain 在半格对角线范围内取得 minH/maxH。
-    // 这里直接从局部语义地形缓存重建同一个高度带，不再恢复旧 Grid 类。
-    const float terrain_radius = std::max(terrain_neighbor_radius_, 1e-3f);
-    float min_height = ground_point.z;
-    float max_height = ground_point.z;
-    bool in_range = false;
-    NearestHeightOfRadius(ground_point, terrain_radius,
-                          min_height, max_height, in_range);
-
-    if (!in_range) return false;
-
-    const float cell_height = FARUtil::kCellHeight > 0.0f
-        ? FARUtil::kCellHeight
-        : static_cast<float>(local_terrain_support_octree_->getResolution());
-    float lower_bound = min_height - cell_height;
-    if (is_extend) {
-        // 原 extend_obs_indices_ 只采用 z 偏移 {-1, 0}，即向下多扩一层。
-        lower_bound -= cell_height;
-    }
-    const float upper_bound = max_height + FARUtil::kTolerZ + cell_height;
-    return ground_point.z > lower_bound && ground_point.z < upper_bound;
-}
-
-// 把一组导航节点的 z 高度“贴地修正”，让节点高度和当前地形更一致，同时避免改到不该改的节点。
 void MapHandler::AdjustNodesHeight(const NodePtrStack& nodes) {
     if (nodes.empty()) return;
     for (const auto& node_ptr : nodes) {
-        if (!node_ptr) continue;
-        const float dx = node_ptr->position.x - robot_pos_cache_.x;
-        const float dy = node_ptr->position.y - robot_pos_cache_.y;
-        const bool in_semantic_square =
-            std::abs(dx) <= semantic_params_.local_window_radius &&
-            std::abs(dy) <= semantic_params_.local_window_radius &&
-            FARUtil::IsPointInToleratedHeight(
-                node_ptr->position, FARUtil::kTolerZ + FARUtil::kHeightVoxel);
-        if (!node_ptr->is_active || node_ptr->is_boundary || FARUtil::IsFreeNavNode(node_ptr) || FARUtil::IsOutsideGoal(node_ptr) || !in_semantic_square) {
+        if (!node_ptr->is_active || node_ptr->is_boundary || FARUtil::IsFreeNavNode(node_ptr) || FARUtil::IsOutsideGoal(node_ptr) || !FARUtil::IsPointInLocalRange(node_ptr->position, true)) {
             continue;
         } 
         bool is_match = false;
@@ -1344,54 +341,205 @@ void MapHandler::AdjustNodesHeight(const NodePtrStack& nodes) {
     }
 }
 
-// CTNode 做高度修正的，目标是让它们“贴地”且不要偏离机器人当前高度太多。
-// 贴地修正：把 CT 节点的高度改成附近地形的估计高度，避免节点在斜坡、台阶或地表起伏上看起来“漂浮”。
-// 保持可行性：修正后的高度会再限制在机器人当前高度附近的容差范围内，防止因为地形误差导致节点过高或过低。
-// 供后续规划使用：后面的路径/可通行性判断会基于这个新的高度来判断是否可走、是否碰撞。
 void MapHandler::AdjustCTNodeHeight(const CTNodeStack& ctnodes) {
     if (ctnodes.empty()) return;
     const float H_MAX = FARUtil::robot_pos.z + FARUtil::kTolerZ;
     const float H_MIN = FARUtil::robot_pos.z - FARUtil::kTolerZ;
     for (auto& ctnode_ptr : ctnodes) {
-        if (!ctnode_ptr) continue;
-
-        bool is_matched = false;
-        float terrain_height = TerrainHeightOfPoint(
-            ctnode_ptr->position, is_matched, false);
-
-        if (!is_matched) {
-            float nearest_dist_square = FARUtil::kINF;
-            const Point3D expected_ground(
-                ctnode_ptr->position.x, ctnode_ptr->position.y,
-                ctnode_ptr->position.z - FARUtil::vehicle_height);
-            terrain_height = NearestHeightOfPoint(
-                expected_ground, nearest_dist_square, terrain_search_radius_);
-            is_matched = nearest_dist_square < FARUtil::kINF;
+        float min_th, max_th;
+        const float avg_h = NearestHeightOfRadius(ctnode_ptr->position, FARUtil::kMatchDist, min_th, max_th, ctnode_ptr->is_ground_associate);
+        if (ctnode_ptr->is_ground_associate) {
+            ctnode_ptr->position.z = min_th + FARUtil::vehicle_height;
+            ctnode_ptr->position.z = std::max(std::min(ctnode_ptr->position.z, H_MAX), H_MIN);
+        } else {
+            ctnode_ptr->position.z = TerrainHeightOfPoint(ctnode_ptr->position, ctnode_ptr->is_ground_associate, true);
+            ctnode_ptr->position.z += FARUtil::vehicle_height;
+            ctnode_ptr->position.z = std::max(std::min(ctnode_ptr->position.z, H_MAX), H_MIN);
         }
-
-        ctnode_ptr->is_ground_associate = is_matched;
-        if (!is_matched) continue;
-
-        const float adjusted_height = terrain_height + FARUtil::vehicle_height;
-        ctnode_ptr->position.z = std::max(
-            std::min(adjusted_height, H_MAX), H_MIN);
     }
 }
 
-void MapHandler::UpdateTerrainHeightGrid(const PointCloudPtr& freeCloudIn,
-                                         const PointCloudPtr& terrainHeightOut) {
-    (void)freeCloudIn;
-    (void)terrainHeightOut;
+void MapHandler::ObsNeighborCloudWithTerrain(std::unordered_set<int>& neighbor_obs, std::unordered_set<int>& extend_terrain_obs) {
+    std::unordered_set<int> neighbor_copy = neighbor_obs;
+    neighbor_obs.clear();
+    const float R = map_params_.cell_length * 0.7071f; // sqrt(2)/2
+    for (const auto& idx : neighbor_copy) {
+        const Point3D pos = Point3D(world_obs_cloud_grid_->Ind2Pos(idx)); 
+        const Eigen::Vector3i sub = terrain_height_grid_->Pos2Sub(Eigen::Vector3d(pos.x, pos.y, 0.0f));
+        const int terrain_ind = terrain_height_grid_->Sub2Ind(sub);
+        bool inRange = false;
+        float minH, maxH;
+        const float avgH = NearestHeightOfRadius(pos, R, minH, maxH, inRange);
+        if (inRange && pos.z + map_params_.cell_height > minH &&
+                       pos.z - map_params_.cell_height < maxH + FARUtil::kTolerZ) // use map_params_.cell_height/2.0 as a tolerance margin
+        {
+            neighbor_obs.insert(idx);
+        }
+    }
+    extend_terrain_obs.clear(); // assign extended terrain obs indices
+    const std::vector<int> inflate_vec{-1, 0};
+    for (const int& idx : neighbor_obs) {
+        const Eigen::Vector3i csub = world_obs_cloud_grid_->Ind2Sub(idx);
+        for (const int& plus : inflate_vec) {
+            Eigen::Vector3i sub = csub; 
+            sub.z() += plus;
+            if (!world_obs_cloud_grid_->InRange(sub)) continue;
+            const int plus_idx = world_obs_cloud_grid_->Sub2Ind(sub);
+            extend_terrain_obs.insert(plus_idx);
+        }
+    }
 }
 
+void MapHandler::UpdateTerrainHeightGrid(const PointCloudPtr& freeCloudIn, const PointCloudPtr& terrainHeightOut) {
+    if (freeCloudIn->empty()) return;
+    PointCloudPtr copy_free_ptr(new pcl::PointCloud<PCLPoint>());
+    pcl::copyPointCloud(*freeCloudIn, *copy_free_ptr);
+    FARUtil::FilterCloud(copy_free_ptr, terrain_height_grid_->GetResolution());
+    std::fill(terrain_grid_occupy_list_.begin(), terrain_grid_occupy_list_.end(), 0);
+    for (const auto& point : copy_free_ptr->points) {
+        Eigen::Vector3i csub = terrain_height_grid_->Pos2Sub(Eigen::Vector3d(point.x, point.y, 0.0f));
+        std::vector<Eigen::Vector3i> subs;
+        this->Expansion2D(csub, subs, INFLATE_N);
+        for (const auto& sub : subs) {
+            if (!terrain_height_grid_->InRange(sub)) continue;
+            const int ind = terrain_height_grid_->Sub2Ind(sub);
+            if (terrain_grid_occupy_list_[ind] == 0) {
+                terrain_height_grid_->GetCell(ind).resize(1);
+                terrain_height_grid_->GetCell(ind)[0] = point.z;
+            } else {
+                terrain_height_grid_->GetCell(ind).push_back(point.z);
+            }
+            terrain_grid_occupy_list_[ind] = 1;
+        }
+    }
+    const int N = terrain_grid_occupy_list_.size();
+    this->TraversableAnalysis(terrainHeightOut);
+    if (terrainHeightOut->empty()) { // set terrain height kdtree
+        FARUtil::ClearKdTree(flat_terrain_cloud_, kdtree_terrain_clould_);
+    } else {
+        this->AssignFlatTerrainCloud(terrainHeightOut, flat_terrain_cloud_);
+        kdtree_terrain_clould_->setInputCloud(flat_terrain_cloud_);
+    }
+    // update surrounding obs cloud grid indices based on terrain
+    this->ObsNeighborCloudWithTerrain(neighbor_obs_indices_, extend_obs_indices_);
+}
+
+void MapHandler::TraversableAnalysis(const PointCloudPtr& terrainHeightOut) {
+    const Eigen::Vector3i robot_sub = terrain_height_grid_->Pos2Sub(Eigen::Vector3d(FARUtil::robot_pos.x, 
+                                                                                    FARUtil::robot_pos.y, 0.0f));
+    terrainHeightOut->clear();
+    if (!terrain_height_grid_->InRange(robot_sub)) {
+        ROS_ERROR("MH: terrain height analysis error: robot position is not in range");
+        return;
+    }
+    const float H_THRED = map_params_.height_voxel_dim;
+    std::fill(terrain_grid_traverse_list_.begin(), terrain_grid_traverse_list_.end(), 0);
+    // Lambda Function
+    auto IsTraversableNeighbor = [&] (const int& cur_id, const int& ref_id) {
+        if (terrain_grid_occupy_list_[ref_id] == 0) return false;
+        const float cur_h = terrain_height_grid_->GetCell(cur_id)[0];
+        float ref_h = 0.0f;
+        int counter = 0;
+        for (const auto& e : terrain_height_grid_->GetCell(ref_id)) {
+            if (abs(e - cur_h) > H_THRED) continue;
+            ref_h += e, counter ++;
+        }
+        if (counter > 0) {
+            terrain_height_grid_->GetCell(ref_id).resize(1);
+            terrain_height_grid_->GetCell(ref_id)[0] = ref_h / (float)counter;
+            return true;
+        }
+        return false;
+    };
+
+    auto AddTraversePoint = [&] (const int& idx) {
+        Eigen::Vector3d cpos = terrain_height_grid_->Ind2Pos(idx);
+        cpos.z() = terrain_height_grid_->GetCell(idx)[0];
+        const PCLPoint p = FARUtil::Point3DToPCLPoint(Point3D(cpos));
+        terrainHeightOut->points.push_back(p);
+        terrain_grid_traverse_list_[idx] = 1;
+    };
+
+    const int robot_idx = terrain_height_grid_->Sub2Ind(robot_sub);
+    const std::array<int, 4> dx = {-1, 0, 1, 0};
+    const std::array<int, 4> dy = { 0, 1, 0,-1};
+    std::deque<int> q;
+    bool is_robot_terrain_init = false;
+    std::unordered_set<int> visited_set;
+    q.push_back(robot_idx), visited_set.insert(robot_idx);
+    while (!q.empty()) {
+        const int cur_id = q.front();
+        q.pop_front();
+        if (terrain_grid_occupy_list_[cur_id] != 0) {
+            if (!is_robot_terrain_init) {
+                float avg_h = 0.0f;
+                int counter = 0;
+                for (const auto& e : terrain_height_grid_->GetCell(cur_id)) {
+                    if (abs(e - FARUtil::robot_pos.z + FARUtil::vehicle_height) > H_THRED) continue;
+                    avg_h += e, counter ++;
+                }
+                if (counter > 0) {
+                    avg_h /= (float)counter;
+                    terrain_height_grid_->GetCell(cur_id).resize(1);
+                    terrain_height_grid_->GetCell(cur_id)[0] = avg_h;
+                    AddTraversePoint(cur_id);
+                    is_robot_terrain_init = true; // init terrain height map current robot height
+                    q.clear();
+                }
+            } else {
+                AddTraversePoint(cur_id);
+            }
+        } else if (is_robot_terrain_init) {
+            continue;
+        }
+        const Eigen::Vector3i csub = terrain_height_grid_->Ind2Sub(cur_id);
+        for (int i=0; i<4; i++) {
+            Eigen::Vector3i ref_sub = csub;
+            ref_sub.x() += dx[i], ref_sub.y() += dy[i];
+            if (!terrain_height_grid_->InRange(ref_sub)) continue;
+            const int ref_id = terrain_height_grid_->Sub2Ind(ref_sub);
+            if (!visited_set.count(ref_id) && (!is_robot_terrain_init || IsTraversableNeighbor(cur_id, ref_id))) {
+                q.push_back(ref_id);
+                visited_set.insert(ref_id);
+            }
+        }
+    }
+}
+
+
 void MapHandler::GetNeighborCeilsCenters(PointStack& neighbor_centers) {
-    (void)neighbor_centers;
+    if (!is_init_) return;
+    neighbor_centers.clear();
+    for (const auto& ind : neighbor_obs_indices_) {
+        if (global_visited_induces_[ind] == 0) continue;
+        Point3D center_p(world_obs_cloud_grid_->Ind2Pos(ind));
+        neighbor_centers.push_back(center_p);
+    }
 }
 
 void MapHandler::GetOccupancyCeilsCenters(PointStack& occupancy_centers) {
-    (void)occupancy_centers;
+    if (!is_init_) return;
+    occupancy_centers.clear();
+    const int N = world_obs_cloud_grid_->GetCellNumber();
+    for (int ind=0; ind<N; ind++) {
+        if (global_visited_induces_[ind] == 0) continue;
+        Point3D center_p(world_obs_cloud_grid_->Ind2Pos(ind));
+        occupancy_centers.push_back(center_p);
+    }
 }
 
 void MapHandler::RemoveObsCloudFromGrid(const PointCloudPtr& obsCloud) {
-    (void)obsCloud;
+    std::fill(util_remove_check_list_.begin(), util_remove_check_list_.end(), 0);
+    for (const auto& point : obsCloud->points) {
+        Eigen::Vector3i sub = world_obs_cloud_grid_->Pos2Sub(Eigen::Vector3d(point.x, point.y, point.z));
+        if (!world_free_cloud_grid_->InRange(sub)) continue;
+        const int ind = world_free_cloud_grid_->Sub2Ind(sub);
+        util_remove_check_list_[ind] = 1;
+    }
+    for (const auto& ind : neighbor_obs_indices_) {
+        if (util_remove_check_list_[ind] == 1 && global_visited_induces_[ind] == 1) {
+            FARUtil::RemoveOverlapCloud(world_obs_cloud_grid_->GetCell(ind), obsCloud);
+        }
+    }
 }
+

@@ -4,12 +4,6 @@
 #include "utility.h"
 #include "dynamic_graph.h"
 #include "contour_graph.h"
-#include "goal_adjustment_policy.h"
-
-#include <cstdint>
-#include <limits>
-#include <queue>
-#include <unordered_set>
 
 enum ReachVote {
     BLOCK = 0,
@@ -20,65 +14,12 @@ struct GraphPlannerParams {
     GraphPlannerParams() = default;
     float converge_dist;
     float adjust_radius;
-    bool  enable_goal_adjustment = false;
-    float adjust_check_period = 1.0f;
-    float adjust_sample_spacing = 0.5f;
-    int   adjust_max_candidates = 32;
-    int   adjust_block_confirmations = 2;
-    int   restore_confirmations = 3;
-    bool  adjust_on_dynamic_obstacle = false;
     float momentum_dist;
     bool  is_autoswitch;
     int   free_thred;
     int   votes_size;
     int   momentum_thred;
 };
-
-enum class GoalPointStatus {
-    UNKNOWN = 0,
-    FREE,
-    STATIC_BLOCKED,
-    DYNAMIC_BLOCKED
-};
-
-// std::priority_queue must never order entries through NavNode::gscore: that
-// value is changed while the node is already inside the heap and therefore
-// silently invalidates the heap ordering.  Keep an immutable distance
-// snapshot in every entry and lazily discard obsolete snapshots when popped.
-constexpr float kGraphSearchCostEpsilon = 1e-6f;
-
-struct GraphSearchQueueEntry {
-    float cost = std::numeric_limits<float>::max();
-    std::size_t node_id = 0;
-    NavNodePtr node;
-};
-
-struct GraphSearchQueueEntryGreater {
-    bool operator()(const GraphSearchQueueEntry& lhs,
-                    const GraphSearchQueueEntry& rhs) const {
-        if (std::fabs(lhs.cost - rhs.cost) > kGraphSearchCostEpsilon) {
-            return lhs.cost > rhs.cost;
-        }
-        return lhs.node_id > rhs.node_id;
-    }
-};
-
-inline bool IsStaleGraphSearchEntry(const GraphSearchQueueEntry& entry,
-                                    const float current_cost) {
-    return entry.cost > current_cost + kGraphSearchCostEpsilon;
-}
-
-inline bool ShouldRelaxGraphSearchEdge(const float candidate_cost,
-                                       const float current_cost,
-                                       const std::size_t candidate_parent_id,
-                                       const NavNodePtr& current_parent) {
-    if (candidate_cost < current_cost - kGraphSearchCostEpsilon) return true;
-    if (std::fabs(candidate_cost - current_cost) >
-        kGraphSearchCostEpsilon) {
-        return false;
-    }
-    return !current_parent || candidate_parent_id < current_parent->id;
-}
 
 
 class GraphPlanner {
@@ -91,22 +32,21 @@ NavNodePtr odom_node_ptr_  = NULL;
 // goal related values
 NavNodePtr goal_node_ptr_   = NULL;
 Point3D origin_goal_pos_    = Point3D(0,0,0);
-Point3D active_goal_pos_    = Point3D(0,0,0);
 bool is_use_internav_goal_  = false;
 bool command_is_free_nav_   = false;
 bool is_goal_in_freespace_  = false;
 bool is_terrain_associated_ = false;
 bool is_goal_init_;
-bool is_goal_adjusted_ = false;
-bool is_active_goal_explicitly_blocked_ = false;
-ros::Time last_goal_adjust_check_;
-int goal_blocked_confirmations_ = 0;
-int goal_restore_confirmations_ = 0;
 NodePtrStack current_graph_;
 bool is_free_nav_goal_;
 
-// Nodes whose goal-only state must be reset when the command changes.
-NodePtrStack evaluated_goal_candidates_;
+// momentum planning values
+NodePtrStack recorded_path_;
+Point3D next_waypoint_;
+int path_momentum_counter_;
+bool is_global_path_init_;
+float last_waypoint_dist_;
+Point3D last_planning_odom_;
 
 // local terrain map for freespace adjustment
 Point3D grid_center_ = Point3D(0,0,0);
@@ -121,29 +61,8 @@ bool ReconstructPath(const NavNodePtr& goal_node_ptr,
 bool IsNodeConnectInFree(const NavNodePtr& current_node,
                          const NavNodePtr& neighbor_node);
 
-GoalPointStatus ClassifyGoalPoint(const Point3D& point) const;
-
-std::vector<Point3D> CollectSparseGoalAdjustmentCandidates() const;
-
-bool IsCandidateReachable(const NavNodePtr& goal_ptr,
-                          const Point3D& candidate);
-
-bool FindGoalAdjustmentCandidate(const NavNodePtr& goal_ptr,
-                                 Point3D& selected,
-                                 std::size_t& evaluated);
-
-void SetActiveGoalPosition(const NavNodePtr& goal_ptr,
-                           const Point3D& position,
-                           bool adjusted);
-
-    EdgeValidationResult ValidateConnectToGoal(
-        const NavNodePtr& node_ptr, const NavNodePtr& goal_node_ptr);
-
-NodePtrStack SelectGoalConnectionCandidates(const NavNodePtr& goal_ptr) const;
-
-void RemoveGoalConnection(const NavNodePtr& node_ptr,
-                          const NavNodePtr& goal_ptr,
-                          const bool clear_vote_history);
+bool IsValidConnectToGoal(const NavNodePtr& node_ptr, 
+                          const NavNodePtr& goal_node_ptr);
 
 NavNodePtr NextNavWaypointFromPath(const NodePtrStack& global_path, const NavNodePtr goal_ptr);
 
@@ -179,6 +98,19 @@ inline void InitNodesStates(const NodePtrStack& graph) {
     }
 }
 
+inline void RecordPathInfo(const NodePtrStack& global_path) {
+    if (global_path.size() < 2) {
+        if (FARUtil::IsDebug) ROS_ERROR("GP: recording path for momontum fails, planning path is empty");
+        return;
+    }
+    recorded_path_         = global_path;
+    next_waypoint_         = global_path[1]->position;
+    last_waypoint_dist_    = (odom_node_ptr_->position - next_waypoint_).norm();
+    is_global_path_init_   = true;
+    path_momentum_counter_ = 0;
+    last_planning_odom_    = odom_node_ptr_->position;
+}
+
 inline bool IsResetBlockStatus(const NavNodePtr& node_ptr, const NavNodePtr& goal_ptr) {
     if (node_ptr->is_odom || (node_ptr->is_near_nodes && (!node_ptr->is_finalized || node_ptr->is_frontier))) return true;
     if (!FARUtil::IsStaticEnv && node_ptr->is_near_nodes) return true;
@@ -192,28 +124,12 @@ inline bool IsResetBlockStatus(const NavNodePtr& node_ptr, const NavNodePtr& goa
 inline float EulerCost(const NavNodePtr& current_node,
                        const NavNodePtr& neighbor_node) 
 {
-    const auto state = current_node->edge_states.find(neighbor_node->id);
-    if (state != current_node->edge_states.end() &&
-        state->second.has_clearance_geometry &&
-        state->second.route_cost > FARUtil::kEpsilon) {
-        return state->second.route_cost;
-    }
     return (current_node->position - neighbor_node->position).norm();
 }
 
 inline void GoalReset() {
     origin_goal_pos_ = Point3D(0,0,0);
-    active_goal_pos_ = Point3D(0,0,0);
     is_goal_in_freespace_ = false;
-    is_goal_adjusted_ = false;
-    is_active_goal_explicitly_blocked_ = false;
-    last_goal_adjust_check_ = ros::Time(0);
-    goal_blocked_confirmations_ = 0;
-    goal_restore_confirmations_ = 0;
-    for (const auto& node_ptr : evaluated_goal_candidates_) {
-        if (node_ptr) node_ptr->is_block_to_goal = false;
-    }
-    evaluated_goal_candidates_.clear();
     if (goal_node_ptr_ != NULL) {
         if (!is_use_internav_goal_) DynamicGraph::ClearGoalNodeInGraph(goal_node_ptr_);
         else goal_node_ptr_->is_goal = false;
@@ -233,7 +149,7 @@ void Init(const ros::NodeHandle& nh, const GraphPlannerParams& params);
  * Update Global Graph
  * @param vgraph current graph
 */
-void UpdaetVGraph(const NodePtrStack& vgraph);
+inline void UpdaetVGraph(const NodePtrStack& vgraph) {current_graph_ = vgraph;};
 
 /**
  * Update Global Graph Traversability Status and gscores
@@ -248,10 +164,8 @@ void UpdateGraphTraverability(const NavNodePtr& odom_node_ptr, const NavNodePtr&
  * @param goal_ptr current goal node
  * @param global_path(return) return the global path from odom node position
  * @param _nav_node_ptr(return) current navigation waypoint
- * @param _goal_p(return) current active goal position (original or safe substitute)
+ * @param _goal_p(return) goal position after free space adjust 
  * @param _is_fail(return) whether the planner fails to find the path
- * @param has_dynamic_obstacles whether a transient semantic obstacle is active
- * @param _is_retry_wait(return) whether the goal is retained while stopped for replanning
  * @param _is_succeed(return) whether the vehicle has reached the goal
  * @param _is_free_nav(return) the attemptable navigation status (True)->Non-attempts
  * @return whether or not planning success -> publish a valid path for navigation
@@ -262,8 +176,6 @@ bool PathToGoal(const NavNodePtr& goal_ptr,
                 NavNodePtr&   _nav_node_ptr,
                 Point3D&      _goal_p,
                 bool&         _is_fails,
-                const bool&   has_dynamic_obstacles,
-                bool&         _is_retry_wait,
                 bool&         _is_succeed,
                 bool&         _is_free_nav);
 
@@ -283,7 +195,7 @@ void UpdateGoal(const Point3D& goal);
 
 
 /**
- * @brief Update the free-terrain grid used to evaluate fixed-goal connectivity
+ * @brief Update free terrian grid for re-selecting goal position into free space
  * @param center current center of grid
  * @param obsCloudIn Obstalce point cloud input
  * @param freeCloudIn Free point cloud input
@@ -293,24 +205,11 @@ void UpdateFreeTerrainGrid(const Point3D& center,
                            const PointCloudPtr& freeCloudIn);
 
 /**
- * @brief Refresh the goal's terrain height while preserving the commanded XY
+ * @brief Adjust goal position based on terrain and polygons
  * @param goal_ptr current goal node pointer
  * @param is_adjust_height whether or not adjust height of goal -> (False if multi layer planning)
  */
 void ReEvaluateGoalPosition(const NavNodePtr& goal_ptr, const bool& is_adjust_height);
-
-/** Low-frequency policy update for an explicitly occupied user goal.  The
- * current active goal is still collision-checked by normal goal-edge rebuilds
- * every planning cycle; only the more expensive substitute search is rate
- * limited here. */
-void UpdateGoalAdjustment(const NavNodePtr& goal_ptr,
-                          const ros::Time& now);
-
-/** Resolve the first current-path edge that owns explicit checked geometry
- * (start, goal or contour-follow) to the route used by graph search. */
-bool NextContourRouteWaypoint(const NodePtrStack& global_path,
-                              const Point3D& robot_position,
-                              Point3D& waypoint) const;
 
 /**
  * @brief Reset internal values and containers
@@ -321,28 +220,29 @@ inline void ResetPlannerInternalValues() {
     
     is_goal_init_         = false;
     is_use_internav_goal_ = false;
+    is_global_path_init_  = false;
     is_free_nav_goal_     = false;
     is_goal_in_freespace_ = false;
     
     current_graph_.clear(); 
-    evaluated_goal_candidates_.clear();
+    recorded_path_.clear();
+    path_momentum_counter_ = 0;
+    last_waypoint_dist_    = 0.0;
     origin_goal_pos_    = Point3D(0,0,0);
-    active_goal_pos_    = Point3D(0,0,0);
-    is_goal_adjusted_ = false;
-    is_active_goal_explicitly_blocked_ = false;
-    last_goal_adjust_check_ = ros::Time(0);
-    goal_blocked_confirmations_ = 0;
-    goal_restore_confirmations_ = 0;
+    next_waypoint_      = Point3D(0,0,0);
+    last_planning_odom_ = Point3D(0,0,0);
 }
 
 const NavNodePtr& GetGoalNodePtr() const { return goal_node_ptr_;};
-bool IsGoalAdjusted() const { return is_goal_adjusted_; }
-Point3D GetActiveGoalPos() const { return active_goal_pos_; }
 
-// 
-Point3D GetOriginNodePos(const bool& /*is_adjusted_z*/) const {
+Point3D GetOriginNodePos(const bool& is_adjusted_z) const {
     if (goal_node_ptr_ == NULL) return Point3D(0,0,0);
-    return origin_goal_pos_;
+    if (!is_adjusted_z) return origin_goal_pos_;
+    else {
+        return Point3D(origin_goal_pos_.x,
+                       origin_goal_pos_.y,
+                       goal_node_ptr_->position.z);
+    }
 }
 
 };

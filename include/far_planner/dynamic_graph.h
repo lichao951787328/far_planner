@@ -6,8 +6,6 @@
 #include "terrain_planner.h"
 #include "map_handler.h"
 
-#include <functional>
-
 
 struct DynamicGraphParams {
     DynamicGraphParams() = default;
@@ -19,33 +17,6 @@ struct DynamicGraphParams {
     float filter_pos_margin;
     float filter_dirs_margin;
     float frontier_perimeter_thred;
-    float static_update_radius = 28.5f;
-    float static_stitch_radius = 28.5f;
-    // Universal planar limit for odom/start query edges. A non-positive value
-    // preserves the legacy unlimited behavior.
-    float start_connection_max_distance = -1.0f;
-    float dynamic_position_alpha = 0.65f;
-    // When positive, rejected visibility candidates no farther than this
-    // radius are exported as diagnostic markers. This is observability only.
-    float diagnostic_near_pair_radius = 0.0f;
-    // Remove only the longest ordinary visibility edge from a currently
-    // active, nearly collinear triangle. Contour/trajectory identities are
-    // never removed by this sparsifier.
-    bool flat_triangle_pruning_enabled = false;
-    float flat_triangle_max_detour_ratio = 1.05f;
-    float flat_triangle_max_altitude_ratio = 0.20f;
-    int static_confirm_frames = 3;
-    int static_remove_frames = 3;
-    int static_topology_remove_frames = 3;
-    int static_visibility_remove_frames = 3;
-    float static_duplicate_radius = 0.5f;
-    bool static_promotion_requires_finalized = true;
-    bool static_promotion_requires_active_edge = true;
-    bool static_promotion_requires_main_component = true;
-    // Optional compatibility gate for legacy deployments that still provide
-    // a separate global evidence map. FARMaster forces this off in local-only
-    // voxel mode.
-    bool static_promotion_requires_global_evidence = false;
 };
 
 class DynamicGraph {  
@@ -60,28 +31,13 @@ private:
     NodePtrStack out_contour_nodes_;
     float CONNECT_ANGLE_COS, NOISE_ANGLE_COS;
     bool is_bridge_internav_ = false;
-    // True only between BeginSemanticGraphUpdate() and
-    // CommitSemanticGraphUpdate().  Topology miss counters therefore advance
-    // once per accepted semantic snapshot, not once per planner timer tick.
-    bool semantic_update_in_progress_ = false;
     Point3D last_connect_pos_;
 
     static DynamicGraphParams dg_params_;
     static std::size_t id_tracker_; // Global unique id start from "0" [per robot]
-    // Persistent layer contains only confirmed static nodes plus the current
-    // odom/goal query endpoints. Candidates and dynamic nodes have independent
-    // lifetimes and never enter this container.
     static NodePtrStack globalGraphNodes_;
-    static NodePtrStack staticCandidateGraphNodes_;
-    static NodePtrStack dynamicLocalGraphNodes_;
-    // IDs in the currently selected reusable static routing component.
-    // Confirmed nodes outside this set remain matching history and can rejoin
-    // when a validated static edge reconnects them, but are never query
-    // anchors or search vertices while detached.
-    static std::unordered_set<std::size_t> staticMainNodeIds_;
     static std::unordered_map<std::size_t, NavNodePtr> idx_node_map_;
     static std::unordered_map<NavNodePtr, std::pair<int, std::unordered_set<NavNodePtr>>> out_contour_nodes_map_;
-    static std::vector<EdgeDiagnostic> contour_edge_diagnostics_;
 
     TerrainPlanner terrain_planner_;
     TerrainPlannerParams tp_params_;
@@ -89,28 +45,7 @@ private:
     /* Evaluate exist edges */
     bool IsValidConnect(const NavNodePtr& node_ptr1, 
                         const NavNodePtr& node_ptr2,
-                        const bool& is_check_contour,
-                        const bool& include_dynamic = true,
-                        const bool& apply_direction_filter = true);
-
-    EdgeRejectReason ClassifyVisibilityRejection(
-        const NavNodePtr& node_ptr1, const NavNodePtr& node_ptr2,
-        bool include_dynamic, bool apply_direction_filter);
-
-    bool UpdateGraphEdge(const NavNodePtr& node_ptr1,
-                         const NavNodePtr& node_ptr2,
-                         const bool& is_check_contour);
-
-    bool ApplyValidatedGraphEdge(const NavNodePtr& node_ptr1,
-                                 const NavNodePtr& node_ptr2,
-                                 bool structurally_valid,
-                                 EdgeRejectReason rejection_reason =
-                                     EdgeRejectReason::NONE);
-
-    static void RemoveVisibilityEdge(const NavNodePtr& node_ptr1,
-                                     const NavNodePtr& node_ptr2);
-
-    std::size_t PruneFlatTriangleVisibilityEdges();
+                        const bool& is_check_contour);
 
     bool NodeLocalPerception(const NavNodePtr& node_ptr,
                              bool& _is_wall_end,
@@ -119,6 +54,8 @@ private:
     bool IsInDirectConstraint(const NavNodePtr& node_ptr1, const NavNodePtr& node_ptr2);
 
     bool IsInContourDirConstraint(const NavNodePtr& node_ptr1, const NavNodePtr& node_ptr2);
+
+    bool IsInterNavpointNecessary();
 
     bool IsFrontierNode(const NavNodePtr& node_ptr);
     
@@ -140,38 +77,11 @@ private:
 
     static void InitNodePosition(const NavNodePtr& node_ptr, const Point3D& new_pos); 
 
-    void RemoveNodeFromGraph(const NavNodePtr& node_ptr);
-
-    void RefreshStaticMainComponent();
-
     bool UpdateNodeSurfDirs(const NavNodePtr& node_ptr, PointPair cur_dirs);
 
     void ReOrganizeGraphConnect();
 
     bool ReEvaluateCorner(const NavNodePtr node_ptr);
-
-    /** Apply delayed static-corner replacement after this snapshot's new
-     * nodes and validated edges are complete and stable candidates have been
-     * promoted into the persistent layer. */
-    void UpdateStaticCornerTopology();
-
-    /** Commit mature contour-edge replacements only after the complete
-     * snapshot graph has been assembled and validated. */
-    void CommitMatureContourEdgeReplacements();
-
-    /** Collapse an unmatched historical static identity into the current
-     * matched identity for the same corner.  UNKNOWN means insufficient
-     * deletion evidence, but it is still admissible for identity
-     * consolidation; only positive STATIC_OCCUPIED evidence vetoes it. */
-    void ConsolidateStaticHistoryDuplicates(
-        const std::function<StaticNodeEvidence(const Point3D&)>&
-            evidence_query);
-
-    bool HasStableReplacementTopology(
-        const NavNodePtr& obsolete, const PolygonPtr& current_polygon) const;
-
-    bool RemovalPreservesCurrentGraphConnectivity(
-        const NavNodePtr& obsolete) const;
 
     void RecordContourVote(const NavNodePtr& node_ptr1, const NavNodePtr& node_ptr2);
 
@@ -182,6 +92,7 @@ private:
     bool IsNodeFullyCovered(const NavNodePtr& node_ptr);
 
     bool ReEvaluateConnectUsingTerrian(const NavNodePtr& node_ptr1, const NavNodePtr node_ptr2);
+
 
     inline bool IsNodeInTerrainOccupy(const NavNodePtr& node_ptr) {
         if (!FARUtil::IsStaticEnv && terrain_planner_.IsPointOccupy(node_ptr->position)) return true;
@@ -206,11 +117,9 @@ private:
         cur_internav_ptr_ = internav_node_ptr;
         if (last_internav_ptr_ == NULL) { // init inter navigation nodes
             terrain_planner_.UpdateCenterNode(cur_internav_ptr_);
-            terrain_planner_.SetLocalTerrainObsCloud(FARUtil::surround_obs_cloud_);
             last_internav_ptr_ = cur_internav_ptr_;
         } else if (last_internav_ptr_ != cur_internav_ptr_) {
             terrain_planner_.UpdateCenterNode(cur_internav_ptr_);
-            terrain_planner_.SetLocalTerrainObsCloud(FARUtil::surround_obs_cloud_);
             this->AddTrajectoryConnect(cur_internav_ptr_, last_internav_ptr_);
             last_internav_ptr_ = cur_internav_ptr_;
         } 
@@ -339,19 +248,9 @@ private:
     /* Create new navigation node, and return a shared pointer to it */
     inline void CreateNewNavNodeFromContour(const CTNodePtr& ctnode_ptr, NavNodePtr& node_ptr) {
         CreateNavNodeFromPoint(ctnode_ptr->position, node_ptr, false);
-        node_ptr->source = ctnode_ptr->source == GraphNodeSource::DYNAMIC_LOCAL
-            ? GraphNodeSource::DYNAMIC_LOCAL
-            : GraphNodeSource::STATIC_CANDIDATE;
-        node_ptr->observed_in_semantic_snapshot = true;
-        node_ptr->is_transient_contour_endpoint =
-            ctnode_ptr->source != GraphNodeSource::DYNAMIC_LOCAL &&
-            ctnode_ptr->is_boundary_clipped;
         node_ptr->is_contour_match = true;
         node_ptr->ctnode = ctnode_ptr;
         node_ptr->free_direct = ctnode_ptr->free_direct;
-        node_ptr->free_space_dir = ctnode_ptr->free_space_dir;
-        node_ptr->is_free_space_dir_reliable =
-            ctnode_ptr->is_free_space_dir_reliable;
         UpdateNodeSurfDirs(node_ptr, ctnode_ptr->surf_dirs);
     }
 
@@ -365,42 +264,9 @@ private:
     }
 
     inline bool IsAValidNewNode(const CTNodePtr ctnode_ptr, bool& is_near_new) {
-        if (!ctnode_ptr) return false;
         is_near_new = FARUtil::IsPointNearNewPoints(ctnode_ptr->position, true);
-        const bool is_current_dynamic =
-            ctnode_ptr->source == GraphNodeSource::DYNAMIC_LOCAL;
-        const bool is_current_static =
-            ctnode_ptr->source == GraphNodeSource::STATIC_CANDIDATE ||
-            ctnode_ptr->source == GraphNodeSource::STATIC_GLOBAL;
-        // Ordinary concave samples contribute occupied contour geometry but
-        // are not free-space visibility vertices.  A deep reduced-contour
-        // bend marked necessary is different: it must temporarily enter the
-        // graph so the two surrounding contour edges are not lost.  Its
-        // CONCAVE type still prevents ordinary visibility connections.
-        if (is_current_static &&
-            ctnode_ptr->free_direct == NodeFreeDirect::CONCAVE &&
-            !ctnode_ptr->is_contour_necessary) {
-            return false;
-        }
-        // MatchContourWithNavGraph has already reduced the complete contour to
-        // unmatched routing vertices (classified corners/pillars). In the
-        // semantic pipeline the current snapshot itself is authoritative, so
-        // an unchanged static corner must not disappear merely because the
-        // legacy one-second "new point" cache has expired.
-        if (is_current_static || is_current_dynamic ||
-            ctnode_ptr->is_contour_necessary || is_near_new) {
-            // Known terrain still has to support the vertex. Missing terrain
-            // evidence is UNKNOWN, not an obstacle: accept it according to the
-            // semantic unknown-space policy and let contour/raw-cloud collision
-            // checks decide whether incident edges are usable.
-            bool terrain_matched = false;
-            MapHandler::TerrainHeightOfPoint(
-                ctnode_ptr->position, terrain_matched, true);
-            const bool terrain_neighbor_valid =
-                !terrain_matched || MapHandler::IsNavPointOnTerrainNeighbor(
-                    ctnode_ptr->position, false);
-            if (terrain_neighbor_valid &&
-                IsPointOnTerrain(ctnode_ptr->position)) {
+        if (ctnode_ptr->is_contour_necessary || is_near_new) {
+            if (MapHandler::IsNavPointOnTerrainNeighbor(ctnode_ptr->position, false) && IsPointOnTerrain(ctnode_ptr->position)) {
                 return true;
             } else if (ctnode_ptr->is_contour_necessary) {
                 ctnode_ptr->is_contour_necessary = false;
@@ -466,15 +332,11 @@ private:
         }
         for (const auto& pt_cnode_ptr : node_ptr->potential_contours) {
             const auto it = pt_cnode_ptr->contour_votes.find(node_ptr->id);
-            if (it != pt_cnode_ptr->contour_votes.end() &&
-                pt_cnode_ptr->is_active && !pt_cnode_ptr->is_near_nodes &&
-                FARUtil::IsVoteTrue(it->second, false)) {
+            if (pt_cnode_ptr->is_active && !pt_cnode_ptr->is_near_nodes && FARUtil::IsVoteTrue(it->second, false)) {
                 AddNodeToOutrangeContourMap(pt_cnode_ptr);
             }
             FARUtil::EraseNodeFromStack(node_ptr, pt_cnode_ptr->potential_contours);
-            if (it != pt_cnode_ptr->contour_votes.end()) {
-                pt_cnode_ptr->contour_votes.erase(it);
-            }
+            pt_cnode_ptr->contour_votes.erase(it);
         }
         node_ptr->contour_connects.clear();
         node_ptr->contour_votes.clear();
@@ -543,20 +405,17 @@ private:
 
     /* Clear nodes in global graph which is marked as merge */
     inline void ClearMergedNodesInGraph() {
-        const auto clear_stack = [this](NodePtrStack& nodes) {
-            for (auto it = nodes.begin(); it != nodes.end(); it ++) {
-                if (IsMergedNode(*it)) {
-                    ClearNodeConnectInGraph(*it);
-                    ClearContourConnectionInGraph(*it);
-                    ClearTrajectoryConnectInGraph(*it);
-                    RemoveNodeIdFromMap(*it);
-                    ClearNodeFromInternalStack(*it);
-                    nodes.erase(it--);
-                }
+        // remove nodes
+        for (auto it = globalGraphNodes_.begin(); it != globalGraphNodes_.end(); it ++) {
+            if (IsMergedNode(*it)) {
+                ClearNodeConnectInGraph(*it);
+                ClearContourConnectionInGraph(*it);
+                ClearTrajectoryConnectInGraph(*it);
+                RemoveNodeIdFromMap(*it);
+                ClearNodeFromInternalStack(*it);
+                globalGraphNodes_.erase(it--);
             }
-        };
-        clear_stack(globalGraphNodes_);
-        clear_stack(staticCandidateGraphNodes_);
+        }
         // clean outrange contour nodes 
         out_contour_nodes_.clear();
         for (auto it = out_contour_nodes_map_.begin(); it != out_contour_nodes_map_.end();) {
@@ -580,14 +439,7 @@ public:
      *  @param robot_pos current robot position in world frame
     */
     void UpdateRobotPosition(const Point3D& robot_pos);
-
-    /** Start/finish one accepted semantic snapshot (not one planner timer tick). */
-    void BeginSemanticGraphUpdate();
-    /** Remove dynamic vertices absent from this snapshot and smooth matched ones. */
-    void FinalizeDynamicGraphUpdate();
-    void CommitSemanticGraphUpdate(
-        const std::function<StaticNodeEvidence(const Point3D&)>& evidence_query);
-
+    
     /**
      * Extract Navigation Nodes from Vertices Detected -> Update [new_nodes_] internally.
      * @param new_ctnodes new contour vertices without matching global navigation node
@@ -606,9 +458,6 @@ public:
     void UpdateNavGraph(const NodePtrStack& new_nodes,
                         const bool& is_freeze_vgraph,
                         NodePtrStack& clear_node);
-
-    /** Rebuild only the current robot/start node visibility connections. */
-    void UpdateOdomConnections();
 
 
     /**
@@ -641,9 +490,6 @@ public:
 
     static bool IsOnTerrainConnect(const NavNodePtr& node_ptr1, const NavNodePtr& node_ptr2, const bool& is_contour);
 
-    static bool IsOnTerrainRoute(const Point3D& start, const Point3D& end);
-    static bool IsOnTerrainRoute(const std::vector<Point3D>& route_points);
-
     static inline void FillFrontierVotes(const NavNodePtr& node_ptr, const bool& is_frontier) {
         if (is_frontier) {
             std::deque<int> vote_queue(dg_params_.finalize_thred, 1);
@@ -652,14 +498,8 @@ public:
     } 
 
     static inline bool IsPointOnTerrain(const Point3D& p) {
-        bool is_matched = false;
-        // Terrain height is provided by MapHandler's semantic terrain-support cache first, legacy grid second.
-        const float terrain_h = MapHandler::TerrainHeightOfPoint(
-            p, is_matched, true);
-        // An absent semantic floor sample is unknown space. The selected
-        // policy is optimistic for unknown space; known height discontinuities
-        // below are still rejected.
-        if (!is_matched) return true;
+        bool UNUSE_match = false;
+        const float terrain_h = MapHandler::TerrainHeightOfPoint(p, UNUSE_match, true);
         if (abs(p.z - terrain_h - FARUtil::vehicle_height) < FARUtil::kTolerZ) {
             return true;
         }
@@ -714,18 +554,6 @@ public:
         node_ptr->is_navpoint = is_navpoint;
         node_ptr->is_boundary = is_boundary;
         node_ptr->is_goal = is_goal;
-        node_ptr->source = is_odom ? GraphNodeSource::ODOM
-            : (is_goal ? GraphNodeSource::GOAL
-            : (is_navpoint ? GraphNodeSource::PATH_HISTORY
-            : (is_boundary ? GraphNodeSource::STATIC_GLOBAL
-                           : GraphNodeSource::UNKNOWN)));
-        node_ptr->static_seen_count = 0;
-        node_ptr->static_missed_count = 0;
-        node_ptr->observed_in_semantic_snapshot = false;
-        node_ptr->free_space_dir = Point3D(0.0f, 0.0f, 0.0f);
-        node_ptr->is_free_space_dir_reliable = false;
-        node_ptr->is_transient_contour_endpoint = false;
-        node_ptr->topology_missed_count = 0;
         node_ptr->clear_dumper_count = 0;
         node_ptr->frontier_votes.clear();
         node_ptr->invalid_boundary.clear();
@@ -733,9 +561,7 @@ public:
         node_ptr->poly_connects.clear();
         node_ptr->contour_connects.clear();
         node_ptr->contour_votes.clear();
-        node_ptr->edge_states.clear();
         node_ptr->potential_contours.clear();
-        node_ptr->potential_edges.clear();
         node_ptr->trajectory_connects.clear();
         node_ptr->trajectory_votes.clear();
         node_ptr->terrain_votes.clear();
@@ -758,7 +584,6 @@ public:
         // clear navigation connections
         for (const auto& cnode_ptr: node_ptr->connect_nodes) {
             FARUtil::EraseNodeFromStack(node_ptr, cnode_ptr->connect_nodes);
-            cnode_ptr->edge_states.erase(node_ptr->id);
         }
         for (const auto& pnode_ptr: node_ptr->poly_connects) {
             FARUtil::EraseNodeFromStack(node_ptr, pnode_ptr->poly_connects);
@@ -770,7 +595,6 @@ public:
         node_ptr->connect_nodes.clear();
         node_ptr->poly_connects.clear();
         node_ptr->edge_votes.clear();
-        node_ptr->edge_states.clear();
         node_ptr->potential_edges.clear();
     }
 
@@ -783,22 +607,8 @@ public:
 
     /* Add new navigation node to global graph */
     static inline void AddNodeToGraph(const NavNodePtr& node_ptr) {
-        if (node_ptr != NULL &&
-            (node_ptr->is_navpoint ||
-             node_ptr->source == GraphNodeSource::PATH_HISTORY)) {
-            // Historical poses are not part of either the persistent static
-            // graph or the current local obstacle graph.
-            idx_node_map_.erase(node_ptr->id);
-            ROS_WARN_THROTTLE(1.0,
-                "DG: rejected a historical trajectory node from the semantic graph.");
-        } else if (node_ptr != NULL) {
-            if (node_ptr->source == GraphNodeSource::DYNAMIC_LOCAL) {
-                dynamicLocalGraphNodes_.push_back(node_ptr);
-            } else if (node_ptr->source == GraphNodeSource::STATIC_CANDIDATE) {
-                staticCandidateGraphNodes_.push_back(node_ptr);
-            } else {
-                globalGraphNodes_.push_back(node_ptr);
-            }
+        if (node_ptr != NULL) {
+            globalGraphNodes_.push_back(node_ptr);
         } else if (FARUtil::IsDebug) {
             ROS_WARN_THROTTLE(1.0, "DG: exist new node pointer is NULL, fails to add into graph");
         }
@@ -830,59 +640,6 @@ public:
             node_ptr1->connect_nodes.push_back(node_ptr2);
             node_ptr2->connect_nodes.push_back(node_ptr1);
         }
-        const bool contour_identity = FARUtil::IsTypeInStack(
-            node_ptr2, node_ptr1->contour_connects);
-        GraphEdgeSource source = GraphEdgeSource::UNKNOWN;
-        if (node_ptr1->is_odom || node_ptr2->is_odom) {
-            source = GraphEdgeSource::ODOM_CONNECT;
-        } else if (node_ptr1->is_goal || node_ptr2->is_goal) {
-            source = GraphEdgeSource::GOAL_CONNECT;
-        } else if (node_ptr1->source == GraphNodeSource::DYNAMIC_LOCAL ||
-                   node_ptr2->source == GraphNodeSource::DYNAMIC_LOCAL) {
-            source = GraphEdgeSource::DYNAMIC_LOCAL;
-        } else if (contour_identity) {
-            source = GraphEdgeSource::STATIC_CONTOUR;
-        } else if (node_ptr1->source == GraphNodeSource::STATIC_GLOBAL &&
-                   node_ptr2->source == GraphNodeSource::STATIC_GLOBAL) {
-            source = GraphEdgeSource::STATIC_VISIBILITY;
-        } else if ((node_ptr1->source == GraphNodeSource::STATIC_GLOBAL &&
-                    node_ptr2->source == GraphNodeSource::STATIC_CANDIDATE) ||
-                   (node_ptr2->source == GraphNodeSource::STATIC_GLOBAL &&
-                    node_ptr1->source == GraphNodeSource::STATIC_CANDIDATE)) {
-            source = GraphEdgeSource::STITCH;
-        } else if (node_ptr1->source == GraphNodeSource::STATIC_CANDIDATE &&
-                   node_ptr2->source == GraphNodeSource::STATIC_CANDIDATE) {
-            source = GraphEdgeSource::STATIC_VISIBILITY;
-        }
-        GraphEdgeState state1, state2;
-        const auto prior1 = node_ptr1->edge_states.find(node_ptr2->id);
-        if (prior1 != node_ptr1->edge_states.end()) state1 = prior1->second;
-        const auto prior2 = node_ptr2->edge_states.find(node_ptr1->id);
-        if (prior2 != node_ptr2->edge_states.end()) state2 = prior2->second;
-        const bool dynamic_blocked =
-            state1.dynamic_blocked || state2.dynamic_blocked;
-        state1.source = state2.source = source;
-        state1.static_valid = state2.static_valid = true;
-        state1.active = state2.active = true;
-        state1.dynamic_blocked = state2.dynamic_blocked = dynamic_blocked;
-        if (!contour_identity) {
-            state1.validation_mode = state2.validation_mode =
-                EdgeValidationMode::VISIBILITY;
-            // A stale contour identity may share the same node pair with an
-            // independently validated ordinary visibility edge.  Once the
-            // contour identity is removed, its topology block must not leak
-            // into that ordinary edge.
-            state1.topology_blocked = state2.topology_blocked = false;
-            state1.has_clearance_geometry =
-                state2.has_clearance_geometry = false;
-            state1.route_cost = state2.route_cost = 0.0f;
-            state1.current_contour_misses =
-                state2.current_contour_misses = 0;
-            state1.static_visibility_misses =
-                state2.static_visibility_misses = 0;
-        }
-        node_ptr1->edge_states[node_ptr2->id] = state1;
-        node_ptr2->edge_states[node_ptr1->id] = state2;
     }
 
     /* Erase connection between given two nodes */
@@ -891,8 +648,6 @@ public:
         FARUtil::EraseNodeFromStack(node_ptr2, node_ptr1->connect_nodes);
         // clear node1 in node2's connection 
         FARUtil::EraseNodeFromStack(node_ptr1, node_ptr2->connect_nodes);
-        node_ptr1->edge_states.erase(node_ptr2->id);
-        node_ptr2->edge_states.erase(node_ptr1->id);
     }
 
     static inline NavNodePtr MappedNavNodeFromId(const std::size_t id) {
@@ -902,10 +657,6 @@ public:
         } else {
             return NULL;
         }
-    }
-
-    static inline bool IsSearchEligible(const NavNodePtr& node_ptr) {
-        return node_ptr && IsGraphNodeSearchEligible(*node_ptr);
     }
 
     /* Clear Current Graph */
@@ -929,127 +680,14 @@ public:
         out_contour_nodes_map_.clear();
         new_nodes_.clear();
         globalGraphNodes_.clear();
-        staticCandidateGraphNodes_.clear();
-        dynamicLocalGraphNodes_.clear();
-        staticMainNodeIds_.clear();
     }
 
     /* Get Internal Values */
     const NavNodePtr    GetOdomNode()         const { return odom_node_ptr_;};
-    /** Every node currently eligible for graph search before applying robot
-     * reachability. This diagnostic view preserves disconnected valid
-     * components when the odom/start node cannot attach to the graph. */
-    NodePtrStack GetEligibleSearchGraph() const {
-        NodePtrStack eligible_graph;
-        std::unordered_set<std::size_t> eligible_ids;
-        const auto append_eligible = [&eligible_graph, &eligible_ids](
-            const NavNodePtr& node_ptr) {
-            if (node_ptr && eligible_ids.insert(node_ptr->id).second) {
-                eligible_graph.push_back(node_ptr);
-            }
-        };
-        for (const auto& node_ptr : globalGraphNodes_) {
-            if (!IsSearchEligible(node_ptr)) continue;
-            if (IsGraphQueryEndpoint(*node_ptr)) {
-                append_eligible(node_ptr);
-                continue;
-            }
-            // Keep stale detached history out of search. A historical corner
-            // that is explicitly matched to this snapshot's contour may,
-            // however, bridge two current collision-validated contour
-            // intervals even while its old reusable edge is blocked.
-            if (node_ptr->source == GraphNodeSource::STATIC_GLOBAL &&
-                !IsStaticGlobalEligibleForCurrentSearch(
-                    *node_ptr,
-                    staticMainNodeIds_.count(node_ptr->id) > 0)) {
-                continue;
-            }
-            append_eligible(node_ptr);
-        }
-        for (const auto& node_ptr : staticCandidateGraphNodes_) {
-            if (IsSearchEligible(node_ptr) &&
-                HasActiveSearchEligibleIncidentEdge(*node_ptr)) {
-                append_eligible(node_ptr);
-            }
-        }
-        for (const auto& node_ptr : dynamicLocalGraphNodes_) {
-            if (IsSearchEligible(node_ptr) &&
-                HasActiveSearchEligibleIncidentEdge(*node_ptr)) {
-                append_eligible(node_ptr);
-            }
-        }
-        return eligible_graph;
-    };
-    NodePtrStack GetNavGraph() const {
-        const NodePtrStack eligible_graph = GetEligibleSearchGraph();
-        std::unordered_set<std::size_t> eligible_ids;
-        eligible_ids.reserve(eligible_graph.size());
-        for (const auto& node_ptr : eligible_graph) {
-            if (node_ptr) eligible_ids.insert(node_ptr->id);
-        }
-        const std::unordered_set<std::size_t> robot_reachable =
-            ActiveReachableNodeIdsWithin(odom_node_ptr_, eligible_ids);
-        NodePtrStack search_graph;
-        search_graph.reserve(robot_reachable.size());
-        for (const auto& node_ptr : eligible_graph) {
-            if (robot_reachable.count(node_ptr->id)) {
-                search_graph.push_back(node_ptr);
-            }
-        }
-        return search_graph;
-    };
-    NodePtrStack GetMatchingGraph() const {
-        NodePtrStack nodes = globalGraphNodes_;
-        nodes.insert(nodes.end(), staticCandidateGraphNodes_.begin(),
-                     staticCandidateGraphNodes_.end());
-        nodes.insert(nodes.end(), dynamicLocalGraphNodes_.begin(),
-                     dynamicLocalGraphNodes_.end());
-        return nodes;
-    };
-    /** All confirmed static history, including currently detached components
-     * and edge-less nodes. This is the global-map/diagnostic layer, not the
-     * set offered to the current path search. */
-    NodePtrStack GetStaticGraphNodes() const {
-        NodePtrStack nodes;
-        for (const auto& node_ptr : globalGraphNodes_) {
-            if (node_ptr &&
-                node_ptr->source == GraphNodeSource::STATIC_GLOBAL) {
-                nodes.push_back(node_ptr);
-            }
-        }
-        return nodes;
-    };
-    /** Currently selected reusable static component. Search applies an
-     * additional robot-reachability filter in GetNavGraph(). */
-    NodePtrStack GetStaticMainGraphNodes() const {
-        NodePtrStack nodes;
-        for (const auto& node_ptr : globalGraphNodes_) {
-            if (!node_ptr ||
-                node_ptr->source != GraphNodeSource::STATIC_GLOBAL ||
-                !staticMainNodeIds_.count(node_ptr->id)) continue;
-            const bool has_main_edge = std::any_of(
-                node_ptr->connect_nodes.begin(), node_ptr->connect_nodes.end(),
-                [&node_ptr](const NavNodePtr& neighbor) {
-                    return neighbor &&
-                        staticMainNodeIds_.count(neighbor->id) &&
-                        IsGraphEdgeSearchEligible(*node_ptr, *neighbor);
-                });
-            if (has_main_edge) nodes.push_back(node_ptr);
-        }
-        return nodes;
-    };
-    NodePtrStack GetDynamicLocalNodes() const {
-        return dynamicLocalGraphNodes_;
-    };
-    const NodePtrStack& GetStaticCandidateNodes() const {
-        return staticCandidateGraphNodes_;
-    };
+    const NodePtrStack& GetNavGraph()         const { return globalGraphNodes_;};
     const NodePtrStack& GetExtendLocalNode()  const { return extend_match_nodes_;};
     const NodePtrStack& GetOutContourNodes()  const { return out_contour_nodes_;};
     const NodePtrStack& GetNewNodes()         const { return new_nodes_;};
-    static const std::vector<EdgeDiagnostic>& GetContourEdgeDiagnostics() {
-        return contour_edge_diagnostics_;
-    }
     const NavNodePtr&   GetLastInterNavNode() const { return last_internav_ptr_;};
 
 

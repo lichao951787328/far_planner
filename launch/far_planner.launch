@@ -1,5 +1,5 @@
 <launch>
-    <arg name="odom_topic" default="/Odometry"/>
+    <arg name="odom_topic" default="/state_estimation"/>
     <arg name="terrain_cloud_topic" default="/terrain_map_ext"/>
     <arg name="terrain_local_topic" default="/terrain_map"/>
     <arg name="scan_cloud_topic" default="/registered_scan"/>

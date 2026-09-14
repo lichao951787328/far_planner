@@ -7,7 +7,6 @@
 
 
 #include "far_planner/planner_visualizer.h"
-#include "far_planner/dynamic_graph.h"
 
 /***************************************************************************************/
 
@@ -16,29 +15,13 @@ void DPVisualizer::Init(const ros::NodeHandle& nh) {
     nh_ = nh;
     point_cloud_ptr_ = PointCloudPtr(new pcl::PointCloud<PCLPoint>());
     // Rviz Publisher
-    viz_node_pub_    = nh_.advertise<Marker>("viz_node_topic", 5);
-    viz_path_pub_    = nh_.advertise<Marker>("viz_path_topic", 5);
-    nav_path_pub_    = nh_.advertise<nav_msgs::Path>("far_global_path", 5);
-    viz_poly_pub_    = nh_.advertise<MarkerArray>("viz_poly_topic", 5);
-    viz_graph_pub_   = nh_.advertise<MarkerArray>("viz_graph_topic", 5);
-    viz_contour_pub_ = nh_.advertise<MarkerArray>("viz_contour_topic", 5);
-    viz_map_pub_     = nh_.advertise<MarkerArray>("viz_grid_map_topic", 5);
-    viz_view_extend  = nh_.advertise<MarkerArray>("viz_viewpoint_extend_topic", 5);
-    viz_static_global_pub_ =
-        nh_.advertise<MarkerArray>("/viz_static_global_graph", 2);
-    viz_static_main_pub_ =
-        nh_.advertise<MarkerArray>("/viz_static_main_graph", 2);
-    viz_dynamic_local_pub_ =
-        nh_.advertise<MarkerArray>("/viz_dynamic_local_graph", 2);
-    // These are complete post-commit graph snapshots. Latch them so a user
-    // can disable/re-enable an RViz display while stepped replay is paused
-    // without having to consume another bag frame merely to republish it.
-    viz_eligible_graph_pub_ =
-        nh_.advertise<MarkerArray>("/viz_current_eligible_graph", 2, true);
-    viz_search_graph_pub_ =
-        nh_.advertise<MarkerArray>("/viz_current_search_graph", 2, true);
-    viz_dynamic_blocked_pub_ =
-        nh_.advertise<MarkerArray>("/viz_dynamic_blocked_edges", 2);
+    viz_node_pub_    = nh_.advertise<Marker>("/viz_node_topic", 5);
+    viz_path_pub_    = nh_.advertise<Marker>("/viz_path_topic", 5);
+    viz_poly_pub_    = nh_.advertise<MarkerArray>("/viz_poly_topic", 5);
+    viz_graph_pub_   = nh_.advertise<MarkerArray>("/viz_graph_topic", 5);
+    viz_contour_pub_ = nh_.advertise<MarkerArray>("/viz_contour_topic", 5);
+    viz_map_pub_     = nh_.advertise<MarkerArray>("/viz_grid_map_topic", 5);
+    viz_view_extend  = nh_.advertise<MarkerArray>("/viz_viewpoint_extend_topic", 5);
 }
 
 void DPVisualizer::VizNodes(const NodePtrStack& node_stack, 
@@ -61,129 +44,6 @@ void DPVisualizer::VizNodes(const NodePtrStack& node_stack,
     viz_node_pub_.publish(node_marker);
 }
 
-void DPVisualizer::VizSemanticGraphLayers(
-    const NodePtrStack& static_global, const NodePtrStack& static_main,
-    const NodePtrStack& dynamic_local, const NodePtrStack& eligible_graph,
-    const NodePtrStack& search_graph) {
-    const auto publish_layer = [this](
-        const NodePtrStack& nodes, const ros::Publisher& publisher,
-        const std::string& ns, const VizColor color,
-        const bool skip_dynamic_blocked, const float node_scale,
-        const float edge_scale, const float z_offset) {
-        MarkerArray markers;
-        Marker node_marker;
-        Marker edge_marker;
-        Marker clip_attempt_marker;
-        node_marker.type = Marker::SPHERE_LIST;
-        edge_marker.type = Marker::LINE_LIST;
-        clip_attempt_marker.type = Marker::LINE_LIST;
-        this->SetMarker(color, ns + "_nodes", node_scale, 0.9f,
-                        node_marker);
-        this->SetMarker(color, ns + "_edges", edge_scale, 0.85f,
-                        edge_marker);
-        this->SetMarker(VizColor::MAGNA, ns + "_clip_attempt_edges",
-                        std::max(edge_scale, 0.16f), 0.95f,
-                        clip_attempt_marker);
-        // The graph geometry remains unchanged. Lift only these diagnostic
-        // markers so occupied OctoMap voxels cannot hide lines that lie on
-        // the terrain/obstacle surface in RViz.
-        node_marker.pose.position.z = z_offset;
-        edge_marker.pose.position.z = z_offset;
-        clip_attempt_marker.pose.position.z = z_offset + 0.02f;
-        std::unordered_set<std::size_t> ids;
-        for (const auto& node_ptr : nodes) {
-            if (!node_ptr) continue;
-            ids.insert(node_ptr->id);
-            node_marker.points.push_back(
-                FARUtil::Point3DToGeoMsgPoint(node_ptr->position));
-        }
-        for (const auto& node_ptr : nodes) {
-            if (!node_ptr) continue;
-            for (const auto& neighbor : node_ptr->connect_nodes) {
-                if (!neighbor || node_ptr->id >= neighbor->id ||
-                    !ids.count(neighbor->id)) continue;
-                if (skip_dynamic_blocked &&
-                    !IsGraphEdgeSearchEligible(*node_ptr, *neighbor)) {
-                    continue;
-                }
-                const auto edge_state =
-                    node_ptr->edge_states.find(neighbor->id);
-                Marker& selected =
-                    edge_state != node_ptr->edge_states.end() &&
-                            edge_state->second.validation_mode ==
-                                EdgeValidationMode::CLIP_ATTEMPT
-                        ? clip_attempt_marker : edge_marker;
-                selected.points.push_back(
-                    FARUtil::Point3DToGeoMsgPoint(node_ptr->position));
-                selected.points.push_back(
-                    FARUtil::Point3DToGeoMsgPoint(neighbor->position));
-            }
-        }
-        markers.markers.push_back(node_marker);
-        markers.markers.push_back(edge_marker);
-        markers.markers.push_back(clip_attempt_marker);
-        publisher.publish(markers);
-    };
-
-    publish_layer(static_global, viz_static_global_pub_, "static_global",
-                  VizColor::BLUE, false, 0.60f, 0.14f, 0.12f);
-    publish_layer(static_main, viz_static_main_pub_, "static_main",
-                  VizColor::EMERALD, true, 0.65f, 0.16f, 0.18f);
-    publish_layer(dynamic_local, viz_dynamic_local_pub_, "dynamic_local",
-                  VizColor::MAGNA, false, 0.65f, 0.18f, 0.22f);
-    // The eligible layer intentionally ignores robot reachability, but still
-    // displays only currently active edges. It therefore remains visible when
-    // an occupied odom/start node temporarily disconnects the yellow search
-    // graph from otherwise valid topology.
-    publish_layer(eligible_graph, viz_eligible_graph_pub_, "eligible_graph",
-                  VizColor::ORANGE, true, 0.55f, 0.12f, 0.20f);
-    publish_layer(search_graph, viz_search_graph_pub_, "search_graph",
-                  VizColor::YELLOW, true, 0.70f, 0.18f, 0.25f);
-
-    MarkerArray blocked_markers;
-    Marker blocked;
-    blocked.type = Marker::LINE_LIST;
-    this->SetMarker(VizColor::RED, "dynamic_blocked", 0.22f, 0.9f, blocked);
-    blocked.pose.position.z = 0.28f;
-    std::unordered_set<std::size_t> search_ids;
-    for (const auto& node_ptr : search_graph) {
-        if (node_ptr) search_ids.insert(node_ptr->id);
-    }
-    for (const auto& node_ptr : search_graph) {
-        if (!node_ptr) continue;
-        for (const auto& neighbor : node_ptr->connect_nodes) {
-            if (!neighbor || node_ptr->id >= neighbor->id ||
-                !search_ids.count(neighbor->id)) continue;
-            const auto state = node_ptr->edge_states.find(neighbor->id);
-            if (state == node_ptr->edge_states.end() ||
-                !state->second.dynamic_blocked) continue;
-            const bool has_route_geometry =
-                state->second.validation_mode ==
-                    EdgeValidationMode::CONTOUR_FOLLOW &&
-                state->second.has_clearance_geometry;
-            if (has_route_geometry &&
-                state->second.route_points.size() >= 2) {
-                for (std::size_t index = 1;
-                     index < state->second.route_points.size(); ++index) {
-                    blocked.points.push_back(FARUtil::Point3DToGeoMsgPoint(
-                        state->second.route_points[index - 1]));
-                    blocked.points.push_back(FARUtil::Point3DToGeoMsgPoint(
-                        state->second.route_points[index]));
-                }
-            } else {
-                blocked.points.push_back(FARUtil::Point3DToGeoMsgPoint(
-                    has_route_geometry ? state->second.route_start
-                                       : node_ptr->position));
-                blocked.points.push_back(FARUtil::Point3DToGeoMsgPoint(
-                    has_route_geometry ? state->second.route_end
-                                       : neighbor->position));
-            }
-        }
-    }
-    blocked_markers.markers.push_back(blocked);
-    viz_dynamic_blocked_pub_.publish(blocked_markers);
-}
-
 void DPVisualizer::VizPoint3D(const Point3D& point, 
                              const std::string& ns,
                              const VizColor& color,
@@ -200,69 +60,17 @@ void DPVisualizer::VizPoint3D(const Point3D& point,
     viz_node_pub_.publish(node_marker);
 }
 
-void DPVisualizer::VizPath(const NodePtrStack& global_path,
-                           const bool& is_free_nav,
-                           const Point3D* commanded_goal) {
+void DPVisualizer::VizPath(const NodePtrStack& global_path, const bool& is_free_nav) {
     Marker path_marker;
     path_marker.type = Marker::LINE_STRIP;
     const VizColor color = is_free_nav ? VizColor::GREEN : VizColor::BLUE;
     this->SetMarker(color, "global_path", 0.75f, 0.9f, path_marker);
-
-    nav_msgs::Path path_message;
-    path_message.header.frame_id = FARUtil::worldFrameId;
-    path_message.header.stamp = ros::Time::now();
-    const auto append_path_point = [&path_marker, &path_message](
-        const Point3D& point) {
-        const geometry_msgs::Point message_point =
-            FARUtil::Point3DToGeoMsgPoint(point);
-        if (!path_marker.points.empty()) {
-            const geometry_msgs::Point& previous = path_marker.points.back();
-            const double dx = previous.x - message_point.x;
-            const double dy = previous.y - message_point.y;
-            const double dz = previous.z - message_point.z;
-            if (dx * dx + dy * dy + dz * dz <= 1e-10) return;
-        }
-        path_marker.points.push_back(message_point);
-        geometry_msgs::PoseStamped pose;
-        pose.header = path_message.header;
-        pose.pose.position = message_point;
-        pose.pose.orientation.w = 1.0;
-        path_message.poses.push_back(pose);
-    };
-
-    if (!global_path.empty() && global_path.front()) {
-        append_path_point(global_path.front()->position);
-    }
-    for (std::size_t index = 1; index < global_path.size(); ++index) {
-        const NavNodePtr& previous = global_path[index - 1];
-        const NavNodePtr& current = global_path[index];
-        if (!previous || !current) continue;
-        const auto state = previous->edge_states.find(current->id);
-        if (state != previous->edge_states.end() &&
-            state->second.validation_mode ==
-                EdgeValidationMode::CONTOUR_FOLLOW &&
-            state->second.has_clearance_geometry) {
-            if (state->second.route_points.empty()) {
-                append_path_point(state->second.route_start);
-                append_path_point(state->second.route_end);
-            } else {
-                for (const Point3D& route_point :
-                     state->second.route_points) {
-                    append_path_point(route_point);
-                }
-            }
-        }
-        append_path_point(current->position);
-    }
-    // Preserve the exact operator command as the terminal pose.  Normally it
-    // equals the Graph goal.  If FAR temporarily adjusted the goal onto nearby
-    // terrain, keeping both poses makes that distinction observable to tests
-    // and downstream consumers instead of silently changing the command.
-    if (commanded_goal && !global_path.empty()) {
-        append_path_point(*commanded_goal);
+    geometry_msgs::Point geo_p;
+    for (const auto& node_ptr : global_path) {
+        geo_p = FARUtil::Point3DToGeoMsgPoint(node_ptr->position);
+        path_marker.points.push_back(geo_p);
     }
     viz_path_pub_.publish(path_marker);
-    nav_path_pub_.publish(path_message);
 }
 
 void DPVisualizer::VizViewpointExtend(const NavNodePtr& ori_nav_ptr, const Point3D& extend_point) {
@@ -404,21 +212,8 @@ void DPVisualizer::VizContourGraph(const CTNodeStack& contour_graph)
 void DPVisualizer::VizGraph(const NodePtrStack& graph) {
     MarkerArray graph_marker_array;
     Marker nav_node_marker, unfinal_node_marker, near_node_marker, covered_node_marker, internav_node_marker, frontier_node_marker,
-           edge_marker, visual_edge_marker, contour_edge_marker,
-           clip_attempt_edge_marker, free_edge_marker, odom_edge_marker,
-           goal_edge_marker, traj_edge_marker,
-           corner_surf_marker, contour_align_marker, corner_helper_marker, boundary_node_marker, boundary_edge_marker,
-           contour_clearance_marker, validated_route_marker,
-           endpoint_excluded_route_marker, contour_static_reject_marker,
-           contour_dynamic_reject_marker, contour_vote_pending_marker,
-           visibility_direction_reject_marker,
-           visibility_sparsified_marker,
-           visibility_triangle_sparsified_marker,
-           visibility_static_reject_marker,
-           visibility_dynamic_reject_marker,
-           visibility_polygon_reject_marker,
-           visibility_terrain_reject_marker,
-           visibility_vote_pending_marker;
+           edge_marker, visual_edge_marker, contour_edge_marker, free_edge_marker, odom_edge_marker, goal_edge_marker, traj_edge_marker,
+           corner_surf_marker, contour_align_marker, corner_helper_marker, boundary_node_marker, boundary_edge_marker;
     nav_node_marker.type       = Marker::SPHERE_LIST;
     unfinal_node_marker.type   = Marker::SPHERE_LIST;
     near_node_marker.type      = Marker::SPHERE_LIST;
@@ -431,25 +226,10 @@ void DPVisualizer::VizGraph(const NodePtrStack& graph) {
     visual_edge_marker.type    = Marker::LINE_LIST;
     free_edge_marker.type      = Marker::LINE_LIST;
     contour_edge_marker.type   = Marker::LINE_LIST;
-    clip_attempt_edge_marker.type = Marker::LINE_LIST;
     odom_edge_marker.type      = Marker::LINE_LIST;
     goal_edge_marker.type      = Marker::LINE_LIST;
     traj_edge_marker.type      = Marker::LINE_LIST;
     boundary_edge_marker.type  = Marker::LINE_LIST;
-    contour_clearance_marker.type = Marker::LINE_LIST;
-    validated_route_marker.type = Marker::LINE_LIST;
-    endpoint_excluded_route_marker.type = Marker::LINE_LIST;
-    contour_static_reject_marker.type = Marker::LINE_LIST;
-    contour_dynamic_reject_marker.type = Marker::LINE_LIST;
-    contour_vote_pending_marker.type = Marker::LINE_LIST;
-    visibility_direction_reject_marker.type = Marker::LINE_LIST;
-    visibility_sparsified_marker.type = Marker::LINE_LIST;
-    visibility_triangle_sparsified_marker.type = Marker::LINE_LIST;
-    visibility_static_reject_marker.type = Marker::LINE_LIST;
-    visibility_dynamic_reject_marker.type = Marker::LINE_LIST;
-    visibility_polygon_reject_marker.type = Marker::LINE_LIST;
-    visibility_terrain_reject_marker.type = Marker::LINE_LIST;
-    visibility_vote_pending_marker.type = Marker::LINE_LIST;
     corner_surf_marker.type    = Marker::LINE_LIST;
     corner_helper_marker.type  = Marker::CUBE_LIST;
     this->SetMarker(VizColor::WHITE,   "global_vertex",     0.5f,  0.5f,  nav_node_marker);
@@ -463,49 +243,13 @@ void DPVisualizer::VizGraph(const NodePtrStack& graph) {
     this->SetMarker(VizColor::EMERALD, "freespace_vgraph",  0.1f,  0.25f, free_edge_marker);
     this->SetMarker(VizColor::EMERALD, "visibility_edge",   0.1f,  0.25f, visual_edge_marker);
     this->SetMarker(VizColor::RED,     "polygon_edge",      0.15f, 0.25f, contour_edge_marker);
-    this->SetMarker(VizColor::MAGNA,   "clip_attempt_edge", 0.24f, 0.95f, clip_attempt_edge_marker);
     this->SetMarker(VizColor::ORANGE,  "boundary_edge",     0.2f,  0.25f, boundary_edge_marker);
-    // Odom edges are the current start node's real graph connections.  Draw
-    // them last as a thick, dark overlay so it is easy to distinguish direct
-    // start connections from obstacle-to-obstacle visibility edges in RViz.
-    this->SetMarker(VizColor::BLACK,   "odom_edge",         0.28f, 0.95f, odom_edge_marker);
+    this->SetMarker(VizColor::ORANGE,  "odom_edge",         0.1f,  0.15f, odom_edge_marker);
     this->SetMarker(VizColor::YELLOW,  "to_goal_edge",      0.1f,  0.15f, goal_edge_marker);
     this->SetMarker(VizColor::GREEN,   "trajectory_edge",   0.1f,  0.5f,  traj_edge_marker);
     this->SetMarker(VizColor::YELLOW,  "vertex_angle",      0.15f, 0.75f, corner_surf_marker);
     this->SetMarker(VizColor::YELLOW,  "angle_direct",      0.25f, 0.75f, corner_helper_marker);
     this->SetMarker(VizColor::YELLOW,  "vertices_matches",  0.1f,  0.75f, contour_align_marker);
-    this->SetMarker(VizColor::GREEN, "contour_clearance_edge", 0.28f,
-                    0.95f, contour_clearance_marker);
-    this->SetMarker(VizColor::PURPLE, "validated_route_edge", 0.18f,
-                    0.75f, validated_route_marker);
-    this->SetMarker(VizColor::PURPLE,
-                    "validated_route_edge_endpoint_excluded", 0.12f,
-                    0.45f, endpoint_excluded_route_marker);
-    this->SetMarker(VizColor::ORANGE, "contour_static_rejected", 0.18f,
-                    0.85f, contour_static_reject_marker);
-    this->SetMarker(VizColor::RED, "contour_dynamic_blocked", 0.22f,
-                    0.90f, contour_dynamic_reject_marker);
-    this->SetMarker(VizColor::WHITE, "contour_vote_pending", 0.10f,
-                    0.35f, contour_vote_pending_marker);
-    this->SetMarker(VizColor::YELLOW, "visibility_direction_rejected", 0.10f,
-                    0.60f, visibility_direction_reject_marker);
-    this->SetMarker(VizColor::WHITE, "visibility_direction_sparsified", 0.10f,
-                    0.45f, visibility_sparsified_marker);
-    this->SetMarker(VizColor::WHITE, "visibility_triangle_sparsified", 0.12f,
-                    0.75f, visibility_triangle_sparsified_marker);
-    visibility_triangle_sparsified_marker.color.r = 0.1f;
-    visibility_triangle_sparsified_marker.color.g = 0.8f;
-    visibility_triangle_sparsified_marker.color.b = 1.0f;
-    this->SetMarker(VizColor::ORANGE, "visibility_static_rejected", 0.14f,
-                    0.75f, visibility_static_reject_marker);
-    this->SetMarker(VizColor::RED, "visibility_dynamic_rejected", 0.16f,
-                    0.80f, visibility_dynamic_reject_marker);
-    this->SetMarker(VizColor::PURPLE, "visibility_polygon_rejected", 0.12f,
-                    0.65f, visibility_polygon_reject_marker);
-    this->SetMarker(VizColor::BLUE, "visibility_terrain_rejected", 0.12f,
-                    0.65f, visibility_terrain_reject_marker);
-    this->SetMarker(VizColor::WHITE, "visibility_vote_pending", 0.08f,
-                    0.30f, visibility_vote_pending_marker);
     /* Lambda Function */
     auto Draw_Contour_Align = [&](const NavNodePtr& node_ptr) {
         if (node_ptr->is_odom || !node_ptr->is_contour_match) return;
@@ -520,63 +264,10 @@ void DPVisualizer::VizGraph(const NodePtrStack& graph) {
         p1 = FARUtil::Point3DToGeoMsgPoint(node_ptr->position);
         // navigable vgraph
         for (const auto& cnode : node_ptr->connect_nodes) {
-            // The legacy FAR Graph display now represents the graph that can
-            // actually be searched in this snapshot.  Persistent but
-            // dynamically blocked edges remain visible on the dedicated
-            // static/blocked layer topics instead of appearing traversable.
-            if (!cnode || !IsGraphEdgeSearchEligible(*node_ptr, *cnode)) {
-                continue;
-            }
             if (node_ptr->is_boundary && cnode->is_boundary &&  
                 node_ptr->invalid_boundary.find(cnode->id) != node_ptr->invalid_boundary.end()) 
             {
                 continue;
-            }
-            const auto state = node_ptr->edge_states.find(cnode->id);
-            if (node_ptr->id < cnode->id &&
-                state != node_ptr->edge_states.end() &&
-                state->second.IsActive() &&
-                state->second.has_clearance_geometry) {
-                Marker* route_marker = &endpoint_excluded_route_marker;
-                bool terminal_corner_was_projected = true;
-                if (state->second.source == GraphEdgeSource::ODOM_CONNECT ||
-                    state->second.source == GraphEdgeSource::GOAL_CONNECT) {
-                    const NavNodePtr obstacle_node =
-                        (node_ptr->is_odom || node_ptr->is_goal)
-                            ? cnode : node_ptr;
-                    const Point3D obstacle_route_endpoint =
-                        obstacle_node == node_ptr
-                            ? state->second.route_start
-                            : state->second.route_end;
-                    terminal_corner_was_projected =
-                        (obstacle_route_endpoint - obstacle_node->position)
-                            .norm_flat() > FARUtil::kEpsilon;
-                }
-                if (state->second.validation_mode ==
-                        EdgeValidationMode::CONTOUR_FOLLOW ||
-                    ((state->second.source == GraphEdgeSource::ODOM_CONNECT ||
-                      state->second.source == GraphEdgeSource::GOAL_CONNECT) &&
-                     terminal_corner_was_projected)) {
-                    route_marker = &validated_route_marker;
-                }
-                if (state->second.route_points.size() >= 2) {
-                    for (std::size_t index = 1;
-                         index < state->second.route_points.size(); ++index) {
-                        route_marker->points.push_back(
-                            FARUtil::Point3DToGeoMsgPoint(
-                                state->second.route_points[index - 1]));
-                        route_marker->points.push_back(
-                            FARUtil::Point3DToGeoMsgPoint(
-                                state->second.route_points[index]));
-                    }
-                } else {
-                    route_marker->points.push_back(
-                        FARUtil::Point3DToGeoMsgPoint(
-                            state->second.route_start));
-                    route_marker->points.push_back(
-                        FARUtil::Point3DToGeoMsgPoint(
-                            state->second.route_end));
-                }
             }
             p2 = FARUtil::Point3DToGeoMsgPoint(cnode->position);
             edge_marker.points.push_back(p1);
@@ -584,19 +275,13 @@ void DPVisualizer::VizGraph(const NodePtrStack& graph) {
         }
         // poly edges
         for (const auto& cnode : node_ptr->poly_connects) {
-            if (!cnode || !IsGraphEdgeSearchEligible(*node_ptr, *cnode)) {
-                continue;
-            }
             p2 = FARUtil::Point3DToGeoMsgPoint(cnode->position);
-            // Give the start-node identity priority when a direct edge also
-            // happens to terminate at the goal.  This makes odom_edge contain
-            // every currently accepted edge incident on the start node.
-            if (node_ptr->is_odom || cnode->is_odom) {
-                odom_edge_marker.points.push_back(p1);
-                odom_edge_marker.points.push_back(p2);
-            } else if (FARUtil::IsOutsideGoal(node_ptr) || FARUtil::IsOutsideGoal(cnode)) {
+            if (FARUtil::IsOutsideGoal(node_ptr) || FARUtil::IsOutsideGoal(cnode)) {
                 goal_edge_marker.points.push_back(p1);
                 goal_edge_marker.points.push_back(p2);
+            } else if (node_ptr->is_odom || cnode->is_odom) {
+                odom_edge_marker.points.push_back(p1);
+                odom_edge_marker.points.push_back(p2);
             } else {
                 visual_edge_marker.points.push_back(p1);
                 visual_edge_marker.points.push_back(p2);
@@ -608,41 +293,9 @@ void DPVisualizer::VizGraph(const NodePtrStack& graph) {
         }
         // contour edges
         for (const auto& ct_cnode : node_ptr->contour_connects) {
-            if (!ct_cnode ||
-                !IsGraphEdgeSearchEligible(*node_ptr, *ct_cnode)) {
-                continue;
-            }
             p2 = FARUtil::Point3DToGeoMsgPoint(ct_cnode->position);
-            const auto state = node_ptr->edge_states.find(ct_cnode->id);
-            Marker& contour_marker =
-                state != node_ptr->edge_states.end() &&
-                        state->second.validation_mode ==
-                            EdgeValidationMode::CLIP_ATTEMPT
-                    ? clip_attempt_edge_marker : contour_edge_marker;
-            contour_marker.points.push_back(p1);
-            contour_marker.points.push_back(p2);
-            if (node_ptr->id < ct_cnode->id &&
-                state != node_ptr->edge_states.end() &&
-                state->second.has_clearance_geometry) {
-                if (state->second.route_points.size() >= 2) {
-                    for (std::size_t index = 1;
-                         index < state->second.route_points.size(); ++index) {
-                        contour_clearance_marker.points.push_back(
-                            FARUtil::Point3DToGeoMsgPoint(
-                                state->second.route_points[index - 1]));
-                        contour_clearance_marker.points.push_back(
-                            FARUtil::Point3DToGeoMsgPoint(
-                                state->second.route_points[index]));
-                    }
-                } else {
-                    contour_clearance_marker.points.push_back(
-                        FARUtil::Point3DToGeoMsgPoint(
-                            state->second.route_start));
-                    contour_clearance_marker.points.push_back(
-                        FARUtil::Point3DToGeoMsgPoint(
-                            state->second.route_end));
-                }
-            }
+            contour_edge_marker.points.push_back(p1);
+            contour_edge_marker.points.push_back(p2);
             if (node_ptr->is_boundary && ct_cnode->is_boundary) {
                 boundary_edge_marker.points.push_back(p1);
                 boundary_edge_marker.points.push_back(p2);
@@ -709,46 +362,6 @@ void DPVisualizer::VizGraph(const NodePtrStack& graph) {
         idx ++;    
     } 
     nav_node_marker.points.resize(idx);
-    for (const auto& diagnostic :
-         DynamicGraph::GetContourEdgeDiagnostics()) {
-        Marker* marker = &contour_static_reject_marker;
-        if (diagnostic.mode == EdgeValidationMode::VISIBILITY) {
-            switch (diagnostic.reason) {
-                case EdgeRejectReason::DIRECTION_REJECTED:
-                    marker = &visibility_direction_reject_marker;
-                    break;
-                case EdgeRejectReason::DIRECTION_SPARSIFIED:
-                    marker = &visibility_sparsified_marker;
-                    break;
-                case EdgeRejectReason::TRIANGLE_SPARSIFIED:
-                    marker = &visibility_triangle_sparsified_marker;
-                    break;
-                case EdgeRejectReason::STATIC_CLOUD_BLOCKED:
-                    marker = &visibility_static_reject_marker;
-                    break;
-                case EdgeRejectReason::DYNAMIC_CLOUD_BLOCKED:
-                    marker = &visibility_dynamic_reject_marker;
-                    break;
-                case EdgeRejectReason::TERRAIN_BLOCKED:
-                    marker = &visibility_terrain_reject_marker;
-                    break;
-                case EdgeRejectReason::VOTE_PENDING:
-                    marker = &visibility_vote_pending_marker;
-                    break;
-                default:
-                    marker = &visibility_polygon_reject_marker;
-                    break;
-            }
-        } else if (diagnostic.reason == EdgeRejectReason::DYNAMIC_CLOUD_BLOCKED) {
-            marker = &contour_dynamic_reject_marker;
-        } else if (diagnostic.reason == EdgeRejectReason::VOTE_PENDING) {
-            marker = &contour_vote_pending_marker;
-        }
-        marker->points.push_back(
-            FARUtil::Point3DToGeoMsgPoint(diagnostic.start));
-        marker->points.push_back(
-            FARUtil::Point3DToGeoMsgPoint(diagnostic.end));
-    }
     graph_marker_array.markers.push_back(nav_node_marker);
     graph_marker_array.markers.push_back(unfinal_node_marker);
     graph_marker_array.markers.push_back(near_node_marker);
@@ -761,21 +374,6 @@ void DPVisualizer::VizGraph(const NodePtrStack& graph) {
     graph_marker_array.markers.push_back(free_edge_marker);
     graph_marker_array.markers.push_back(goal_edge_marker);
     graph_marker_array.markers.push_back(contour_edge_marker);
-    graph_marker_array.markers.push_back(clip_attempt_edge_marker);
-    graph_marker_array.markers.push_back(contour_clearance_marker);
-    graph_marker_array.markers.push_back(validated_route_marker);
-    graph_marker_array.markers.push_back(endpoint_excluded_route_marker);
-    graph_marker_array.markers.push_back(contour_static_reject_marker);
-    graph_marker_array.markers.push_back(contour_dynamic_reject_marker);
-    graph_marker_array.markers.push_back(contour_vote_pending_marker);
-    graph_marker_array.markers.push_back(visibility_direction_reject_marker);
-    graph_marker_array.markers.push_back(visibility_sparsified_marker);
-    graph_marker_array.markers.push_back(visibility_triangle_sparsified_marker);
-    graph_marker_array.markers.push_back(visibility_static_reject_marker);
-    graph_marker_array.markers.push_back(visibility_dynamic_reject_marker);
-    graph_marker_array.markers.push_back(visibility_polygon_reject_marker);
-    graph_marker_array.markers.push_back(visibility_terrain_reject_marker);
-    graph_marker_array.markers.push_back(visibility_vote_pending_marker);
     graph_marker_array.markers.push_back(boundary_edge_marker);
     graph_marker_array.markers.push_back(odom_edge_marker);
     graph_marker_array.markers.push_back(traj_edge_marker);
@@ -882,3 +480,4 @@ void DPVisualizer::SetColor(const VizColor& color,
     }
     scan_marker.color = c;
 }
+

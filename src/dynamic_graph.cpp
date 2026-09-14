@@ -8,14 +8,10 @@
 
 #include "far_planner/dynamic_graph.h"
 
-#include <cmath>
-#include <limits>
-
 /***************************************************************************************/
 
 void DynamicGraph::Init(const ros::NodeHandle& nh, const DynamicGraphParams& params) {
     dg_params_ = params;
-    semantic_update_in_progress_ = false;
     CONNECT_ANGLE_COS = cos(dg_params_.kConnectAngleThred);
     NOISE_ANGLE_COS = cos(FARUtil::kAngleNoise);
     id_tracker_     = 1;
@@ -30,7 +26,7 @@ void DynamicGraph::Init(const ros::NodeHandle& nh, const DynamicGraphParams& par
 
 void DynamicGraph::UpdateRobotPosition(const Point3D& robot_pos) {
     robot_pos_ = robot_pos;
-    terrain_planner_.SetLocalTerrainObsCloud(FARUtil::surround_obs_cloud_);
+    terrain_planner_.SetLocalTerrainObsCloud(FARUtil::local_terrain_obs_);
     if (odom_node_ptr_ == NULL) {
         this->CreateNavNodeFromPoint(robot_pos_, odom_node_ptr_, true);
         this->AddNodeToGraph(odom_node_ptr_);
@@ -42,38 +38,40 @@ void DynamicGraph::UpdateRobotPosition(const Point3D& robot_pos) {
     terrain_planner_.VisualPaths();
 }
 
-// 先清空内部 new_nodes_，如果输入为空直接返回 false。
-// 遍历每个 ctnode_ptr（也就是 new_ctnodes_ 里的点），走 IsAValidNewNode 筛选。
-// 通过筛选后，CreateNewNavNodeFromContour 把 CTNode 转成 NavNode，并继承轮廓属性（位置、free_direct、surf_dirs）。
-// 若最终 new_nodes_ 非空，返回 true；随后主流程再用 GetNewNodes 取出并交给 UpdateNavGraph。
+bool DynamicGraph::IsInterNavpointNecessary() {
+    if (cur_internav_ptr_ == NULL ) { // create nearest nav point
+        last_connect_pos_ = FARUtil::free_odom_p;
+        return true;
+    }
+    const auto it = odom_node_ptr_->edge_votes.find(cur_internav_ptr_->id);
+    if (is_bridge_internav_ || it == odom_node_ptr_->edge_votes.end() || !this->IsInternavInRange(cur_internav_ptr_)) {
+        float min_dist = FARUtil::kINF;
+        for (const auto& internav_ptr : internav_near_nodes_) {
+            const float cur_dist = (internav_ptr->position - last_connect_pos_).norm();
+            if (cur_dist < min_dist) min_dist = cur_dist;
+        }
+        if (min_dist > FARUtil::kNavClearDist && min_dist < FARUtil::kINF) return true;
+    } 
+    if ((FARUtil::free_odom_p - last_connect_pos_).norm() > FARUtil::kNearDist || 
+        (it != odom_node_ptr_->edge_votes.end() && it->second.back() == 1)) 
+    {
+        last_connect_pos_ = FARUtil::free_odom_p;
+    }
+    return false;
+}
+
 bool DynamicGraph::ExtractGraphNodes(const CTNodeStack& new_ctnodes) {
+    if (new_ctnodes.empty()) return false;
     NavNodePtr new_node_ptr = NULL;
     new_nodes_.clear();
-    if (new_ctnodes.empty()) return false;
-    // Historical robot poses are intentionally not graph vertices.  Only
-    // obstacle-derived corners from the current semantic snapshot are created.
+    if (this->IsInterNavpointNecessary()) { // check wheter or not need inter navigation points
+        if (FARUtil::IsDebug) ROS_INFO("DG: One trajectory node has been created.");
+        this->CreateNavNodeFromPoint(last_connect_pos_, new_node_ptr, false, true);
+        new_nodes_.push_back(new_node_ptr);
+        last_connect_pos_ = FARUtil::free_odom_p;
+        if (is_bridge_internav_) is_bridge_internav_ = false;
+    }
     for (const auto& ctnode_ptr : new_ctnodes) {
-        if (!ctnode_ptr) continue;
-        const float robot_distance =
-            (ctnode_ptr->position - robot_pos_).norm_flat();
-        // Current dynamic vertices use the full sensed local snapshot;
-        // persistent static creation uses its separately configured radius.
-        if (ctnode_ptr->source == GraphNodeSource::DYNAMIC_LOCAL) {
-            // Dynamic contours already come from the current robot-local
-            // snapshot. An exact asymmetric observation box may extend past
-            // the legacy sensor_range circle at its sides/corners, so do not
-            // crop it a second time when that box is configured.
-            if (!ContourGraph::UsesLocalObservationWindow() &&
-                robot_distance > FARUtil::kSensorRange) {
-                continue;
-            }
-        } else {
-            if (!ContourGraph::UsesLocalObservationWindow() &&
-                (robot_distance > dg_params_.static_update_radius ||
-                 robot_distance > dg_params_.static_stitch_radius)) {
-                continue;
-            }
-        }
         bool is_near_new = false;
         if (this->IsAValidNewNode(ctnode_ptr, is_near_new)) {
             this->CreateNewNavNodeFromContour(ctnode_ptr, new_node_ptr);
@@ -87,762 +85,15 @@ bool DynamicGraph::ExtractGraphNodes(const CTNodeStack& new_ctnodes) {
     else return true;
 }
 
-void DynamicGraph::RemoveNodeFromGraph(const NavNodePtr& node_ptr) {
-    if (!node_ptr || node_ptr->is_odom || node_ptr->is_goal) return;
-    ClearNodeConnectInGraph(node_ptr);
-    ClearContourConnectionInGraph(node_ptr);
-    ClearTrajectoryConnectInGraph(node_ptr);
-    RemoveNodeIdFromMap(node_ptr);
-    ClearNodeFromInternalStack(node_ptr);
-    out_contour_nodes_map_.erase(node_ptr);
-    FARUtil::EraseNodeFromStack(node_ptr, globalGraphNodes_);
-    FARUtil::EraseNodeFromStack(node_ptr, staticCandidateGraphNodes_);
-    FARUtil::EraseNodeFromStack(node_ptr, dynamicLocalGraphNodes_);
-    staticMainNodeIds_.erase(node_ptr->id);
-}
-
-void DynamicGraph::RefreshStaticMainComponent() {
-    std::unordered_set<std::size_t> visited;
-    std::unordered_set<std::size_t> odom_anchor_ids;
-    if (odom_node_ptr_) {
-        for (const auto& neighbor : odom_node_ptr_->connect_nodes) {
-            if (neighbor &&
-                neighbor->source == GraphNodeSource::STATIC_GLOBAL &&
-                IsPersistentStaticRoutingVertex(*neighbor) &&
-                IsGraphEdgeSearchEligible(*odom_node_ptr_, *neighbor)) {
-                odom_anchor_ids.insert(neighbor->id);
-            }
-        }
-    }
-
-    std::unordered_set<std::size_t> selected;
-    std::size_t best_previous_overlap = 0;
-    std::size_t best_odom_anchors = 0;
-    std::size_t best_size = 0;
-    for (const auto& seed : globalGraphNodes_) {
-        if (!seed || seed->source != GraphNodeSource::STATIC_GLOBAL ||
-            !IsPersistentStaticRoutingVertex(*seed) ||
-            visited.count(seed->id)) {
-            continue;
-        }
-        const std::unordered_set<std::size_t> component =
-            ActiveTransactionalStaticRoutingNodeIds({seed}, {});
-        visited.insert(component.begin(), component.end());
-        std::size_t previous_overlap = 0;
-        std::size_t odom_anchors = 0;
-        for (const std::size_t id : component) {
-            previous_overlap += staticMainNodeIds_.count(id);
-            odom_anchors += odom_anchor_ids.count(id);
-        }
-        const bool is_better = selected.empty() ||
-            (staticMainNodeIds_.empty()
-                 ? (odom_anchors > best_odom_anchors ||
-                    (odom_anchors == best_odom_anchors &&
-                     component.size() > best_size))
-                 : (previous_overlap > best_previous_overlap ||
-                    (previous_overlap == best_previous_overlap &&
-                     (odom_anchors > best_odom_anchors ||
-                      (odom_anchors == best_odom_anchors &&
-                       component.size() > best_size)))));
-        if (is_better) {
-            selected = component;
-            best_previous_overlap = previous_overlap;
-            best_odom_anchors = odom_anchors;
-            best_size = component.size();
-        }
-    }
-
-    std::size_t confirmed_routing_nodes = 0;
-    for (const auto& node_ptr : globalGraphNodes_) {
-        if (node_ptr &&
-            node_ptr->source == GraphNodeSource::STATIC_GLOBAL &&
-            IsPersistentStaticRoutingVertex(*node_ptr)) {
-            ++confirmed_routing_nodes;
-        }
-    }
-    staticMainNodeIds_.swap(selected);
-    const std::size_t detached = confirmed_routing_nodes >=
-            staticMainNodeIds_.size()
-        ? confirmed_routing_nodes - staticMainNodeIds_.size()
-        : 0;
-    ROS_INFO_THROTTLE(
-        5.0,
-        "DG static main component: active_main=%zu detached_history=%zu odom_anchors=%zu previous_overlap=%zu",
-        staticMainNodeIds_.size(), detached, best_odom_anchors,
-        best_previous_overlap);
-}
-
-void DynamicGraph::BeginSemanticGraphUpdate() {
-    semantic_update_in_progress_ = true;
-    // Keep dynamic identities only long enough to match the next accepted
-    // snapshot. FinalizeDynamicGraphUpdate removes every unmatched vertex in
-    // that same update, so no disappeared obstacle becomes global history.
-    for (const auto& node_ptr : dynamicLocalGraphNodes_) {
-        if (!node_ptr) continue;
-        node_ptr->observed_in_semantic_snapshot = false;
-        node_ptr->is_contour_match = false;
-        node_ptr->ctnode = NULL;
-    }
-
-    NodePtrStack static_copy = globalGraphNodes_;
-    static_copy.insert(static_copy.end(), staticCandidateGraphNodes_.begin(),
-                       staticCandidateGraphNodes_.end());
-    for (const auto& node_ptr : static_copy) {
-        if (!node_ptr) continue;
-        if (node_ptr->source == GraphNodeSource::PATH_HISTORY ||
-            node_ptr->is_navpoint) {
-            this->RemoveNodeFromGraph(node_ptr);
-            continue;
-        }
-        if (node_ptr->source == GraphNodeSource::STATIC_CANDIDATE ||
-            node_ptr->source == GraphNodeSource::STATIC_GLOBAL) {
-            node_ptr->observed_in_semantic_snapshot = false;
-            for (auto& edge_state : node_ptr->edge_states) {
-                edge_state.second.dynamic_blocked = false;
-            }
-        }
-    }
-    cur_internav_ptr_ = NULL;
-    last_internav_ptr_ = NULL;
-    internav_near_nodes_.clear();
-    surround_internav_nodes_.clear();
-}
-
-void DynamicGraph::FinalizeDynamicGraphUpdate() {
-    const NodePtrStack dynamic_copy = dynamicLocalGraphNodes_;
-    for (const auto& node_ptr : dynamic_copy) {
-        if (!node_ptr) continue;
-        if (!node_ptr->observed_in_semantic_snapshot ||
-            !node_ptr->is_contour_match || !node_ptr->ctnode) {
-            this->RemoveNodeFromGraph(node_ptr);
-            continue;
-        }
-
-        // Smooth only the routing vertex. Collision validation continues to
-        // use the exact latest semantic dynamic cloud, so this cannot hide a
-        // newly occupied voxel. A bounded EMA follows a moving object while
-        // suppressing voxel/approxPolyDP quantisation jitter.
-        const float alpha = std::max(
-            0.0f, std::min(1.0f, dg_params_.dynamic_position_alpha));
-        node_ptr->position =
-            node_ptr->position * (1.0f - alpha) +
-            node_ptr->ctnode->position * alpha;
-        node_ptr->free_direct = node_ptr->ctnode->free_direct;
-        node_ptr->surf_dirs = node_ptr->ctnode->surf_dirs;
-        node_ptr->is_finalized = false;
-        node_ptr->pos_filter_vec.clear();
-        node_ptr->pos_filter_vec.push_back(node_ptr->position);
-        node_ptr->surf_dirs_vec.clear();
-        node_ptr->surf_dirs_vec.push_back(node_ptr->surf_dirs);
-    }
-}
-
-bool DynamicGraph::HasStableReplacementTopology(
-    const NavNodePtr& obsolete,
-    const PolygonPtr& current_polygon) const {
-    if (!obsolete || !current_polygon) return false;
-    NodePtrStack current_polygon_nodes;
-    NodePtrStack current_static_nodes = globalGraphNodes_;
-    current_static_nodes.insert(current_static_nodes.end(),
-                                staticCandidateGraphNodes_.begin(),
-                                staticCandidateGraphNodes_.end());
-    for (const auto& candidate : current_static_nodes) {
-        if (!candidate || candidate == obsolete ||
-            (candidate->source != GraphNodeSource::STATIC_GLOBAL &&
-             candidate->source != GraphNodeSource::STATIC_CANDIDATE) ||
-            !candidate->observed_in_semantic_snapshot ||
-            !candidate->is_contour_match || !candidate->ctnode ||
-            candidate->ctnode->poly_ptr != current_polygon) {
-            continue;
-        }
-        current_polygon_nodes.push_back(candidate);
-    }
-    for (const auto& first : current_polygon_nodes) {
-        for (const auto& second : first->contour_connects) {
-            if (second && first->id < second->id &&
-                IsStableValidatedContourReplacement(
-                    first, second, obsolete, current_polygon)) {
-                // The validated edge must replace the local contour section
-                // containing the obsolete corner.  A valid edge elsewhere on
-                // the same large polygon is not replacement evidence.
-                const PointPair replacement_chord(
-                    first->ctnode->position, second->ctnode->position);
-                const float replacement_tolerance = std::max(
-                    FARUtil::kMatchDist,
-                    FARUtil::kNavClearDist + FARUtil::kLeafSize);
-                if (FARUtil::DistanceToLineSeg2D(
-                        obsolete->position, replacement_chord) >
-                    replacement_tolerance) {
-                    continue;
-                }
-                return true;
-            }
-        }
-    }
-    return false;
-}
-
-bool DynamicGraph::RemovalPreservesCurrentGraphConnectivity(
-    const NavNodePtr& obsolete) const {
-    NodePtrStack search_graph = globalGraphNodes_;
-    search_graph.insert(search_graph.end(),
-                        staticCandidateGraphNodes_.begin(),
-                        staticCandidateGraphNodes_.end());
-    search_graph.insert(search_graph.end(), dynamicLocalGraphNodes_.begin(),
-                        dynamicLocalGraphNodes_.end());
-    if (odom_node_ptr_) {
-        return RemovalPreservesCurrentReachability(
-            obsolete, odom_node_ptr_, search_graph);
-    }
-    return RemovalPreservesActiveStaticConnectivity(obsolete, search_graph);
-}
-
-void DynamicGraph::UpdateStaticCornerTopology() {
-    if (!semantic_update_in_progress_) return;
-
-    NodePtrStack topology_nodes = globalGraphNodes_;
-    topology_nodes.insert(topology_nodes.end(),
-                          staticCandidateGraphNodes_.begin(),
-                          staticCandidateGraphNodes_.end());
-    const int removal_frames = std::max(
-        1, dg_params_.static_topology_remove_frames);
-    const float observation_tolerance = std::max(
-        FARUtil::kLeafSize * 2.0f,
-        std::min(FARUtil::kMatchDist, FARUtil::kNavClearDist));
-    const float endpoint_guard = std::max(
-        FARUtil::kNavClearDist, observation_tolerance * 1.5f);
-    NodePtrStack remove_nodes;
-    std::size_t contradicted = 0;
-    std::size_t waiting_replacement = 0;
-    std::size_t articulation_protected = 0;
-
-    for (const auto& candidate : topology_nodes) {
-        if (!candidate ||
-            (candidate->source != GraphNodeSource::STATIC_CANDIDATE &&
-             candidate->source != GraphNodeSource::STATIC_GLOBAL) ||
-            !ContourGraph::IsPointInsideReliableContourWindow(
-                candidate->position)) {
-            continue;
-        }
-        if (candidate->is_contour_match) {
-            ApplyContourNodeTopologyObservation(
-                *candidate, ContourTopologyObservation::CONFIRMED,
-                removal_frames);
-            continue;
-        }
-
-        PolygonPtr current_polygon;
-        if (!ContourGraph::IsPointConfirmedOnCurrentStaticSegmentInterior(
-                candidate->position, observation_tolerance, endpoint_guard,
-                &current_polygon)) {
-            continue;
-        }
-        ++contradicted;
-        const bool contradiction_mature =
-            ApplyContourNodeTopologyObservation(
-                *candidate, ContourTopologyObservation::CONTRADICTED,
-                removal_frames);
-        if (!contradiction_mature) continue;
-
-        const bool replacement_ready =
-            this->HasStableReplacementTopology(candidate, current_polygon);
-        if (!replacement_ready) {
-            ++waiting_replacement;
-            continue;
-        }
-        const bool connectivity_safe =
-            this->RemovalPreservesCurrentGraphConnectivity(candidate);
-        if (!connectivity_safe) {
-            ++articulation_protected;
-            continue;
-        }
-        if (ShouldCommitStaticCornerReplacement(
-                contradiction_mature, replacement_ready,
-                connectivity_safe)) {
-            remove_nodes.push_back(candidate);
-        }
-    }
-
-    for (const auto& obsolete : remove_nodes) {
-        ROS_INFO("DG: atomically replacing obsolete static corner %zu after "
-                 "%d strong contour contradictions; replacement contour "
-                 "topology is stable and static connectivity is preserved.",
-                 obsolete->id, obsolete->topology_missed_count);
-        this->RemoveNodeFromGraph(obsolete);
-    }
-    ROS_INFO_THROTTLE(
-        5.0,
-        "DG static topology replacement: contradicted=%zu removed=%zu "
-        "waiting_replacement=%zu articulation_protected=%zu",
-        contradicted, remove_nodes.size(), waiting_replacement,
-        articulation_protected);
-}
-
-void DynamicGraph::ConsolidateStaticHistoryDuplicates(
-    const std::function<StaticNodeEvidence(const Point3D&)>&
-        evidence_query) {
-    if (!semantic_update_in_progress_ || !evidence_query) return;
-    const float radius = std::max(0.0f, dg_params_.static_duplicate_radius);
-    if (radius <= FARUtil::kEpsilon) return;
-
-    const float direction_cos = std::cos(std::max(
-        FARUtil::kAngleNoise * 2.0f,
-        static_cast<float>(15.0 * M_PI / 180.0)));
-    const auto is_static = [](const NavNodePtr& node) {
-        return node &&
-            (node->source == GraphNodeSource::STATIC_CANDIDATE ||
-             node->source == GraphNodeSource::STATIC_GLOBAL);
-    };
-    NodePtrStack static_nodes = globalGraphNodes_;
-    static_nodes.insert(static_nodes.end(),
-                        staticCandidateGraphNodes_.begin(),
-                        staticCandidateGraphNodes_.end());
-    NodePtrStack keepers;
-    for (const auto& node : static_nodes) {
-        if (is_static(node) && node->observed_in_semantic_snapshot &&
-            node->is_contour_match && node->ctnode &&
-            !node->is_transient_contour_endpoint &&
-            ContourGraph::IsPointInsideReliableContourWindow(
-                node->position)) {
-            keepers.push_back(node);
-        }
-    }
-    std::sort(keepers.begin(), keepers.end(),
-              [](const NavNodePtr& first, const NavNodePtr& second) {
-                  if (first->source != second->source) {
-                      return first->source == GraphNodeSource::STATIC_GLOBAL;
-                  }
-                  return first->id < second->id;
-              });
-
-    std::unordered_set<std::size_t> removed_ids;
-    std::size_t merged = 0;
-    std::size_t occupied_rejected = 0;
-    std::size_t connectivity_protected = 0;
-    for (const auto& keeper : keepers) {
-        if (!keeper || removed_ids.count(keeper->id)) continue;
-        // The current one-to-one CT match is the positive observation that
-        // establishes keeper identity. Raw occupancy at that contour corner
-        // is therefore not a veto; only the unmatched historical identity's
-        // location must no longer provide distinct static support.
-        std::vector<NavNodePtr> candidates;
-        for (const auto& obsolete : static_nodes) {
-            if (!is_static(obsolete) || obsolete == keeper ||
-                removed_ids.count(obsolete->id) ||
-                obsolete->observed_in_semantic_snapshot ||
-                obsolete->is_contour_match ||
-                !ContourGraph::IsPointInsideReliableContourWindow(
-                    obsolete->position) ||
-                !AreStaticHistoryNodesMergeCompatible(
-                    *keeper, *obsolete,
-                    evidence_query(obsolete->position), radius,
-                    FARUtil::kTolerZ, direction_cos)) {
-                continue;
-            }
-            candidates.push_back(obsolete);
-        }
-        std::sort(candidates.begin(), candidates.end(),
-                  [&keeper](const NavNodePtr& first,
-                            const NavNodePtr& second) {
-                      const float first_distance =
-                          (first->position - keeper->position).norm_flat();
-                      const float second_distance =
-                          (second->position - keeper->position).norm_flat();
-                      if (std::fabs(first_distance - second_distance) >
-                          FARUtil::kEpsilon) {
-                          return first_distance < second_distance;
-                      }
-                      return first->id < second->id;
-                  });
-        for (const auto& obsolete : candidates) {
-            const StaticNodeEvidence evidence =
-                evidence_query(obsolete->position);
-            if (!IsStaticHistoryMergeEvidence(evidence)) {
-                ++occupied_rejected;
-                continue;
-            }
-            if (!RemovalPreservesCurrentGraphConnectivity(obsolete)) {
-                ++connectivity_protected;
-                continue;
-            }
-            ContourGraph::RecordHistoricalDuplicate(
-                obsolete, keeper, radius);
-            ROS_INFO("DG: consolidated historical static node %zu into "
-                     "current matched node %zu (distance=%.3fm, evidence=%s).",
-                     obsolete->id, keeper->id,
-                     (obsolete->position - keeper->position).norm_flat(),
-                     evidence == StaticNodeEvidence::EXPLICIT_FREE
-                         ? "EXPLICIT_FREE" : "UNKNOWN");
-            removed_ids.insert(obsolete->id);
-            RemoveNodeFromGraph(obsolete);
-            ++merged;
-        }
-    }
-    ROS_INFO_THROTTLE(
-        5.0,
-        "DG static history consolidation: keepers=%zu merged=%zu "
-        "occupied_rejected=%zu connectivity_protected=%zu",
-        keepers.size(), merged, occupied_rejected,
-        connectivity_protected);
-}
-
-void DynamicGraph::CommitMatureContourEdgeReplacements() {
-    const int removal_frames = std::max(
-        1, dg_params_.static_remove_frames);
-    NodePtrStack static_graph = globalGraphNodes_;
-    static_graph.insert(static_graph.end(),
-                        staticCandidateGraphNodes_.begin(),
-                        staticCandidateGraphNodes_.end());
-
-    std::vector<NavEdge> remove_edges;
-    std::size_t mature = 0;
-    std::size_t physically_blocked = 0;
-    std::size_t waiting_replacement = 0;
-    for (const auto& first : static_graph) {
-        if (!first || first->source != GraphNodeSource::STATIC_GLOBAL) {
-            continue;
-        }
-        const NodePtrStack contour_copy = first->contour_connects;
-        for (const auto& second : contour_copy) {
-            if (!second || first->id >= second->id ||
-                second->source != GraphNodeSource::STATIC_GLOBAL) {
-                continue;
-            }
-            const auto state_it = first->edge_states.find(second->id);
-            if (state_it == first->edge_states.end()) {
-                continue;
-            }
-            const bool topology_mature =
-                state_it->second.current_contour_misses >= removal_frames;
-            const bool physical_block_mature =
-                !state_it->second.static_valid &&
-                state_it->second.static_visibility_misses >=
-                    std::max(1,
-                             dg_params_.static_visibility_remove_frames);
-            if (!topology_mature && !physical_block_mature) continue;
-            ++mature;
-            // New occupied geometry is hard safety evidence. Once the
-            // contradiction is mature, an edge whose validated route is no
-            // longer free must be removed even if the graph consequently
-            // reports the region unreachable.
-            if (!state_it->second.static_valid) {
-                ++physically_blocked;
-                remove_edges.emplace_back(first, second);
-                continue;
-            }
-            if (HasActiveStaticAlternatePathWithoutEdge(
-                    first, second, static_graph)) {
-                remove_edges.emplace_back(first, second);
-            } else {
-                ++waiting_replacement;
-            }
-        }
-    }
-
-    for (const auto& edge : remove_edges) {
-        const NavNodePtr& first = edge.first;
-        const NavNodePtr& second = edge.second;
-        if (!DeleteContourConnect(first, second)) continue;
-        if (!FARUtil::IsTypeInStack(second, first->poly_connects)) {
-            EraseEdge(first, second);
-        } else {
-            AddEdge(first, second);
-        }
-    }
-    ROS_INFO_THROTTLE(
-        5.0,
-        "DG contour edge replacement: mature=%zu removed=%zu "
-        "physically_blocked=%zu waiting_replacement=%zu",
-        mature, remove_edges.size(), physically_blocked,
-        waiting_replacement);
-}
-
-void DynamicGraph::CommitSemanticGraphUpdate(
-    const std::function<StaticNodeEvidence(const Point3D&)>& evidence_query) {
-    // Edge validation precedes lifecycle commit. Refresh now so this frame's
-    // promotion anchors are taken only from the still-active main component.
-    this->RefreshStaticMainComponent();
-    NodePtrStack remove_nodes;
-    NodePtrStack promote_nodes;
-    std::size_t promotion_waiting_finalization = 0;
-    std::size_t promotion_waiting_edge = 0;
-    std::size_t promotion_waiting_routing_type = 0;
-    std::size_t promotion_waiting_main_component = 0;
-    std::size_t promotion_waiting_global_evidence = 0;
-    NodePtrStack static_nodes = globalGraphNodes_;
-    static_nodes.insert(static_nodes.end(), staticCandidateGraphNodes_.begin(),
-                        staticCandidateGraphNodes_.end());
-
-    // Precompute candidates that will satisfy every non-topological gate
-    // after this snapshot's positive observation is applied.  The main
-    // component traversal below is restricted to this set: a mature node may
-    // not borrow an unfinalized/unconfirmed candidate as a temporary bridge.
-    const int confirm_frames =
-        std::max(1, dg_params_.static_confirm_frames);
-    std::unordered_map<std::size_t, StaticNodeEvidence> evidence_by_node_id;
-    const auto query_evidence = [&](const NavNodePtr& node_ptr) {
-        if (!node_ptr) return StaticNodeEvidence::UNKNOWN;
-        const auto cached = evidence_by_node_id.find(node_ptr->id);
-        if (cached != evidence_by_node_id.end()) return cached->second;
-        const StaticNodeEvidence evidence = evidence_query
-            ? evidence_query(node_ptr->position)
-            : StaticNodeEvidence::UNKNOWN;
-        evidence_by_node_id[node_ptr->id] = evidence;
-        return evidence;
-    };
-    std::unordered_set<std::size_t> transaction_candidate_ids;
-    for (const auto& node_ptr : staticCandidateGraphNodes_) {
-        if (!node_ptr || !node_ptr->observed_in_semantic_snapshot) continue;
-        const bool observation_ready =
-            std::min(confirm_frames, node_ptr->static_seen_count + 1) >=
-            confirm_frames;
-        const bool finalization_ready =
-            !dg_params_.static_promotion_requires_finalized ||
-            node_ptr->is_finalized;
-        const bool global_evidence_ready =
-            IsStaticPromotionEvidenceReady(
-                query_evidence(node_ptr),
-                dg_params_.static_promotion_requires_global_evidence);
-        if (observation_ready && finalization_ready &&
-            global_evidence_ready &&
-            IsPersistentStaticRoutingVertex(*node_ptr)) {
-            transaction_candidate_ids.insert(node_ptr->id);
-        }
-    }
-
-    // Once a confirmed graph exists, grow the promotion transaction from the
-    // persisted main component itself.  Odom visibility is a transient search
-    // concern and must not deadlock map growth when the robot rounds a corner
-    // and temporarily loses every direct edge to old confirmed vertices.
-    bool has_confirmed_static_routing = false;
-    for (const auto& node_ptr : globalGraphNodes_) {
-        if (!node_ptr ||
-            node_ptr->source != GraphNodeSource::STATIC_GLOBAL ||
-            !IsPersistentStaticRoutingVertex(*node_ptr)) {
-            continue;
-        }
-        has_confirmed_static_routing = true;
-    }
-
-    NodePtrStack robot_candidate_seeds;
-    if (odom_node_ptr_) {
-        for (const auto& neighbor : odom_node_ptr_->connect_nodes) {
-            if (!neighbor ||
-                !IsGraphEdgeSearchEligible(*odom_node_ptr_, *neighbor)) {
-                continue;
-            }
-            if (neighbor->source == GraphNodeSource::STATIC_CANDIDATE &&
-                transaction_candidate_ids.count(neighbor->id)) {
-                robot_candidate_seeds.push_back(neighbor);
-            }
-        }
-    }
-
-    std::unordered_set<std::size_t> transaction_main_ids;
-    if (has_confirmed_static_routing) {
-        transaction_main_ids = PersistentMainTransactionNodeIds(
-            globalGraphNodes_, staticMainNodeIds_, transaction_candidate_ids);
-    }
-
-    // Bootstrap selects one largest odom-anchored component made exclusively
-    // of transaction-ready candidates. With the normal active-edge gate, a
-    // singleton is not reusable topology and therefore cannot initialize the
-    // persistent graph.
-    std::unordered_set<std::size_t> bootstrap_component_ids;
-    if (!has_confirmed_static_routing) {
-        std::unordered_set<std::size_t> visited_candidates;
-        std::size_t best_size = 0;
-        float best_robot_distance = std::numeric_limits<float>::infinity();
-        for (const auto& seed : robot_candidate_seeds) {
-            if (!seed || visited_candidates.count(seed->id) ||
-                !transaction_candidate_ids.count(seed->id)) {
-                continue;
-            }
-            const std::unordered_set<std::size_t> component =
-                ActiveTransactionalStaticRoutingNodeIds(
-                    {seed}, transaction_candidate_ids);
-            visited_candidates.insert(component.begin(), component.end());
-            if (dg_params_.static_promotion_requires_active_edge &&
-                component.size() < 2) {
-                continue;
-            }
-            float nearest_robot =
-                (seed->position - robot_pos_).norm_flat();
-            for (const auto& candidate : staticCandidateGraphNodes_) {
-                if (candidate && component.count(candidate->id)) {
-                    nearest_robot = std::min(
-                        nearest_robot,
-                        (candidate->position - robot_pos_).norm_flat());
-                }
-            }
-            if (component.size() > best_size ||
-                (component.size() == best_size &&
-                 nearest_robot < best_robot_distance)) {
-                bootstrap_component_ids = component;
-                best_size = component.size();
-                best_robot_distance = nearest_robot;
-            }
-        }
-        transaction_main_ids = bootstrap_component_ids;
-    }
-    for (const auto& node_ptr : static_nodes) {
-        if (!node_ptr) continue;
-        const bool is_static =
-            node_ptr->source == GraphNodeSource::STATIC_CANDIDATE ||
-            node_ptr->source == GraphNodeSource::STATIC_GLOBAL;
-        if (!is_static) continue;
-        const float distance = (node_ptr->position - robot_pos_).norm_flat();
-        const StaticNodeEvidence queried_evidence =
-            query_evidence(node_ptr);
-        // A matched current contour is positive occupied evidence whenever no
-        // independent global-evidence compatibility gate was requested. This
-        // is the normal local-only voxel path.
-        const StaticNodeEvidence evidence =
-            node_ptr->observed_in_semantic_snapshot &&
-                    !dg_params_.static_promotion_requires_global_evidence
-                ? StaticNodeEvidence::STATIC_OCCUPIED
-                : queried_evidence;
-        const bool finalization_ready =
-            !dg_params_.static_promotion_requires_finalized ||
-            node_ptr->is_finalized;
-        const bool edge_ready =
-            !dg_params_.static_promotion_requires_active_edge ||
-            HasActiveSearchEligibleIncidentEdge(*node_ptr);
-        const bool routing_type_ready =
-            IsPersistentStaticRoutingVertex(*node_ptr);
-        bool main_component_ready = true;
-        if (dg_params_.static_promotion_requires_main_component &&
-            node_ptr->source == GraphNodeSource::STATIC_CANDIDATE) {
-            main_component_ready =
-                transaction_main_ids.count(node_ptr->id) > 0;
-        }
-        const bool global_evidence_ready =
-            IsStaticPromotionEvidenceReady(
-                queried_evidence,
-                dg_params_.static_promotion_requires_global_evidence);
-        const bool promotion_ready = finalization_ready && edge_ready &&
-                                     routing_type_ready &&
-                                     main_component_ready &&
-                                     global_evidence_ready;
-        const GraphLifecycleAction action = AdvanceStaticNodeLifecycle(
-            *node_ptr, node_ptr->observed_in_semantic_snapshot, evidence,
-            distance,
-            dg_params_.static_update_radius, dg_params_.static_stitch_radius,
-            dg_params_.static_confirm_frames, dg_params_.static_remove_frames,
-            promotion_ready);
-        if (node_ptr->source == GraphNodeSource::STATIC_CANDIDATE &&
-            node_ptr->observed_in_semantic_snapshot &&
-            node_ptr->static_seen_count >=
-                std::max(1, dg_params_.static_confirm_frames)) {
-            if (!finalization_ready) ++promotion_waiting_finalization;
-            if (!edge_ready) ++promotion_waiting_edge;
-            if (!routing_type_ready) ++promotion_waiting_routing_type;
-            if (!main_component_ready) ++promotion_waiting_main_component;
-            if (!global_evidence_ready) {
-                ++promotion_waiting_global_evidence;
-            }
-        }
-        if (action == GraphLifecycleAction::PROMOTE_STATIC) {
-            promote_nodes.push_back(node_ptr);
-            ROS_INFO_STREAM("DG: promoted semantic static node " << node_ptr->id
-                            << " after " << node_ptr->static_seen_count
-                            << " observations; FAR position/direction "
-                            << "stabilization remains independent.");
-        } else if (action == GraphLifecycleAction::REMOVE) {
-            remove_nodes.push_back(node_ptr);
-        }
-    }
-    for (const auto& node_ptr : promote_nodes) {
-        FARUtil::EraseNodeFromStack(node_ptr, staticCandidateGraphNodes_);
-        if (!FARUtil::IsTypeInStack(node_ptr, globalGraphNodes_)) {
-            globalGraphNodes_.push_back(node_ptr);
-        }
-        for (const auto& neighbor : node_ptr->connect_nodes) {
-            if (!neighbor) continue;
-            GraphEdgeSource source = GraphEdgeSource::STITCH;
-            if (FARUtil::IsTypeInStack(neighbor,
-                                       node_ptr->contour_connects)) {
-                source = GraphEdgeSource::STATIC_CONTOUR;
-            } else if (neighbor->source == GraphNodeSource::STATIC_GLOBAL) {
-                source = GraphEdgeSource::STATIC_VISIBILITY;
-            }
-            node_ptr->edge_states[neighbor->id].source = source;
-            neighbor->edge_states[node_ptr->id].source = source;
-        }
-    }
-    ROS_INFO_THROTTLE(
-        5.0,
-        "DG static promotion gate: promoted=%zu waiting_finalized=%zu waiting_active_edge=%zu waiting_routing_type=%zu waiting_main_component=%zu waiting_global_evidence=%zu main_seed_confirmed=%zu bootstrap=%zu",
-        promote_nodes.size(), promotion_waiting_finalization,
-        promotion_waiting_edge, promotion_waiting_routing_type,
-        promotion_waiting_main_component,
-        promotion_waiting_global_evidence,
-        staticMainNodeIds_.size(), bootstrap_component_ids.size());
-
-    // Replacement is a transaction, not an early filtering action.  At this
-    // point all current contour nodes and validated route geometries exist and
-    // this frame's mature candidates have entered the persistent static
-    // layer.  An old corner can therefore be removed only against the exact
-    // graph that will survive this semantic snapshot.
-    this->UpdateStaticCornerTopology();
-    this->CommitMatureContourEdgeReplacements();
-
-    for (const auto& node_ptr : remove_nodes) this->RemoveNodeFromGraph(node_ptr);
-    this->ConsolidateStaticHistoryDuplicates(evidence_query);
-    this->RefreshStaticMainComponent();
-    // Promotion, replacement or a physical edge mask may have changed main
-    // membership after UpdateNavGraph built the transient start layer.
-    // Rebuild it once against the committed component so reachability used by
-    // GetNavGraph cannot pass through a newly detached history node.
-    this->UpdateOdomConnections();
-    semantic_update_in_progress_ = false;
-}
-
-// 清理候选坏点
-// 在非冻结模式下，它先遍历扩展近邻节点 extend_match_nodes_，用 ReEvaluateCorner 复检节点有效性；连续不通过的会通过 SetNodeToClear 放入 clear_node。
-// 位置： src/far_planner/src/dynamic_graph.cpp
-// 动态环境下复检轨迹连边
-// 如果是动态环境，还会对 internav 相关的 trajectory 连边做地形可达性复检，失败就累计失效票，成功就回收失效票。
-// 位置： src/far_planner/src/dynamic_graph.cpp
-// 清掉已合并/待删除节点，并补近邻集合
-// 调用 ClearMergedNodesInGraph 清理内部栈中的 merged 节点，再把 margin 中已匹配的节点补回 near/wide near。
-// 位置： src/far_planner/src/dynamic_graph.cpp
-// 先更新 odom 到周边节点的连接
-// 对 wide_near_nodes_ + new_nodes 做 odom 连通检查：能连就加 poly edge + edge，不能连就删除。
-// 位置： src/far_planner/src/dynamic_graph.cpp
-// 把本帧新节点正式加入全局图
-// 非冻结模式下，new_nodes 会被加入 globalGraphNodes_，并加入 near 集合；如果是 navpoint 还更新当前 internav；如果来自轮廓点还会回填 CT-Nav 匹配关系。
-// 位置： src/far_planner/src/dynamic_graph.cpp
-// 处理超范围轮廓节点的回连
-// 对 out_contour_nodes_ 尝试找可匹配近邻并记录/删除 contour vote，避免老轮廓孤立。
-// 位置： src/far_planner/src/dynamic_graph.cpp
-// 大规模重连 near 节点
-// 分三块：
-// near 节点与“外部历史连边”复检
-// near 节点两两之间复检
-// near 节点与 out contour 的 contour 关系复检，再做 TopTwoContourConnector 稳定连接
-// 位置： src/far_planner/src/dynamic_graph.cpp
-// 评估覆盖与 frontier 状态
-// 最后给 near 节点更新 is_covered 和 is_frontier，供后续规划决策使用。
-// 位置： src/far_planner/src/dynamic_graph.cpp
 void DynamicGraph::UpdateNavGraph(const NodePtrStack& new_nodes,
                                   const bool& is_freeze_vgraph,
                                   NodePtrStack& clear_node) 
 {
     // clear false positive node detection
     clear_node.clear();
-    contour_edge_diagnostics_.clear();
     if (!is_freeze_vgraph) {
         for (const auto& node_ptr : extend_match_nodes_) {
             if (FARUtil::IsStaticNode(node_ptr) || node_ptr == cur_internav_ptr_) continue;
-            if (node_ptr->source == GraphNodeSource::STATIC_CANDIDATE ||
-                node_ptr->source == GraphNodeSource::STATIC_GLOBAL) {
-                if (node_ptr->is_contour_match) this->ReEvaluateCorner(node_ptr);
-                continue;
-            }
-            if (node_ptr->source == GraphNodeSource::DYNAMIC_LOCAL ||
-                node_ptr->source == GraphNodeSource::PATH_HISTORY ||
-                node_ptr->is_navpoint) continue;
             if (!this->ReEvaluateCorner(node_ptr)) {
                 if (this->SetNodeToClear(node_ptr)) {
                     clear_node.push_back(node_ptr);
@@ -873,7 +124,17 @@ void DynamicGraph::UpdateNavGraph(const NodePtrStack& new_nodes,
     this->ClearMergedNodesInGraph();
     // add matched margin nodes into near and wide near nodes
     this->UpdateNearNodesWithMatchedMarginNodes(margin_near_nodes_, near_nav_nodes_, wide_near_nodes_);
-
+    // check-add connections to odom node with wider near nodes
+    NodePtrStack codom_check_list = wide_near_nodes_;
+    codom_check_list.insert(codom_check_list.end(), new_nodes.begin(), new_nodes.end()); // add new nodes to check list
+    for (const auto& conode_ptr : codom_check_list) {
+        if (conode_ptr->is_odom) continue;
+        if (this->IsValidConnect(odom_node_ptr_, conode_ptr, false)) {
+            this->AddPolyEdge(odom_node_ptr_, conode_ptr), this->AddEdge(odom_node_ptr_, conode_ptr);
+        } else {
+            this->ErasePolyEdge(odom_node_ptr_, conode_ptr), this->EraseEdge(conode_ptr, odom_node_ptr_);
+        }
+    }
     if (!is_freeze_vgraph) {
         // Adding new nodes to near nodes stack
         for (const auto& new_node_ptr : new_nodes) {
@@ -909,339 +170,41 @@ void DynamicGraph::UpdateNavGraph(const NodePtrStack& new_nodes,
             const NodePtrStack copy_connect_nodes = nav_ptr1->connect_nodes;
             for (const auto& cnode : copy_connect_nodes) {
                 if (cnode->is_odom || cnode->is_near_nodes || FARUtil::IsOutsideGoal(cnode) || FARUtil::IsTypeInStack(cnode, nav_ptr1->contour_connects)) continue;
-                if (!this->UpdateGraphEdge(nav_ptr1, cnode, false)) {
+                if (this->IsValidConnect(nav_ptr1, cnode, false)) {
+                    this->AddPolyEdge(nav_ptr1, cnode), this->AddEdge(nav_ptr1, cnode);
+                } else {
+                    this->ErasePolyEdge(nav_ptr1, cnode) ,this->EraseEdge(nav_ptr1, cnode);
                     outside_break_nodes.push_back(cnode);
+                } 
+            }
+            for (std::size_t j=0; j<near_nav_nodes_.size(); j++) {
+                const NavNodePtr nav_ptr2 = near_nav_nodes_[j];
+                if (i == j || j > i || nav_ptr2->is_odom) continue;
+                if (this->IsValidConnect(nav_ptr1, nav_ptr2, true)) {
+                    this->AddPolyEdge(nav_ptr1, nav_ptr2), this->AddEdge(nav_ptr1, nav_ptr2);
+                } else {
+                    this->ErasePolyEdge(nav_ptr1, nav_ptr2), this->EraseEdge(nav_ptr1, nav_ptr2);
                 }
             }
             for (const auto& oc_node_ptr : out_contour_nodes_) {
                 if (!oc_node_ptr->is_contour_match || !nav_ptr1->is_contour_match) continue;
-                if (ContourGraph::IsNavNodesConnectFromContour(
-                        nav_ptr1, oc_node_ptr) ||
-                    ContourGraph::IsNavNodesConnectFromClipAttempt(
-                        nav_ptr1, oc_node_ptr)) {
+                if (ContourGraph::IsNavNodesConnectFromContour(nav_ptr1, oc_node_ptr)) {
                     this->RecordContourVote(nav_ptr1, oc_node_ptr);
                 } else {
                     this->DeleteContourVote(nav_ptr1, oc_node_ptr);
                 }
             }
-        }
-
-        // Validate the complete local visibility candidate set before changing
-        // adjacency.  The old one-pass implementation called
-        // IsSimilarConnectInDirection() while connect_nodes was still being
-        // mutated, so the result depended on pair iteration order.
-        struct ValidatedPair {
-            NavNodePtr first;
-            NavNodePtr second;
-            EdgeRejectReason rejection_reason = EdgeRejectReason::NONE;
-        };
-        std::vector<ValidatedPair> valid_pairs;
-        std::vector<ValidatedPair> all_pairs;
-        for (std::size_t i = 0; i < near_nav_nodes_.size(); ++i) {
-            const NavNodePtr first = near_nav_nodes_[i];
-            if (!first || first->is_odom) continue;
-            for (std::size_t j = i + 1; j < near_nav_nodes_.size(); ++j) {
-                const NavNodePtr second = near_nav_nodes_[j];
-                if (!second || second->is_odom || first == second) continue;
-                const bool both_static =
-                    (first->source == GraphNodeSource::STATIC_CANDIDATE ||
-                     first->source == GraphNodeSource::STATIC_GLOBAL) &&
-                    (second->source == GraphNodeSource::STATIC_CANDIDATE ||
-                     second->source == GraphNodeSource::STATIC_GLOBAL);
-                const bool valid = this->IsValidConnect(
-                    first, second, true, !both_static, false);
-                const EdgeRejectReason rejection_reason = valid
-                    ? EdgeRejectReason::NONE
-                    : this->ClassifyVisibilityRejection(
-                          first, second, !both_static, false);
-                all_pairs.push_back({first, second, rejection_reason});
-                if (valid) {
-                    valid_pairs.push_back(
-                        {first, second, EdgeRejectReason::NONE});
-                } else if (dg_params_.diagnostic_near_pair_radius > 0.0f &&
-                           (first->position - second->position).norm_flat() <=
-                               dg_params_.diagnostic_near_pair_radius) {
-                    contour_edge_diagnostics_.push_back({
-                        first->id, second->id, first->position,
-                        second->position, EdgeValidationMode::VISIBILITY,
-                        rejection_reason});
-                }
-            }
-        }
-
-        // Contour votes above are now complete for the whole snapshot.  Commit
-        // contour identities before visibility pruning so one edge type cannot
-        // accidentally suppress or erase the other.
-        for (const auto& node_ptr : near_nav_nodes_) {
-            if (node_ptr && !node_ptr->is_odom) {
-                this->TopTwoContourConnector(node_ptr);
-            }
-        }
-
-        const auto is_contour_pair = [this](const NavNodePtr& first,
-                                             const NavNodePtr& second) {
-            return this->IsBoundaryConnect(first, second) ||
-                   ContourGraph::IsNavNodesConnectFromContour(first, second) ||
-                   ContourGraph::IsNavNodesConnectFromClipAttempt(first,
-                                                                  second);
-        };
-        const auto has_shorter_in_direction =
-            [this, &valid_pairs, &is_contour_pair](const NavNodePtr& from,
-                                                   const NavNodePtr& to) {
-                for (const auto& candidate : valid_pairs) {
-                    NavNodePtr other;
-                    if (candidate.first == from) other = candidate.second;
-                    else if (candidate.second == from) other = candidate.first;
-                    else continue;
-                    if (!other || other == to ||
-                        is_contour_pair(from, other)) continue;
-                    if (from->is_covered && to->is_covered &&
-                        !other->is_covered) continue;
-                    if (IsCloserVisibilityCandidateInDirection(
-                            *from, *to, *other, CONNECT_ANGLE_COS,
-                            FARUtil::kEpsilon)) {
-                        return true;
-                    }
-                }
-                return false;
-            };
-
-        std::unordered_set<NavEdge, navedge_hash> selected_pairs;
-        for (const auto& pair : valid_pairs) {
-            const bool keep = is_contour_pair(pair.first, pair.second) ||
-                (!has_shorter_in_direction(pair.first, pair.second) &&
-                 !has_shorter_in_direction(pair.second, pair.first));
-            if (!keep) {
-                if (dg_params_.diagnostic_near_pair_radius > 0.0f &&
-                    (pair.first->position - pair.second->position).norm_flat() <=
-                        dg_params_.diagnostic_near_pair_radius) {
-                    contour_edge_diagnostics_.push_back({
-                        pair.first->id, pair.second->id,
-                        pair.first->position, pair.second->position,
-                        EdgeValidationMode::VISIBILITY,
-                        EdgeRejectReason::DIRECTION_SPARSIFIED});
-                }
-                continue;
-            }
-            NavEdge edge(pair.first, pair.second);
-            if (pair.first->id > pair.second->id) {
-                edge = NavEdge(pair.second, pair.first);
-            }
-            selected_pairs.insert(edge);
-        }
-        for (const auto& pair : all_pairs) {
-            NavEdge edge(pair.first, pair.second);
-            if (pair.first->id > pair.second->id) {
-                edge = NavEdge(pair.second, pair.first);
-            }
-            this->ApplyValidatedGraphEdge(
-                pair.first, pair.second, selected_pairs.count(edge) > 0,
-                selected_pairs.count(edge) > 0
-                    ? EdgeRejectReason::NONE
-                    : (pair.rejection_reason == EdgeRejectReason::NONE
-                           ? EdgeRejectReason::DIRECTION_SPARSIFIED
-                           : pair.rejection_reason));
+            this->TopTwoContourConnector(nav_ptr1);
         }
         // update out range break nodes connects
         for (const auto& node_ptr : near_nav_nodes_) {
             for (const auto& ob_node_ptr : outside_break_nodes) {
-                this->UpdateGraphEdge(node_ptr, ob_node_ptr, false);
-            }
-        }
-
-        // Contour connectors can be added after the pairwise visibility pass.
-        // Revalidate every retained static edge whose stored robot-centre
-        // route intersects W_inner.  This includes unmatched historical
-        // endpoints and contour identities which are no longer represented
-        // by this frame's simplified CT nodes.  Dynamic occupancy remains a
-        // one-snapshot mask; repeated static occupancy is deletion evidence.
-        NodePtrStack static_edge_check_nodes = globalGraphNodes_;
-        static_edge_check_nodes.insert(static_edge_check_nodes.end(),
-                                       staticCandidateGraphNodes_.begin(),
-                                       staticCandidateGraphNodes_.end());
-        std::vector<NavEdge> visibility_edges_to_remove;
-        const auto append_unique = [](NodePtrStack& output,
-                                      const NodePtrStack& input) {
-            for (const NavNodePtr& node : input) {
-                if (node && !FARUtil::IsTypeInStack(node, output)) {
-                    output.push_back(node);
-                }
-            }
-        };
-        const auto route_intersects_reliable_window = [](
-            const GraphEdgeState& state,
-            const NavNodePtr& first,
-            const NavNodePtr& second) {
-            if (state.has_clearance_geometry &&
-                state.route_points.size() >= 2) {
-                for (std::size_t index = 1;
-                     index < state.route_points.size(); ++index) {
-                    if (ContourGraph::
-                            DoesSegmentIntersectReliableContourWindow(
-                                state.route_points[index - 1],
-                                state.route_points[index])) return true;
-                }
-                return false;
-            }
-            const Point3D start = state.has_clearance_geometry
-                ? state.route_start : first->position;
-            const Point3D end = state.has_clearance_geometry
-                ? state.route_end : second->position;
-            return ContourGraph::DoesSegmentIntersectReliableContourWindow(
-                start, end);
-        };
-        const auto is_route_fully_observed = [](
-            const GraphEdgeState& state,
-            const NavNodePtr& first,
-            const NavNodePtr& second) {
-            if (state.has_clearance_geometry &&
-                state.route_points.size() >= 2) {
-                for (const Point3D& point : state.route_points) {
-                    if (!ContourGraph::IsPointInsideReliableContourWindow(
-                            point)) return false;
-                }
-                return true;
-            }
-            const Point3D start = state.has_clearance_geometry
-                ? state.route_start : first->position;
-            const Point3D end = state.has_clearance_geometry
-                ? state.route_end : second->position;
-            return ContourGraph::IsSegmentFullyInsideReliableContourWindow(
-                start, end);
-        };
-        for (const auto& node_ptr : static_edge_check_nodes) {
-            if (!node_ptr ||
-                (node_ptr->source != GraphNodeSource::STATIC_CANDIDATE &&
-                 node_ptr->source != GraphNodeSource::STATIC_GLOBAL)) continue;
-            NodePtrStack edge_neighbors = node_ptr->connect_nodes;
-            append_unique(edge_neighbors, node_ptr->contour_connects);
-            append_unique(edge_neighbors, node_ptr->poly_connects);
-            for (const auto& neighbor : edge_neighbors) {
-                if (!neighbor || node_ptr->id >= neighbor->id) continue;
-                if (neighbor->source != GraphNodeSource::STATIC_CANDIDATE &&
-                    neighbor->source != GraphNodeSource::STATIC_GLOBAL) continue;
-                auto state_it =
-                    node_ptr->edge_states.find(neighbor->id);
-                if (state_it == node_ptr->edge_states.end()) continue;
-                const bool has_route_geometry =
-                    state_it->second.has_clearance_geometry;
-                const bool current_contour_adjacent =
-                    IsContourTopologyMode(
-                        state_it->second.validation_mode) &&
-                    node_ptr->is_contour_match &&
-                    neighbor->is_contour_match &&
-                    (ContourGraph::IsNavNodesConnectFromContour(
-                         node_ptr, neighbor) ||
-                     ContourGraph::IsNavNodesConnectFromClipAttempt(
-                         node_ptr, neighbor));
-                const bool pairwise_visibility_checked =
-                    state_it->second.validation_mode ==
-                        EdgeValidationMode::VISIBILITY &&
-                    node_ptr->is_near_nodes && neighbor->is_near_nodes;
-                const bool topology_only_contour =
-                    IsContourTopologyMode(
-                        state_it->second.validation_mode) &&
-                    !has_route_geometry;
-                if (topology_only_contour) {
-                    // The raw endpoint chord lies on/through the obstacle by
-                    // construction and is not an executable path. Its static
-                    // lifetime is governed only by current contour adjacency
-                    // observations; dynamic safety is checked on the actual
-                    // projected waypoint and query edges.
-                    node_ptr->edge_states[neighbor->id].dynamic_blocked =
-                        false;
-                    neighbor->edge_states[node_ptr->id].dynamic_blocked =
-                        false;
-                    continue;
-                }
-                if (semantic_update_in_progress_ &&
-                    !current_contour_adjacent &&
-                    !pairwise_visibility_checked &&
-                    route_intersects_reliable_window(
-                        state_it->second, node_ptr, neighbor)) {
-                    const bool static_route_free =
-                        has_route_geometry &&
-                                state_it->second.route_points.size() >= 2
-                            ? ContourGraph::IsRouteConnectFreeStaticLayer(
-                                  state_it->second.route_points)
-                            : ContourGraph::IsRouteConnectFreeStaticLayer(
-                                  has_route_geometry
-                                      ? state_it->second.route_start
-                                      : node_ptr->position,
-                                  has_route_geometry
-                                      ? state_it->second.route_end
-                                      : neighbor->position);
-                    const bool route_fully_observed =
-                        is_route_fully_observed(
-                            state_it->second, node_ptr, neighbor);
-                    // A currently observed obstacle blocks immediately even
-                    // when only part of a historical route lies in the local
-                    // window. Absence of an obstacle can restore the edge only
-                    // when the complete route was observed; otherwise freeze
-                    // its previous static state.
-                    if (!static_route_free || route_fully_observed) {
-                        GraphEdgeState& forward =
-                            node_ptr->edge_states[neighbor->id];
-                        GraphEdgeState& reverse =
-                            neighbor->edge_states[node_ptr->id];
-                        if (forward.validation_mode ==
-                            EdgeValidationMode::CONTOUR_FOLLOW) {
-                            ApplyContourStaticValidationObservation(
-                                forward, static_route_free,
-                                dg_params_.static_visibility_remove_frames);
-                            ApplyContourStaticValidationObservation(
-                                reverse, static_route_free,
-                                dg_params_.static_visibility_remove_frames);
-                        } else {
-                            const bool remove_forward =
-                                ApplyVisibilityStaticValidationObservation(
-                                    forward, static_route_free,
-                                    dg_params_.static_visibility_remove_frames);
-                            const bool remove_reverse =
-                                ApplyVisibilityStaticValidationObservation(
-                                    reverse, static_route_free,
-                                    dg_params_.static_visibility_remove_frames);
-                            if (remove_forward || remove_reverse) {
-                                visibility_edges_to_remove.emplace_back(
-                                    node_ptr, neighbor);
-                            }
-                        }
-                        const int synchronized_misses = std::max(
-                            forward.static_visibility_misses,
-                            reverse.static_visibility_misses);
-                        forward.static_visibility_misses =
-                            reverse.static_visibility_misses =
-                                synchronized_misses;
-                    }
-                    if (!static_route_free) {
-                        contour_edge_diagnostics_.push_back({
-                            node_ptr->id, neighbor->id,
-                            state_it->second.route_start,
-                            state_it->second.route_end,
-                            state_it->second.validation_mode,
-                            EdgeRejectReason::STATIC_CLOUD_BLOCKED});
-                    }
-                }
-                const bool blocked = has_route_geometry
-                    ? !(state_it->second.route_points.size() >= 2
-                            ? ContourGraph::IsRouteConnectFreeDynamicLayer(
-                                  state_it->second.route_points)
-                            : ContourGraph::IsRouteConnectFreeDynamicLayer(
-                                  state_it->second.route_start,
-                                  state_it->second.route_end))
-                    : !ContourGraph::IsNavNodesConnectFreeDynamicLayer(
-                          node_ptr, neighbor);
-                if (blocked) {
-                    node_ptr->edge_states[neighbor->id].dynamic_blocked = true;
-                    neighbor->edge_states[node_ptr->id].dynamic_blocked = true;
+                if (this->IsValidConnect(node_ptr, ob_node_ptr, false)) {
+                    this->AddPolyEdge(node_ptr, ob_node_ptr), this->AddEdge(node_ptr, ob_node_ptr);
                 } else {
-                    node_ptr->edge_states[neighbor->id].dynamic_blocked = false;
-                    neighbor->edge_states[node_ptr->id].dynamic_blocked = false;
+                    this->ErasePolyEdge(node_ptr, ob_node_ptr), this->EraseEdge(node_ptr, ob_node_ptr);
                 }
             }
-        }
-        for (const NavEdge& edge : visibility_edges_to_remove) {
-            this->RemoveVisibilityEdge(edge.first, edge.second);
         }
         // Analysisig frontier nodes
         for (const auto& node_ptr : near_nav_nodes_) {
@@ -1256,415 +219,38 @@ void DynamicGraph::UpdateNavGraph(const NodePtrStack& new_nodes,
                 node_ptr->is_frontier = false;
             }
         }
-
-        std::size_t accepted_contour_edges = 0;
-        std::size_t accepted_clip_attempt_edges = 0;
-        for (const auto& node_ptr : near_nav_nodes_) {
-            if (!node_ptr) continue;
-            for (const auto& neighbor : node_ptr->contour_connects) {
-                if (!neighbor || node_ptr->id >= neighbor->id) continue;
-                const auto state = node_ptr->edge_states.find(neighbor->id);
-                if (state != node_ptr->edge_states.end() &&
-                    state->second.IsActive()) {
-                    if (state->second.validation_mode ==
-                        EdgeValidationMode::CONTOUR_FOLLOW) {
-                        ++accepted_contour_edges;
-                    } else if (state->second.validation_mode ==
-                               EdgeValidationMode::CLIP_ATTEMPT) {
-                        ++accepted_clip_attempt_edges;
-                    }
-                }
-            }
-        }
-        std::size_t not_adjacent = 0;
-        std::size_t static_cloud = 0;
-        std::size_t self_polygon = 0;
-        std::size_t other_static = 0;
-        std::size_t dynamic_cloud = 0;
-        std::size_t terrain = 0;
-        std::size_t vote = 0;
-        std::size_t offset = 0;
-        std::size_t clipped = 0;
-        for (const auto& diagnostic : contour_edge_diagnostics_) {
-            switch (diagnostic.reason) {
-                case EdgeRejectReason::NOT_CURRENT_ADJACENT:
-                    ++not_adjacent;
-                    break;
-                case EdgeRejectReason::STATIC_CLOUD_BLOCKED:
-                    ++static_cloud;
-                    break;
-                case EdgeRejectReason::SELF_POLYGON_BLOCKED:
-                    ++self_polygon;
-                    break;
-                case EdgeRejectReason::OTHER_STATIC_BLOCKED:
-                case EdgeRejectReason::POLYGON_BLOCKED:
-                    ++other_static;
-                    break;
-                case EdgeRejectReason::DYNAMIC_CLOUD_BLOCKED:
-                    ++dynamic_cloud;
-                    break;
-                case EdgeRejectReason::DIRECTION_SPARSIFIED:
-                case EdgeRejectReason::TRIANGLE_SPARSIFIED:
-                    break;
-                case EdgeRejectReason::TERRAIN_BLOCKED:
-                    ++terrain;
-                    break;
-                case EdgeRejectReason::VOTE_PENDING:
-                    ++vote;
-                    break;
-                case EdgeRejectReason::OFFSET_FAILED:
-                    ++offset;
-                    break;
-                case EdgeRejectReason::CLIPPED_CONTOUR:
-                    ++clipped;
-                    break;
-                default:
-                    break;
-            }
-        }
-        ROS_INFO_THROTTLE(
-            5.0,
-            "DG contour-follow edges: active=%zu clip_attempt=%zu reject[not_adjacent=%zu clipped=%zu static_cloud=%zu self_polygon=%zu other_static=%zu dynamic=%zu terrain=%zu offset=%zu vote=%zu]",
-            accepted_contour_edges, accepted_clip_attempt_edges,
-            not_adjacent, clipped, static_cloud, self_polygon,
-            other_static, dynamic_cloud, terrain, offset, vote);
     }
-
-    // Topology is now complete, including nodes created by this snapshot.
-    // Refresh the transient start-query layer last so it sees exactly the
-    // graph that the following path search will use.
-    this->UpdateOdomConnections();
-}
-
-void DynamicGraph::UpdateOdomConnections() {
-    if (!odom_node_ptr_) return;
-
-    // Odom belongs only to the current search snapshot. Rebuild all incident
-    // edges from its current position; an edge from an older pose must never
-    // survive a lightweight odom refresh.
-    this->ClearNodeConnectInGraph(odom_node_ptr_);
-
-    // Transient start-query layer. Historical static corners remain available
-    // to the global graph search, but a new edge from the robot may anchor
-    // only inside the current local voxel observation window. The remaining
-    // route checks use the current local static/dynamic clouds plus retained
-    // historical contour topology.
-    NodePtrStack candidates = globalGraphNodes_;
-    candidates.insert(candidates.end(), staticCandidateGraphNodes_.begin(),
-                      staticCandidateGraphNodes_.end());
-    candidates.insert(candidates.end(), dynamicLocalGraphNodes_.begin(),
-                      dynamicLocalGraphNodes_.end());
-
-    std::unordered_set<std::size_t> checked_candidates;
-    std::size_t accepted_connections = 0;
-    std::size_t validated_candidates = 0;
-    std::size_t persistent_candidates = 0;
-    std::size_t local_candidates = 0;
-    std::size_t not_start_candidate = 0;
-    std::size_t outside_start_range = 0;
-    std::size_t not_topology_connected = 0;
-    EdgeRejectionStats rejections;
-    float farthest_candidate = 0.0f;
-    float farthest_connection = 0.0f;
-    for (const auto& candidate : candidates) {
-        if (!candidate || candidate->is_odom || candidate->is_goal ||
-            !checked_candidates.insert(candidate->id).second) continue;
-        if (candidate->source == GraphNodeSource::STATIC_GLOBAL &&
-            !staticMainNodeIds_.empty() &&
-            !staticMainNodeIds_.count(candidate->id)) {
-            ++not_start_candidate;
-            continue;
-        }
-        if (!IsStartConnectionCandidate(*candidate)) {
-            ++not_start_candidate;
-            continue;
-        }
-        const float distance =
-            (candidate->position - odom_node_ptr_->position).norm_flat();
-        farthest_candidate = std::max(farthest_candidate, distance);
-        if (ContourGraph::UsesLocalObservationWindow() &&
-            !ContourGraph::IsPointInsideReliableContourWindow(
-                candidate->position) &&
-            !IsCurrentSnapshotContourEndpoint(*candidate)) {
-            ++outside_start_range;
-            continue;
-        }
-        if (ShouldPruneStartConnectionForRange(
-                *candidate, distance, FARUtil::kSensorRange,
-                dg_params_.static_stitch_radius,
-                dg_params_.start_connection_max_distance)) {
-            ++outside_start_range;
-            continue;
-        }
-        // A start edge to a corner that has no reusable graph edge produces
-        // exactly the two-node dead end seen in the SSMI replay: odom and one
-        // blue orphan.  Preserve that corner for future matching, but do not
-        // select it as a query anchor until the map topology reconnects it.
-        if (!HasActiveSearchEligibleIncidentEdge(*candidate)) {
-            ++not_topology_connected;
-            continue;
-        }
-        if (candidate->source == GraphNodeSource::STATIC_GLOBAL) {
-            ++persistent_candidates;
-        } else {
-            ++local_candidates;
-        }
-        ++validated_candidates;
-
-        EdgeValidationResult validation =
-            ContourGraph::ValidateVisibilityEdgeWithRoute(
-                odom_node_ptr_, candidate, true);
-        EdgeRejectReason reject_reason = validation.reason;
-        if (validation.valid &&
-            !IsOnTerrainRoute(validation.route_points)) {
-            validation.valid = false;
-            reject_reason = EdgeRejectReason::TERRAIN_BLOCKED;
-        }
-
-        if (validation.valid) {
-            AddPolyEdge(odom_node_ptr_, candidate);
-            AddEdge(odom_node_ptr_, candidate);
-            GraphEdgeState& forward =
-                odom_node_ptr_->edge_states[candidate->id];
-            GraphEdgeState& reverse =
-                candidate->edge_states[odom_node_ptr_->id];
-            forward.source = reverse.source = GraphEdgeSource::ODOM_CONNECT;
-            forward.validation_mode = reverse.validation_mode =
-                EdgeValidationMode::VISIBILITY;
-            forward.has_clearance_geometry =
-                reverse.has_clearance_geometry = true;
-            forward.route_start = validation.route_start;
-            forward.route_end = validation.route_end;
-            reverse.route_start = validation.route_end;
-            reverse.route_end = validation.route_start;
-            forward.route_points = validation.route_points;
-            reverse.route_points.assign(validation.route_points.rbegin(),
-                                        validation.route_points.rend());
-            forward.route_cost = reverse.route_cost = validation.route_cost;
-            forward.static_valid = reverse.static_valid = true;
-            forward.dynamic_blocked = reverse.dynamic_blocked = false;
-            forward.topology_blocked = reverse.topology_blocked = false;
-            forward.active = reverse.active = true;
-            ++accepted_connections;
-            farthest_connection = std::max(farthest_connection, distance);
-        } else {
-            rejections.Count(reject_reason);
-        }
-    }
-    const std::size_t flat_triangle_pruned =
-        this->PruneFlatTriangleVisibilityEdges();
-    ROS_INFO_THROTTLE(
-        5.0,
-        "DG start connections: unique=%zu validated=%zu persistent=%zu local=%zu accepted=%zu triangle_pruned=%zu skipped[not_start_candidate=%zu outside_start_range=%zu no_topology_edge=%zu] farthest_candidate=%.2fm farthest_edge=%.2fm reject[unreachable=%zu direction=%zu static_cloud=%zu dynamic_cloud=%zu polygon=%zu terrain=%zu vote=%zu]",
-        checked_candidates.size(), validated_candidates,
-        persistent_candidates, local_candidates, accepted_connections,
-        flat_triangle_pruned,
-        not_start_candidate, outside_start_range, not_topology_connected,
-        farthest_candidate, farthest_connection, rejections.unreachable,
-        rejections.direction_rejected, rejections.static_cloud_blocked,
-        rejections.dynamic_cloud_blocked, rejections.polygon_blocked,
-        rejections.terrain_blocked, rejections.vote_pending);
-}
-
-std::size_t DynamicGraph::PruneFlatTriangleVisibilityEdges() {
-    if (!dg_params_.flat_triangle_pruning_enabled) return 0;
-
-    struct VisibilityEdgeCandidate {
-        NavNodePtr first;
-        NavNodePtr second;
-        float length = 0.0f;
-    };
-
-    NodePtrStack nodes = globalGraphNodes_;
-    nodes.insert(nodes.end(), staticCandidateGraphNodes_.begin(),
-                 staticCandidateGraphNodes_.end());
-    nodes.insert(nodes.end(), dynamicLocalGraphNodes_.begin(),
-                 dynamicLocalGraphNodes_.end());
-    if (odom_node_ptr_ &&
-        !FARUtil::IsTypeInStack(odom_node_ptr_, nodes)) {
-        nodes.push_back(odom_node_ptr_);
-    }
-
-    std::unordered_set<std::size_t> visited_nodes;
-    std::vector<VisibilityEdgeCandidate> candidates;
-    for (const NavNodePtr& first : nodes) {
-        if (!first || first->is_goal ||
-            !visited_nodes.insert(first->id).second ||
-            !IsGraphNodeSearchEligible(*first)) {
-            continue;
-        }
-        for (const NavNodePtr& second : first->connect_nodes) {
-            if (!second || second->is_goal || first->id >= second->id ||
-                !IsGraphEdgeSearchEligible(*first, *second)) {
-                continue;
-            }
-            const bool has_visibility_identity =
-                FARUtil::IsTypeInStack(second, first->poly_connects);
-            const bool has_protected_identity =
-                FARUtil::IsTypeInStack(second, first->contour_connects) ||
-                FARUtil::IsTypeInStack(second, first->trajectory_connects);
-            if (!has_visibility_identity || has_protected_identity) continue;
-            candidates.push_back({
-                first, second,
-                (second->position - first->position).norm_flat()});
-        }
-    }
-
-    // Evaluate long chords first. Each deletion is made only while both
-    // shorter sides are still active, so overlapping triangles cannot remove
-    // all alternatives or disconnect the graph.
-    std::sort(candidates.begin(), candidates.end(),
-              [](const VisibilityEdgeCandidate& left,
-                 const VisibilityEdgeCandidate& right) {
-                  if (std::fabs(left.length - right.length) >
-                      FARUtil::kEpsilon) {
-                      return left.length > right.length;
-                  }
-                  if (left.first->id != right.first->id) {
-                      return left.first->id < right.first->id;
-                  }
-                  return left.second->id < right.second->id;
-              });
-
-    std::size_t removed = 0;
-    for (const VisibilityEdgeCandidate& candidate : candidates) {
-        const NavNodePtr& first = candidate.first;
-        const NavNodePtr& second = candidate.second;
-        if (!first || !second ||
-            !FARUtil::IsTypeInStack(second, first->poly_connects) ||
-            !IsGraphEdgeSearchEligible(*first, *second)) {
-            continue;
-        }
-
-        NavNodePtr witness;
-        for (const NavNodePtr& via : first->connect_nodes) {
-            if (!via || via == second || via->is_goal ||
-                !IsGraphNodeSearchEligible(*via) ||
-                !FARUtil::IsTypeInStack(via, second->connect_nodes) ||
-                !IsGraphEdgeSearchEligible(*first, *via) ||
-                !IsGraphEdgeSearchEligible(*second, *via)) {
-                continue;
-            }
-            if (IsRedundantLongestEdgeOfFlatTriangle(
-                    first->position, second->position, via->position,
-                    dg_params_.flat_triangle_max_detour_ratio,
-                    dg_params_.flat_triangle_max_altitude_ratio,
-                    FARUtil::kEpsilon)) {
-                witness = via;
-                break;
-            }
-        }
-        if (!witness) continue;
-
-        const std::size_t first_id = std::min(first->id, second->id);
-        const std::size_t second_id = std::max(first->id, second->id);
-        const bool already_diagnosed = std::any_of(
-            contour_edge_diagnostics_.begin(),
-            contour_edge_diagnostics_.end(),
-            [first_id, second_id](const EdgeDiagnostic& diagnostic) {
-                return diagnostic.reason ==
-                           EdgeRejectReason::TRIANGLE_SPARSIFIED &&
-                       std::min(diagnostic.first_id,
-                                diagnostic.second_id) == first_id &&
-                       std::max(diagnostic.first_id,
-                                diagnostic.second_id) == second_id;
-            });
-        if (!already_diagnosed) {
-            contour_edge_diagnostics_.push_back({
-                first->id, second->id, first->position, second->position,
-                EdgeValidationMode::VISIBILITY,
-                EdgeRejectReason::TRIANGLE_SPARSIFIED});
-        }
-        this->RemoveVisibilityEdge(first, second);
-        ++removed;
-    }
-    return removed;
 }
 
 bool DynamicGraph::IsValidConnect(const NavNodePtr& node_ptr1, 
                                   const NavNodePtr& node_ptr2,
-                                  const bool& is_check_contour,
-                                  const bool& include_dynamic,
-                                  const bool& apply_direction_filter)
+                                  const bool& is_check_contour) 
 {
     const float dist = (node_ptr1->position - node_ptr2->position).norm();
     if (dist < FARUtil::kEpsilon) return true;
+    if ((node_ptr1->is_odom || node_ptr2->is_odom) && (node_ptr1->is_navpoint || node_ptr2->is_navpoint)) {
+        if (dist < FARUtil::kNavClearDist) return true; 
+    } 
     /* check contour connection from node1 to node2 */
     if (is_check_contour) {
-        const bool boundary_connect =
-            this->IsBoundaryConnect(node_ptr1, node_ptr2);
-        const bool physical_contour_adjacent =
-            ContourGraph::IsNavNodesConnectFromContour(node_ptr1, node_ptr2);
-        const bool clip_attempt = !physical_contour_adjacent &&
-            ContourGraph::IsNavNodesConnectFromClipAttempt(node_ptr1,
-                                                           node_ptr2);
-        const bool current_contour_adjacent =
-            physical_contour_adjacent || clip_attempt;
-        const bool contour_terrain_valid =
-            boundary_connect ||
-            clip_attempt ||
-            (physical_contour_adjacent &&
-             IsOnTerrainConnect(node_ptr1, node_ptr2, true));
-        if (contour_terrain_valid) {
+        if (this->IsBoundaryConnect(node_ptr1, node_ptr2) || (ContourGraph::IsNavNodesConnectFromContour(node_ptr1, node_ptr2) && IsOnTerrainConnect(node_ptr1, node_ptr2, true))) {
             this->RecordContourVote(node_ptr1, node_ptr2);
-        } else if (current_contour_adjacent &&
-                   node_ptr1->id < node_ptr2->id) {
-            // The contour relation exists in this snapshot but the old raw
-            // endpoint terrain precheck prevented it from entering
-            // potential_contours, so TopTwoContourConnector cannot report the
-            // later projected-route result. Expose that otherwise invisible
-            // rejection explicitly in the debug stream.
-            contour_edge_diagnostics_.push_back({
-                node_ptr1->id, node_ptr2->id, node_ptr1->position,
-                node_ptr2->position,
-                clip_attempt ? EdgeValidationMode::CLIP_ATTEMPT
-                             : EdgeValidationMode::CONTOUR_FOLLOW,
-                EdgeRejectReason::TERRAIN_BLOCKED});
         } else if (node_ptr1->is_contour_match && node_ptr2->is_contour_match) {
             this->DeleteContourVote(node_ptr1, node_ptr2);
         }
     }
     bool is_connect = false;
     /* check polygon connections */
-    const bool is_dynamic_edge =
-        node_ptr1->source == GraphNodeSource::DYNAMIC_LOCAL ||
-        node_ptr2->source == GraphNodeSource::DYNAMIC_LOCAL;
-    const int vote_queue_size = is_dynamic_edge ? 1
-        : ((node_ptr1->is_odom || node_ptr2->is_odom)
-               ? std::ceil(dg_params_.votes_size / 3.0f)
-               : dg_params_.votes_size);
-    const bool convex = IsConvexConnect(node_ptr1, node_ptr2);
-    // Match the original FAR endpoint rule: an odom-to-corner edge must lie
-    // in the obstacle corner's free sector.  Odom itself is a PILLAR endpoint
-    // and therefore contributes no artificial surface restriction.
-    const bool direct = this->IsInDirectConstraint(node_ptr1, node_ptr2);
-    const bool polygon_free =
-        ContourGraph::ValidateVisibilityEdgeGeometry(
-            node_ptr1, node_ptr2, include_dynamic) ==
-        EdgeRejectReason::NONE;
-    const bool terrain_free = convex && direct && polygon_free
-        ? IsOnTerrainConnect(node_ptr1, node_ptr2, false)
-        : false;
-    const bool poly_matched = this->IsPolyMatchedForConnect(
-        node_ptr1, node_ptr2);
-    if (convex && direct && polygon_free && terrain_free) {
-        if (poly_matched) {
+    const int vote_queue_size = (node_ptr1->is_odom || node_ptr2->is_odom) ? std::ceil(dg_params_.votes_size / 3.0f) : dg_params_.votes_size;
+    if (IsConvexConnect(node_ptr1, node_ptr2) && this->IsInDirectConstraint(node_ptr1, node_ptr2) && ContourGraph::IsNavNodesConnectFreePolygon(node_ptr1, node_ptr2) && IsOnTerrainConnect(node_ptr1, node_ptr2, false)) {
+        if (this->IsPolyMatchedForConnect(node_ptr1, node_ptr2)) {
             RecordPolygonVote(node_ptr1, node_ptr2, vote_queue_size);
         }
     } else {
         DeletePolygonVote(node_ptr1, node_ptr2, vote_queue_size);
     }
-    const bool vote_ready = this->IsPolygonEdgeVoteTrue(node_ptr1, node_ptr2);
-    // Historical votes stabilize edge identity, but they may never override a
-    // collision observed in the current snapshot. This makes the first static
-    // obstacle failure immediately non-searchable while the separate edge
-    // miss counter below decides when its history may be erased.
-    if (convex && direct && polygon_free && terrain_free && poly_matched &&
-        vote_ready) {
-        if (!apply_direction_filter ||
-            !this->IsSimilarConnectInDiection(node_ptr1, node_ptr2)) {
-            is_connect = true;
-        }
+    if (this->IsPolygonEdgeVoteTrue(node_ptr1, node_ptr2)) {
+        if (!this->IsSimilarConnectInDiection(node_ptr1, node_ptr2)) is_connect = true;
     } else if (node_ptr1->is_odom || node_ptr2->is_odom) {
         node_ptr1->edge_votes.erase(node_ptr2->id);
         node_ptr2->edge_votes.erase(node_ptr1->id);
@@ -1672,261 +258,38 @@ bool DynamicGraph::IsValidConnect(const NavNodePtr& node_ptr1,
         FARUtil::EraseNodeFromStack(node_ptr2, node_ptr1->potential_edges);
         FARUtil::EraseNodeFromStack(node_ptr1, node_ptr2->potential_edges);
     }
+    /* check if exsiting trajectory connection exist */
+    if (!is_connect) {
+        if (FARUtil::IsTypeInStack(node_ptr1, node_ptr2->trajectory_connects)) is_connect = true;
+        if ((node_ptr1->is_odom || node_ptr2->is_odom) && cur_internav_ptr_ != NULL) {
+            if (node_ptr1->is_odom && FARUtil::IsTypeInStack(node_ptr2, cur_internav_ptr_->trajectory_connects)) {
+                if (FARUtil::IsInCylinder(cur_internav_ptr_->position, node_ptr2->position, node_ptr1->position, FARUtil::kNearDist)) {
+                    is_connect = true;
+                }   
+            } else if (node_ptr2->is_odom && FARUtil::IsTypeInStack(node_ptr1, cur_internav_ptr_->trajectory_connects)) {
+                if (FARUtil::IsInCylinder(cur_internav_ptr_->position, node_ptr1->position, node_ptr2->position, FARUtil::kNearDist)) {
+                    is_connect = true;
+                }
+            }
+        }
+    }
+    /* check for additional contour connection through tight area from current robot position */
+    if (!is_connect && (node_ptr1->is_odom || node_ptr2->is_odom) && IsConvexConnect(node_ptr1, node_ptr2) && this->IsInDirectConstraint(node_ptr1, node_ptr2)) {
+        if (node_ptr1->is_odom && !node_ptr2->contour_connects.empty()) {
+            for (const auto& ctnode_ptr : node_ptr2->contour_connects) {
+                if (FARUtil::IsInCylinder(ctnode_ptr->position, node_ptr2->position, node_ptr1->position, FARUtil::kNavClearDist)) {
+                    is_connect = true;
+                }
+            }
+        } else if (node_ptr2->is_odom && !node_ptr1->contour_connects.empty()) {
+            for (const auto& ctnode_ptr : node_ptr1->contour_connects) {
+                if (FARUtil::IsInCylinder(ctnode_ptr->position, node_ptr1->position, node_ptr2->position, FARUtil::kNavClearDist)) {
+                    is_connect = true;
+                }
+            }
+        }
+    }
     return is_connect;
-}
-
-EdgeRejectReason DynamicGraph::ClassifyVisibilityRejection(
-    const NavNodePtr& node_ptr1, const NavNodePtr& node_ptr2,
-    const bool include_dynamic, const bool apply_direction_filter) {
-    if (!node_ptr1 || !node_ptr2 || node_ptr1 == node_ptr2 ||
-        !IsGraphNodeSearchEligible(*node_ptr1) ||
-        !IsGraphNodeSearchEligible(*node_ptr2)) {
-        return EdgeRejectReason::UNREACHABLE;
-    }
-    if (!IsConvexConnect(node_ptr1, node_ptr2) ||
-        !this->IsInDirectConstraint(node_ptr1, node_ptr2)) {
-        return EdgeRejectReason::DIRECTION_REJECTED;
-    }
-    const EdgeRejectReason geometry =
-        ContourGraph::ValidateVisibilityEdgeGeometry(
-            node_ptr1, node_ptr2, include_dynamic);
-    if (geometry != EdgeRejectReason::NONE) return geometry;
-    if (!IsOnTerrainRoute(node_ptr1->position, node_ptr2->position)) {
-        return EdgeRejectReason::TERRAIN_BLOCKED;
-    }
-    if (!this->IsPolyMatchedForConnect(node_ptr1, node_ptr2) ||
-        !this->IsPolygonEdgeVoteTrue(node_ptr1, node_ptr2)) {
-        return EdgeRejectReason::VOTE_PENDING;
-    }
-    if (apply_direction_filter &&
-        this->IsSimilarConnectInDiection(node_ptr1, node_ptr2)) {
-        return EdgeRejectReason::DIRECTION_REJECTED;
-    }
-    return EdgeRejectReason::VOTE_PENDING;
-}
-
-bool DynamicGraph::UpdateGraphEdge(const NavNodePtr& node_ptr1,
-                                   const NavNodePtr& node_ptr2,
-                                   const bool& is_check_contour) {
-    if (!node_ptr1 || !node_ptr2 || node_ptr1 == node_ptr2) return false;
-    const auto is_static_obstacle_node = [](const NavNodePtr& node_ptr) {
-        return node_ptr &&
-               (node_ptr->source == GraphNodeSource::STATIC_CANDIDATE ||
-                node_ptr->source == GraphNodeSource::STATIC_GLOBAL);
-    };
-    const bool is_persistent_static_edge =
-        is_static_obstacle_node(node_ptr1) &&
-        is_static_obstacle_node(node_ptr2) &&
-        !node_ptr1->is_transient_contour_endpoint &&
-        !node_ptr2->is_transient_contour_endpoint;
-    // Static geometry owns the lifetime of a static edge.  A current dynamic
-    // obstacle may make that edge inactive for this search snapshot, but must
-    // not erase the edge or its accumulated static votes.
-    const bool structurally_valid = this->IsValidConnect(
-        node_ptr1, node_ptr2, is_check_contour,
-        !is_persistent_static_edge);
-    const EdgeRejectReason rejection_reason = structurally_valid
-        ? EdgeRejectReason::NONE
-        : this->ClassifyVisibilityRejection(
-              node_ptr1, node_ptr2, !is_persistent_static_edge, true);
-    return this->ApplyValidatedGraphEdge(node_ptr1, node_ptr2,
-                                         structurally_valid,
-                                         rejection_reason);
-}
-
-void DynamicGraph::RemoveVisibilityEdge(const NavNodePtr& node_ptr1,
-                                        const NavNodePtr& node_ptr2) {
-    if (!node_ptr1 || !node_ptr2) return;
-    ErasePolyEdge(node_ptr1, node_ptr2);
-    const bool has_other_edge_identity =
-        FARUtil::IsTypeInStack(node_ptr2, node_ptr1->contour_connects) ||
-        FARUtil::IsTypeInStack(node_ptr2, node_ptr1->trajectory_connects);
-    if (!has_other_edge_identity) EraseEdge(node_ptr1, node_ptr2);
-}
-
-bool DynamicGraph::ApplyValidatedGraphEdge(const NavNodePtr& node_ptr1,
-                                           const NavNodePtr& node_ptr2,
-                                           const bool structurally_valid,
-                                           const EdgeRejectReason rejection_reason) {
-    if (!node_ptr1 || !node_ptr2 || node_ptr1 == node_ptr2) return false;
-    if ((node_ptr1->is_transient_contour_endpoint &&
-         !IsCurrentSnapshotContourEndpoint(*node_ptr1)) ||
-        (node_ptr2->is_transient_contour_endpoint &&
-         !IsCurrentSnapshotContourEndpoint(*node_ptr2))) {
-        this->RemoveVisibilityEdge(node_ptr1, node_ptr2);
-        return false;
-    }
-    const auto is_static_obstacle_node = [](const NavNodePtr& node_ptr) {
-        return node_ptr &&
-               (node_ptr->source == GraphNodeSource::STATIC_CANDIDATE ||
-                node_ptr->source == GraphNodeSource::STATIC_GLOBAL);
-    };
-    const bool is_persistent_static_edge =
-        is_static_obstacle_node(node_ptr1) &&
-        is_static_obstacle_node(node_ptr2) &&
-        !node_ptr1->is_transient_contour_endpoint &&
-        !node_ptr2->is_transient_contour_endpoint;
-    const bool is_static_obstacle_edge =
-        is_static_obstacle_node(node_ptr1) &&
-        is_static_obstacle_node(node_ptr2);
-    const bool fully_observed_static_route =
-        !is_persistent_static_edge ||
-        ContourGraph::IsSegmentFullyInsideReliableContourWindow(
-            node_ptr1->position, node_ptr2->position);
-    const bool has_visibility_identity = FARUtil::IsTypeInStack(
-        node_ptr2, node_ptr1->poly_connects);
-    const bool has_other_edge_identity = FARUtil::IsTypeInStack(
-        node_ptr2, node_ptr1->contour_connects) ||
-        FARUtil::IsTypeInStack(
-            node_ptr2, node_ptr1->trajectory_connects);
-
-    if (is_persistent_static_edge && !fully_observed_static_route) {
-        auto forward_it = node_ptr1->edge_states.find(node_ptr2->id);
-        auto reverse_it = node_ptr2->edge_states.find(node_ptr1->id);
-        const bool retained_visibility = has_visibility_identity &&
-            !has_other_edge_identity &&
-            forward_it != node_ptr1->edge_states.end() &&
-            reverse_it != node_ptr2->edge_states.end();
-        // A point from the current local static cloud is positive blocking
-        // evidence even for a partially observed historical edge. Every
-        // other result is inconclusive until the whole edge lies in-window.
-        if (!structurally_valid && retained_visibility &&
-            rejection_reason == EdgeRejectReason::STATIC_CLOUD_BLOCKED) {
-            const bool remove_forward =
-                ApplyVisibilityStaticValidationObservation(
-                    forward_it->second, false,
-                    dg_params_.static_visibility_remove_frames);
-            const bool remove_reverse =
-                ApplyVisibilityStaticValidationObservation(
-                    reverse_it->second, false,
-                    dg_params_.static_visibility_remove_frames);
-            const int misses = std::max(
-                forward_it->second.static_visibility_misses,
-                reverse_it->second.static_visibility_misses);
-            forward_it->second.static_visibility_misses = misses;
-            reverse_it->second.static_visibility_misses = misses;
-            if (remove_forward || remove_reverse) {
-                this->RemoveVisibilityEdge(node_ptr1, node_ptr2);
-            }
-            return false;
-        }
-        if (!retained_visibility) return false;
-        const bool dynamic_blocked =
-            !ContourGraph::IsNavNodesConnectFreeDynamicLayer(
-                node_ptr1, node_ptr2);
-        forward_it->second.dynamic_blocked = dynamic_blocked;
-        reverse_it->second.dynamic_blocked = dynamic_blocked;
-        return forward_it->second.IsActive() &&
-               reverse_it->second.IsActive();
-    }
-
-    if (!structurally_valid) {
-        auto forward_it = node_ptr1->edge_states.find(node_ptr2->id);
-        auto reverse_it = node_ptr2->edge_states.find(node_ptr1->id);
-        if (is_persistent_static_edge && has_visibility_identity &&
-            !has_other_edge_identity &&
-            IsRecoverableStaticVisibilitySelectionReason(
-                rejection_reason) &&
-            forward_it != node_ptr1->edge_states.end() &&
-            reverse_it != node_ptr2->edge_states.end()) {
-            // ClassifyVisibilityRejection reaches VOTE_PENDING only after
-            // current direction, static geometry and terrain have passed.
-            // DIRECTION_SPARSIFIED likewise comes from a fully valid pair.
-            // Therefore a retained edge can recover immediately; historical
-            // vote hysteresis is only a creation gate, not deletion evidence.
-            ApplyVisibilityStaticValidationObservation(
-                forward_it->second, true,
-                dg_params_.static_visibility_remove_frames);
-            ApplyVisibilityStaticValidationObservation(
-                reverse_it->second, true,
-                dg_params_.static_visibility_remove_frames);
-            return forward_it->second.IsActive() &&
-                   reverse_it->second.IsActive();
-        }
-        if (is_persistent_static_edge && has_visibility_identity &&
-            !has_other_edge_identity &&
-            IsStaticGeometryRejectReason(rejection_reason) &&
-            forward_it != node_ptr1->edge_states.end() &&
-            reverse_it != node_ptr2->edge_states.end()) {
-            const bool remove_forward =
-                ApplyVisibilityStaticValidationObservation(
-                    forward_it->second, false,
-                    dg_params_.static_visibility_remove_frames);
-            const bool remove_reverse =
-                ApplyVisibilityStaticValidationObservation(
-                    reverse_it->second, false,
-                    dg_params_.static_visibility_remove_frames);
-            const int misses = std::max(
-                forward_it->second.static_visibility_misses,
-                reverse_it->second.static_visibility_misses);
-            forward_it->second.static_visibility_misses = misses;
-            reverse_it->second.static_visibility_misses = misses;
-            forward_it->second.static_valid = false;
-            reverse_it->second.static_valid = false;
-            if (remove_forward || remove_reverse) {
-                this->RemoveVisibilityEdge(node_ptr1, node_ptr2);
-            }
-            return false;
-        }
-        this->RemoveVisibilityEdge(node_ptr1, node_ptr2);
-        return false;
-    }
-
-    this->AddPolyEdge(node_ptr1, node_ptr2);
-    this->AddEdge(node_ptr1, node_ptr2);
-    if (!is_static_obstacle_edge) return true;
-
-    // Persist the exact projected robot-centre geometry for ordinary static
-    // edges as well as contour edges. Historical revalidation must inspect
-    // the path that search actually uses, even when either endpoint no longer
-    // matches a current CT corner on the next snapshot.
-    const bool contour_identity = FARUtil::IsTypeInStack(
-        node_ptr2, node_ptr1->contour_connects);
-    if (!contour_identity) {
-        const EdgeValidationResult route =
-            ContourGraph::ValidateVisibilityEdgeWithRoute(
-                node_ptr1, node_ptr2, false);
-        if (route.valid) {
-            GraphEdgeState& forward =
-                node_ptr1->edge_states[node_ptr2->id];
-            GraphEdgeState& reverse =
-                node_ptr2->edge_states[node_ptr1->id];
-            forward.validation_mode = reverse.validation_mode =
-                EdgeValidationMode::VISIBILITY;
-            forward.has_clearance_geometry =
-                reverse.has_clearance_geometry = true;
-            forward.route_start = route.route_start;
-            forward.route_end = route.route_end;
-            reverse.route_start = route.route_end;
-            reverse.route_end = route.route_start;
-            forward.route_points = route.route_points;
-            reverse.route_points.assign(route.route_points.rbegin(),
-                                        route.route_points.rend());
-            forward.route_cost = reverse.route_cost = route.route_cost;
-        }
-    }
-
-    const auto state_it = node_ptr1->edge_states.find(node_ptr2->id);
-    const bool has_route_geometry =
-        state_it != node_ptr1->edge_states.end() &&
-        state_it->second.has_clearance_geometry;
-    const bool dynamic_blocked = has_route_geometry
-        ? !(state_it->second.route_points.size() >= 2
-                ? ContourGraph::IsRouteConnectFreeDynamicLayer(
-                      state_it->second.route_points)
-                : ContourGraph::IsRouteConnectFreeDynamicLayer(
-                      state_it->second.route_start,
-                      state_it->second.route_end))
-        : !ContourGraph::IsNavNodesConnectFreeDynamicLayer(
-              node_ptr1, node_ptr2);
-    if (dynamic_blocked) {
-        node_ptr1->edge_states[node_ptr2->id].dynamic_blocked = true;
-        node_ptr2->edge_states[node_ptr1->id].dynamic_blocked = true;
-    } else {
-        node_ptr1->edge_states[node_ptr2->id].dynamic_blocked = false;
-        node_ptr2->edge_states[node_ptr1->id].dynamic_blocked = false;
-    }
-    return !dynamic_blocked;
 }
 
 bool DynamicGraph::IsOnTerrainConnect(const NavNodePtr& node_ptr1, const NavNodePtr& node_ptr2, const bool& is_contour) {
@@ -1943,15 +306,10 @@ bool DynamicGraph::IsOnTerrainConnect(const NavNodePtr& node_ptr1, const NavNode
         bool is_match;
         float minH, maxH;
         const float avg_h = MapHandler::NearestHeightOfRadius(mid_p, FARUtil::kMatchDist, minH, maxH, is_match);
-        if (!is_match) {
-            // In semantic-camera mode an unobserved midpoint is UNKNOWN, not
-            // evidence of an obstacle or a height discontinuity. Apply the
-            // same optimistic unknown-space policy to odom/goal edges and to
-            // obstacle-to-obstacle stitch edges. Every edge still has to pass
-            // convexity, FAR surface direction, contour intersection and the
-            // current static+dynamic raw-cloud corridor checks.
-            return true;
-        }
+        if (!is_match && (is_contour || !node_ptr1->is_frontier || !node_ptr2->is_frontier)) {
+            if (!is_contour) RemoveInvaildTerrainConnect(node_ptr1, node_ptr2);
+            return false;
+        } 
         if (is_match && (maxH - minH > FARUtil::kMarginHeight || abs(minH + FARUtil::vehicle_height - mid_p.z) > FARUtil::kTolerZ / 2.0f)) {
             if (!is_contour) RemoveInvaildTerrainConnect(node_ptr1, node_ptr2);
             return false;
@@ -1965,39 +323,6 @@ bool DynamicGraph::IsOnTerrainConnect(const NavNodePtr& node_ptr1, const NavNode
         }
         return true;
     }
-
-bool DynamicGraph::IsOnTerrainRoute(const Point3D& start,
-                                    const Point3D& end) {
-    const Point3D diff = end - start;
-    const float horizontal = std::hypot(diff.x, diff.y);
-    if (diff.norm() > FARUtil::kMatchDist &&
-        (horizontal < FARUtil::kEpsilon ||
-         std::fabs(diff.z) / horizontal > 1.0f)) {
-        return false;
-    }
-    const Point3D midpoint = (start + end) / 2.0f;
-    bool matched = false;
-    float min_height = 0.0f;
-    float max_height = 0.0f;
-    MapHandler::NearestHeightOfRadius(midpoint, FARUtil::kMatchDist,
-                                      min_height, max_height, matched);
-    if (!matched) return true;
-    return max_height - min_height <= FARUtil::kMarginHeight &&
-           std::fabs(min_height + FARUtil::vehicle_height - midpoint.z) <=
-               FARUtil::kTolerZ / 2.0f;
-}
-
-bool DynamicGraph::IsOnTerrainRoute(
-    const std::vector<Point3D>& route_points) {
-    if (route_points.size() < 2) return false;
-    for (std::size_t index = 1; index < route_points.size(); ++index) {
-        if (!IsOnTerrainRoute(route_points[index - 1],
-                              route_points[index])) {
-            return false;
-        }
-    }
-    return true;
-}
 
 bool DynamicGraph::IsNodeFullyCovered(const NavNodePtr& node_ptr) {
     if (FARUtil::IsFreeNavNode(node_ptr) || node_ptr->is_covered) return true;
@@ -2070,28 +395,14 @@ bool DynamicGraph::IsInDirectConstraint(const NavNodePtr& node_ptr1,
     // check node1 -> node2
     if (node_ptr1->free_direct != NodeFreeDirect::PILLAR) {
         Point3D diff_1to2 = (node_ptr2->position - node_ptr1->position);
-        const bool outside_tangent_sectors =
-            FARUtil::IsOutReducedDirs(diff_1to2, node_ptr1->surf_dirs);
-        // For a convex corner the opposite sector between -surf_dirs is
-        // also free space.  The old reduced-direction rule discarded it,
-        // which is why a Q1 obstacle incorrectly rejected Q3 connections.
-        // Reject only the occupied wedge between the two surface rays.
-        const bool outside_opposite_free_sector =
-            node_ptr1->free_direct == NodeFreeDirect::CONVEX &&
-            FARUtil::IsInCoverageDirPairs(diff_1to2, node_ptr1);
-        if (!outside_tangent_sectors && !outside_opposite_free_sector) {
+        if (!FARUtil::IsOutReducedDirs(diff_1to2, node_ptr1->surf_dirs)) {
             return false;
         }
     }
     // check node1 -> node2
     if (node_ptr2->free_direct != NodeFreeDirect::PILLAR) {
         Point3D diff_2to1 = (node_ptr1->position - node_ptr2->position);
-        const bool outside_tangent_sectors =
-            FARUtil::IsOutReducedDirs(diff_2to1, node_ptr2->surf_dirs);
-        const bool outside_opposite_free_sector =
-            node_ptr2->free_direct == NodeFreeDirect::CONVEX &&
-            FARUtil::IsInCoverageDirPairs(diff_2to1, node_ptr2);
-        if (!outside_tangent_sectors && !outside_opposite_free_sector) {
+        if (!FARUtil::IsOutReducedDirs(diff_2to1, node_ptr2->surf_dirs)) {
             return false;
         }
     }
@@ -2231,180 +542,16 @@ void DynamicGraph::TopTwoContourConnector(const NavNodePtr& node_ptr) {
     }
     std::sort(votesc.begin(), votesc.end(), std::greater<int>());
     for (const auto& cnode_ptr : node_ptr->potential_contours) {
-        if (!cnode_ptr || node_ptr == cnode_ptr) continue;
-        // contour_votes/potential_contours are symmetric; validate and update
-        // the shared edge state exactly once per accepted snapshot.
-        if (node_ptr->id > cnode_ptr->id) continue;
         const auto it = node_ptr->contour_votes.find(cnode_ptr->id);
         // DEBUG
-        if (it == node_ptr->contour_votes.end()) {
-            ROS_ERROR("DG: contour potential node matching error");
-            continue;
-        }
+        if (it == node_ptr->contour_votes.end()) ROS_ERROR("DG: contour potential node matching error");
         const int itc = std::accumulate(it->second.begin(), it->second.end(), 0);
-        const bool vote_ready = FARUtil::IsVoteTrue(it->second, false);
-        const bool physical_contour_adjacent =
-            node_ptr->is_contour_match && cnode_ptr->is_contour_match &&
-            ContourGraph::IsNavNodesConnectFromContour(node_ptr, cnode_ptr);
-        const bool clip_attempt =
-            node_ptr->is_contour_match && cnode_ptr->is_contour_match &&
-            !physical_contour_adjacent &&
-            ContourGraph::IsNavNodesConnectFromClipAttempt(node_ptr,
-                                                           cnode_ptr);
-        const bool current_adjacent =
-            physical_contour_adjacent || clip_attempt;
-        const bool persistent_static_pair =
-            (node_ptr->source == GraphNodeSource::STATIC_CANDIDATE ||
-             node_ptr->source == GraphNodeSource::STATIC_GLOBAL) &&
-            (cnode_ptr->source == GraphNodeSource::STATIC_CANDIDATE ||
-             cnode_ptr->source == GraphNodeSource::STATIC_GLOBAL);
-        const bool both_in_reliable_window =
-            ContourGraph::IsPointInsideReliableContourWindow(
-                node_ptr->position) &&
-            ContourGraph::IsPointInsideReliableContourWindow(
-                cnode_ptr->position);
-        const float contour_observation_tolerance = std::max(
-            FARUtil::kLeafSize * 2.0f,
-            std::min(FARUtil::kMatchDist, FARUtil::kNavClearDist));
-        const bool first_contour_observed =
-            node_ptr->is_contour_match ||
-            ContourGraph::IsPointObservedOnCurrentStaticContour(
-                node_ptr->position, contour_observation_tolerance);
-        const bool second_contour_observed =
-            cnode_ptr->is_contour_match ||
-            ContourGraph::IsPointObservedOnCurrentStaticContour(
-                cnode_ptr->position, contour_observation_tolerance);
-        const bool current_local_contradiction =
-            semantic_update_in_progress_ && persistent_static_pair &&
-            both_in_reliable_window && first_contour_observed &&
-            second_contour_observed &&
-            !current_adjacent;
-
-        if (!current_adjacent) {
-            auto state_it = node_ptr->edge_states.find(cnode_ptr->id);
-            if (current_local_contradiction &&
-                state_it != node_ptr->edge_states.end() &&
-                node_ptr->id < cnode_ptr->id) {
-                GraphEdgeState& forward = state_it->second;
-                GraphEdgeState& reverse =
-                    cnode_ptr->edge_states[node_ptr->id];
-                ApplyContourTopologyObservation(
-                        forward,
-                        ContourTopologyObservation::CONTRADICTED,
-                        dg_params_.static_remove_frames);
-                reverse.topology_blocked = forward.topology_blocked;
-                reverse.current_contour_misses =
-                    forward.current_contour_misses;
-                contour_edge_diagnostics_.push_back({
-                    node_ptr->id, cnode_ptr->id, node_ptr->position,
-                    cnode_ptr->position,
-                    clip_attempt ? EdgeValidationMode::CLIP_ATTEMPT
-                                 : EdgeValidationMode::CONTOUR_FOLLOW,
-                    EdgeRejectReason::NOT_CURRENT_ADJACENT});
-            }
-            // Outside the current verified contour, preserve persistent
-            // static topology rather than rebuilding it from robot history.
-            continue;
-        }
-
-        // A relation verified from the current contour is authoritative for
-        // the current local overlay and must not wait behind old vote totals.
-        // Historical relations outside the verified local contour still use
-        // the original top-two vote rule.
-        const bool selected = current_adjacent ||
-            (vote_ready && FARUtil::VoteRankInVotes(itc, votesc) < 2);
-        if (!selected) {
-            if (node_ptr->id < cnode_ptr->id) {
-                contour_edge_diagnostics_.push_back({
-                    node_ptr->id, cnode_ptr->id, node_ptr->position,
-                    cnode_ptr->position,
-                    clip_attempt ? EdgeValidationMode::CLIP_ATTEMPT
-                                 : EdgeValidationMode::CONTOUR_FOLLOW,
-                    EdgeRejectReason::VOTE_PENDING});
-            }
-            continue;
-        }
-
-        EdgeValidationResult validation =
-            ContourGraph::ValidateContourFollowEdge(node_ptr, cnode_ptr);
-        if (validation.valid &&
-            validation.mode != EdgeValidationMode::CLIP_ATTEMPT &&
-            !IsOnTerrainRoute(validation.route_points)) {
-            validation.valid = false;
-            validation.reason = EdgeRejectReason::TERRAIN_BLOCKED;
-        }
-        if (!validation.valid) {
-            // Current same-contour adjacency is topology evidence even when
-            // no robot-centre route is executable in this snapshot.  Keep
-            // that identity separately in contour_connects/edge_states, but
-            // do not AddEdge(): search sees only motion-valid geometry.  This
-            // also gives a newly observed edge (not just an old one) a stable
-            // object to revalidate on the next frame.
+        if (FARUtil::VoteRankInVotes(itc, votesc) < 2 && FARUtil::IsVoteTrue(it->second, false)) {
             DynamicGraph::AddContourConnect(node_ptr, cnode_ptr);
-            GraphEdgeState& forward =
-                node_ptr->edge_states[cnode_ptr->id];
-            GraphEdgeState& reverse =
-                cnode_ptr->edge_states[node_ptr->id];
-            ApplyContourTopologyObservation(
-                forward, ContourTopologyObservation::CONFIRMED,
-                dg_params_.static_remove_frames);
-            ApplyContourTopologyObservation(
-                reverse, ContourTopologyObservation::CONFIRMED,
-                dg_params_.static_remove_frames);
-            forward.validation_mode = reverse.validation_mode =
-                clip_attempt ? EdgeValidationMode::CLIP_ATTEMPT
-                             : EdgeValidationMode::CONTOUR_FOLLOW;
-            ApplyContourStaticValidationObservation(
-                forward, false,
-                dg_params_.static_visibility_remove_frames);
-            ApplyContourStaticValidationObservation(
-                reverse, false,
-                dg_params_.static_visibility_remove_frames);
-            forward.dynamic_blocked = reverse.dynamic_blocked =
-                validation.reason == EdgeRejectReason::DYNAMIC_CLOUD_BLOCKED;
-            if (node_ptr->id < cnode_ptr->id) {
-                contour_edge_diagnostics_.push_back({
-                    node_ptr->id, cnode_ptr->id, node_ptr->position,
-                    cnode_ptr->position,
-                    clip_attempt ? EdgeValidationMode::CLIP_ATTEMPT
-                                 : EdgeValidationMode::CONTOUR_FOLLOW,
-                    validation.reason});
-            }
-            continue;
+            this->AddEdge(node_ptr, cnode_ptr);
+        } else if (DynamicGraph::DeleteContourConnect(node_ptr, cnode_ptr) && !FARUtil::IsTypeInStack(cnode_ptr, node_ptr->poly_connects)) {
+            this->EraseEdge(node_ptr, cnode_ptr);
         }
-
-        DynamicGraph::AddContourConnect(node_ptr, cnode_ptr);
-        this->AddEdge(node_ptr, cnode_ptr);
-        GraphEdgeState& forward = node_ptr->edge_states[cnode_ptr->id];
-        GraphEdgeState& reverse = cnode_ptr->edge_states[node_ptr->id];
-        ApplyContourTopologyObservation(
-            forward, ContourTopologyObservation::CONFIRMED,
-            dg_params_.static_remove_frames);
-        ApplyContourTopologyObservation(
-            reverse, ContourTopologyObservation::CONFIRMED,
-            dg_params_.static_remove_frames);
-        forward.validation_mode = reverse.validation_mode = validation.mode;
-        forward.has_clearance_geometry =
-            reverse.has_clearance_geometry = false;
-        forward.route_start = node_ptr->position;
-        forward.route_end = cnode_ptr->position;
-        reverse.route_start = cnode_ptr->position;
-        reverse.route_end = node_ptr->position;
-        forward.route_points.clear();
-        reverse.route_points.clear();
-        forward.route_cost = reverse.route_cost = validation.route_cost;
-        ApplyContourStaticValidationObservation(
-            forward, true,
-            dg_params_.static_visibility_remove_frames);
-        ApplyContourStaticValidationObservation(
-            reverse, true,
-            dg_params_.static_visibility_remove_frames);
-        forward.current_contour_misses =
-            reverse.current_contour_misses = 0;
-        // The contour chord is not the executed robot-centre segment. Dynamic
-        // occupancy is checked when the projected waypoint/query edge is
-        // actually selected, so it must not mask this topology relation.
-        forward.dynamic_blocked = reverse.dynamic_blocked = false;
     }
 }
 
@@ -2605,82 +752,13 @@ void DynamicGraph::UpdateGlobalNearNodes() {
     /* update nearby navigation nodes stack --> near_nav_nodes_ */
     near_nav_nodes_.clear(), wide_near_nodes_.clear(), extend_match_nodes_.clear();
     margin_near_nodes_.clear(); internav_near_nodes_.clear(), surround_internav_nodes_.clear();
-    // Odom is ephemeral. Remove obsolete radial connections here; later in
-    // this same snapshot UpdateOdomConnections() rebuilds every start edge
-    // and additionally enforces the exact local observation window.
-    const NodePtrStack odom_connects = odom_node_ptr_->connect_nodes;
-    for (const auto& node_ptr : odom_connects) {
-        if (!node_ptr) continue;
-        const float distance =
-            (node_ptr->position - odom_node_ptr_->position).norm_flat();
-        if (ShouldPruneStartConnectionForRange(
-                *node_ptr, distance, FARUtil::kSensorRange,
-                dg_params_.static_stitch_radius,
-                dg_params_.start_connection_max_distance)) {
-            ErasePolyEdge(odom_node_ptr_, node_ptr);
-            EraseEdge(odom_node_ptr_, node_ptr);
-        }
-    }
-    NodePtrStack local_graph = globalGraphNodes_;
-    local_graph.insert(local_graph.end(), staticCandidateGraphNodes_.begin(),
-                       staticCandidateGraphNodes_.end());
-    local_graph.insert(local_graph.end(), dynamicLocalGraphNodes_.begin(),
-                       dynamicLocalGraphNodes_.end());
-    for (const auto& node_ptr : local_graph) {
+    for (const auto& node_ptr : globalGraphNodes_) {
         node_ptr->is_near_nodes = false;
         node_ptr->is_wide_near  = false;
-        if (node_ptr->source == GraphNodeSource::PATH_HISTORY ||
-            node_ptr->is_navpoint) continue;
-        // Only nodes covered by this local voxel snapshot participate in
-        // contour matching and topology/edge revalidation. Historical nodes
-        // outside it stay in the persistent Graph unchanged until the robot
-        // observes them again, including on a return traversal.
-        if (ContourGraph::UsesLocalObservationWindow() &&
-            !ContourGraph::IsPointInsideReliableContourWindow(
-                node_ptr->position)) {
-            continue;
-        }
-        const bool uses_exact_window =
-            ContourGraph::UsesLocalObservationWindow();
-        const float graph_range =
-            node_ptr->source == GraphNodeSource::DYNAMIC_LOCAL
-                ? FARUtil::kSensorRange
-                : dg_params_.static_stitch_radius;
-        if (!uses_exact_window &&
-            (node_ptr->position - odom_node_ptr_->position).norm_flat() >
-                graph_range) {
-            continue;
-        }
-        // The static stitch radius can intentionally be larger than
-        // sensor_range so it covers the corners of a square semantic window.
-        // Use the source-specific Graph range for both spatial gates; calling
-        // FARUtil::IsNodeIn*Range() here would silently crop the square back
-        // to the sensor_range inscribed circle.
-        const bool in_extend_match_range =
-            FARUtil::IsPointInToleratedHeight(
-                node_ptr->position, FARUtil::kTolerZ * 1.5f) &&
-            (uses_exact_window ||
-             (node_ptr->position - FARUtil::odom_pos).norm() < graph_range);
-        const bool in_local_graph_range =
-            FARUtil::IsPointInToleratedHeight(
-                node_ptr->position, FARUtil::kTolerZ) &&
-            (uses_exact_window ||
-             (node_ptr->position - FARUtil::odom_pos).norm() < graph_range);
-        // Keep a known bad height out of the local stitch set, but do not crop
-        // an otherwise valid semantic corner merely because its surrounding
-        // floor has not yet been observed. Unknown terrain is traversable by
-        // policy and final edge collision checks remain mandatory.
-        bool terrain_matched = false;
-        MapHandler::TerrainHeightOfPoint(node_ptr->position,
-                                         terrain_matched, true);
-        const bool terrain_neighbor_valid =
-            !terrain_matched || MapHandler::IsNavPointOnTerrainNeighbor(
-                node_ptr->position, true);
-        if (in_extend_match_range &&
-            (!node_ptr->is_active || terrain_neighbor_valid)) {
+        if (FARUtil::IsNodeInExtendMatchRange(node_ptr) && (!node_ptr->is_active || MapHandler::IsNavPointOnTerrainNeighbor(node_ptr->position, true))) {
             if (FARUtil::IsOutsideGoal(node_ptr)) continue;
             if (this->IsActivateNavNode(node_ptr) || node_ptr->is_boundary) extend_match_nodes_.push_back(node_ptr);
-            if (in_local_graph_range && IsPointOnTerrain(node_ptr->position)) {
+            if (FARUtil::IsNodeInLocalRange(node_ptr) && IsPointOnTerrain(node_ptr->position)) {
                 wide_near_nodes_.push_back(node_ptr);
                 node_ptr->is_wide_near = true;
                 if (node_ptr->is_active || node_ptr->is_boundary) {
@@ -2701,8 +779,6 @@ void DynamicGraph::UpdateGlobalNearNodes() {
     }
     for (const auto& cnode_ptr : odom_node_ptr_->connect_nodes) { // add additional odom connections to wide near stack
         if (FARUtil::IsOutsideGoal(cnode_ptr)) continue;
-        if ((cnode_ptr->position - odom_node_ptr_->position).norm_flat() >
-            dg_params_.static_stitch_radius) continue;
         if (!cnode_ptr->is_wide_near) {
             wide_near_nodes_.push_back(cnode_ptr);
             cnode_ptr->is_wide_near = true;
