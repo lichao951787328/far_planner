@@ -1,9 +1,10 @@
 <?xml version="1.0"?>
 <launch>
   <!-- Replay the 2026-08-13 recording through the exact live five-class
-       navigation pipeline. In the Docker image, HOME is /root. -->
+       navigation pipeline. Resolve it relative to this source package so the
+       default does not depend on the host/container HOME or mount prefix. -->
   <arg name="bag"
-       default="$(env HOME)/social_nav/src/2026-08-13-02-24-30.bag"/>
+       default="$(find far_planner)/../dateset/9-7/2026-08-13-02-24-30.bag"/>
   <arg name="bagStart" default="0"/>
   <arg name="bagPlayArgs" default="--clock --delay=1"/>
 
@@ -21,6 +22,16 @@
   <arg name="enableLegacyRaycastClearing" default="false"/>
   <arg name="enableTwoLayerAngularClearing" default="true"/>
   <arg name="enableGoalAdjustment" default="true"/>
+  <arg name="farDebug" default="false"/>
+  <arg name="stepReplay" default="false"/>
+  <arg name="farMainRunFreq" default="2.5"/>
+  <arg name="debugPublishImages" default="true"/>
+  <arg name="debugOpenCvWindow" default="false"/>
+  <arg name="debugOpenCvWindowWidth" default="1200"/>
+  <arg name="debugOpenCvWindowHeight" default="1000"/>
+  <arg name="debugShowText" default="true"/>
+  <arg name="debugSaveFrames" default="false"/>
+  <arg name="debugSaveDirectory" default=""/>
 
   <include file="$(find far_planner)/launch/five_class_live_navigation.launch">
     <arg name="useSimTime" value="true"/>
@@ -39,14 +50,51 @@
     <arg name="enableTwoLayerAngularClearing"
          value="$(arg enableTwoLayerAngularClearing)"/>
     <arg name="enableGoalAdjustment" value="$(arg enableGoalAdjustment)"/>
+    <arg name="farDebug" value="$(arg farDebug)"/>
+    <arg name="deterministicStepMode" value="$(arg stepReplay)"/>
+    <arg name="farMainRunFreq" value="$(arg farMainRunFreq)"/>
+    <arg name="debugPublishImages" value="$(arg debugPublishImages)"/>
+    <arg name="debugOpenCvWindow" value="$(arg debugOpenCvWindow)"/>
+    <arg name="debugOpenCvWindowWidth"
+         value="$(arg debugOpenCvWindowWidth)"/>
+    <arg name="debugOpenCvWindowHeight"
+         value="$(arg debugOpenCvWindowHeight)"/>
+    <arg name="debugShowText" value="$(arg debugShowText)"/>
+    <arg name="debugSaveFrames" value="$(arg debugSaveFrames)"/>
+    <arg name="debugSaveDirectory" value="$(arg debugSaveDirectory)"/>
   </include>
 
   <!-- Rebuild map_start from the first usable cloud. The bag contains an old
        recorded map -> map_start transform, which must not enter the live TF
        tree. Ending the required player also shuts down the full pipeline. -->
-  <node pkg="rosbag" type="play" name="five_class_bag_player"
-        args="$(arg bagPlayArgs) --start=$(arg bagStart) $(arg bag)"
-        output="screen" required="true">
-    <remap from="/tf_static" to="/recorded_tf_static"/>
-  </node>
+  <group unless="$(arg stepReplay)">
+    <node pkg="rosbag" type="play" name="five_class_bag_player"
+          args="$(arg bagPlayArgs) --start=$(arg bagStart) $(arg bag)"
+          output="screen" required="true">
+      <remap from="/tf_static" to="/recorded_tf_static"/>
+    </node>
+  </group>
+
+  <!-- Deterministic debugger: no cloud is published until /next is called.
+       It first replays TF and prepares odom for that cloud, then waits for the
+       local voxel map before publishing odom and awaiting FAR's identical
+       acquisition-stamp acknowledgement. -->
+  <group if="$(arg stepReplay)">
+    <node pkg="far_planner" type="five_class_bag_frame_stepper"
+          name="five_class_bag_stepper" output="screen" required="true">
+      <param name="bag" value="$(arg bag)"/>
+      <param name="bag_start" value="$(arg bagStart)"/>
+      <param name="cloud_topic" value="/grids_points"/>
+      <param name="odom_topic" value="/fusion_localization"/>
+      <param name="tf_topic" value="/tf"/>
+      <param name="voxel_ack_topic"
+             value="/local_3d_semantic_voxel_map/voxel_cloud"/>
+      <param name="far_ack_topic" value="/far_debug/frame_done"/>
+      <param name="world_frame" value="map"/>
+      <param name="tf_pre_roll" value="2.0"/>
+      <param name="tf_lookahead" value="0.25"/>
+      <param name="subscriber_timeout" value="15.0"/>
+      <param name="processing_timeout" value="60.0"/>
+    </node>
+  </group>
 </launch>

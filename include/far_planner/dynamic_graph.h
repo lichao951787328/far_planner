@@ -28,16 +28,23 @@ struct DynamicGraphParams {
     // When positive, rejected visibility candidates no farther than this
     // radius are exported as diagnostic markers. This is observability only.
     float diagnostic_near_pair_radius = 0.0f;
+    // Remove only the longest ordinary visibility edge from a currently
+    // active, nearly collinear triangle. Contour/trajectory identities are
+    // never removed by this sparsifier.
+    bool flat_triangle_pruning_enabled = false;
+    float flat_triangle_max_detour_ratio = 1.05f;
+    float flat_triangle_max_altitude_ratio = 0.20f;
     int static_confirm_frames = 3;
     int static_remove_frames = 3;
-    int static_topology_remove_frames = 5;
+    int static_topology_remove_frames = 3;
     int static_visibility_remove_frames = 3;
     float static_duplicate_radius = 0.5f;
     bool static_promotion_requires_finalized = true;
     bool static_promotion_requires_active_edge = true;
     bool static_promotion_requires_main_component = true;
-    // In dual-input mode, a locally observed static-looking corner may be
-    // promoted only when the confirmed global SemanticOcTree supports it.
+    // Optional compatibility gate for legacy deployments that still provide
+    // a separate global evidence map. FARMaster forces this off in local-only
+    // voxel mode.
     bool static_promotion_requires_global_evidence = false;
 };
 
@@ -103,6 +110,8 @@ private:
     static void RemoveVisibilityEdge(const NavNodePtr& node_ptr1,
                                      const NavNodePtr& node_ptr2);
 
+    std::size_t PruneFlatTriangleVisibilityEdges();
+
     bool NodeLocalPerception(const NavNodePtr& node_ptr,
                              bool& _is_wall_end,
                              const bool& is_nearby_update = true);
@@ -149,6 +158,14 @@ private:
     /** Commit mature contour-edge replacements only after the complete
      * snapshot graph has been assembled and validated. */
     void CommitMatureContourEdgeReplacements();
+
+    /** Collapse an unmatched historical static identity into the current
+     * matched identity for the same corner.  UNKNOWN means insufficient
+     * deletion evidence, but it is still admissible for identity
+     * consolidation; only positive STATIC_OCCUPIED evidence vetoes it. */
+    void ConsolidateStaticHistoryDuplicates(
+        const std::function<StaticNodeEvidence(const Point3D&)>&
+            evidence_query);
 
     bool HasStableReplacementTopology(
         const NavNodePtr& obsolete, const PolygonPtr& current_polygon) const;
@@ -332,6 +349,9 @@ private:
         node_ptr->is_contour_match = true;
         node_ptr->ctnode = ctnode_ptr;
         node_ptr->free_direct = ctnode_ptr->free_direct;
+        node_ptr->free_space_dir = ctnode_ptr->free_space_dir;
+        node_ptr->is_free_space_dir_reliable =
+            ctnode_ptr->is_free_space_dir_reliable;
         UpdateNodeSurfDirs(node_ptr, ctnode_ptr->surf_dirs);
     }
 
@@ -352,11 +372,14 @@ private:
         const bool is_current_static =
             ctnode_ptr->source == GraphNodeSource::STATIC_CANDIDATE ||
             ctnode_ptr->source == GraphNodeSource::STATIC_GLOBAL;
-        // Concave samples still contribute occupied contour geometry, but do
-        // not represent a free-space visibility vertex and must not become a
-        // persistent graph node.
+        // Ordinary concave samples contribute occupied contour geometry but
+        // are not free-space visibility vertices.  A deep reduced-contour
+        // bend marked necessary is different: it must temporarily enter the
+        // graph so the two surrounding contour edges are not lost.  Its
+        // CONCAVE type still prevents ordinary visibility connections.
         if (is_current_static &&
-            ctnode_ptr->free_direct == NodeFreeDirect::CONCAVE) {
+            ctnode_ptr->free_direct == NodeFreeDirect::CONCAVE &&
+            !ctnode_ptr->is_contour_necessary) {
             return false;
         }
         // MatchContourWithNavGraph has already reduced the complete contour to
@@ -619,6 +642,7 @@ public:
     static bool IsOnTerrainConnect(const NavNodePtr& node_ptr1, const NavNodePtr& node_ptr2, const bool& is_contour);
 
     static bool IsOnTerrainRoute(const Point3D& start, const Point3D& end);
+    static bool IsOnTerrainRoute(const std::vector<Point3D>& route_points);
 
     static inline void FillFrontierVotes(const NavNodePtr& node_ptr, const bool& is_frontier) {
         if (is_frontier) {
@@ -698,6 +722,8 @@ public:
         node_ptr->static_seen_count = 0;
         node_ptr->static_missed_count = 0;
         node_ptr->observed_in_semantic_snapshot = false;
+        node_ptr->free_space_dir = Point3D(0.0f, 0.0f, 0.0f);
+        node_ptr->is_free_space_dir_reliable = false;
         node_ptr->is_transient_contour_endpoint = false;
         node_ptr->topology_missed_count = 0;
         node_ptr->clear_dumper_count = 0;
@@ -928,12 +954,14 @@ public:
                 append_eligible(node_ptr);
                 continue;
             }
-            // Keep confirmed but currently orphaned corners in the matching
-            // map so a later contour can reconnect them.  They are not useful
-            // search vertices until they own a reusable, non-query edge.
+            // Keep stale detached history out of search. A historical corner
+            // that is explicitly matched to this snapshot's contour may,
+            // however, bridge two current collision-validated contour
+            // intervals even while its old reusable edge is blocked.
             if (node_ptr->source == GraphNodeSource::STATIC_GLOBAL &&
-                (!staticMainNodeIds_.count(node_ptr->id) ||
-                 !HasActiveSearchEligibleIncidentEdge(*node_ptr))) {
+                !IsStaticGlobalEligibleForCurrentSearch(
+                    *node_ptr,
+                    staticMainNodeIds_.count(node_ptr->id) > 0)) {
                 continue;
             }
             append_eligible(node_ptr);

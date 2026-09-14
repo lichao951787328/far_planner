@@ -50,7 +50,7 @@ std::unique_ptr<MapHandler> MakeDualInputHandler() {
     return handler;
 }
 
-TEST(MapHandlerDualInput, LocalStaticNeverEntersPersistentGlobalLayer) {
+TEST(MapHandlerDualInput, LocalSnapshotOwnsGeometryWithoutPersistentMapLayer) {
     std::unique_ptr<MapHandler> handler = MakeDualInputHandler();
     const PointCloudPtr local_static = MakeCloud({
         MakePoint(1.0f, 0.0f, 0.0f),
@@ -71,8 +71,19 @@ TEST(MapHandlerDualInput, LocalStaticNeverEntersPersistentGlobalLayer) {
     EXPECT_EQ(3u, output->size());
     handler->GetPersistentStaticObsCloud(output);
     EXPECT_TRUE(output->empty());
-    EXPECT_EQ(StaticNodeEvidence::UNKNOWN,
+    EXPECT_EQ(StaticNodeEvidence::STATIC_OCCUPIED,
               handler->QueryStaticNodeEvidence(Point3D(1.0f, 0.0f, 0.0f)));
+
+    handler->GetCloudOfPoint(
+        Point3D(0.0f, 0.0f, 0.0f), output, CloudType::OBS_CLOUD, true);
+    EXPECT_EQ(3u, output->size());
+    handler->GetCloudOfPoint(
+        Point3D(0.0f, 0.0f, 0.0f), output, CloudType::FREE_CLOUD, true);
+    EXPECT_EQ(1u, output->size());
+    handler->GetCloudOfPoint(
+        Point3D(20.0f, 20.0f, 0.0f), output,
+        CloudType::OBS_CLOUD, false);
+    EXPECT_TRUE(output->empty());
 
     handler->GetChangedObsCloud(output);
     EXPECT_EQ(3u, output->size());
@@ -87,6 +98,45 @@ TEST(MapHandlerDualInput, LocalStaticNeverEntersPersistentGlobalLayer) {
                     Point3D(0.0f, 0.0f, 0.0f), terrain_matched, false),
                 1e-5f);
     EXPECT_TRUE(terrain_matched);
+}
+
+TEST(MapHandlerDualInput, TerrainSupportIsExplicitFreeOnlyWithoutOccupancy) {
+    std::unique_ptr<MapHandler> handler = MakeDualInputHandler();
+    const Point3D old_nav_corner(1.0f, 0.0f, 0.3f);
+
+    handler->SetLocalVoxelSnapshot(
+        MakeCloud({}), MakeCloud({}),
+        MakeCloud({MakePoint(1.0f, 0.0f, -0.2f)}));
+    EXPECT_EQ(StaticNodeEvidence::EXPLICIT_FREE,
+              handler->QueryStaticNodeEvidence(old_nav_corner));
+
+    handler->SetLocalVoxelSnapshot(
+        MakeCloud({}), MakeCloud({MakePoint(1.0f, 0.0f, 0.3f)}),
+        MakeCloud({MakePoint(1.0f, 0.0f, -0.2f)}));
+    EXPECT_EQ(StaticNodeEvidence::UNKNOWN,
+              handler->QueryStaticNodeEvidence(old_nav_corner));
+
+    handler->SetLocalVoxelSnapshot(
+        MakeCloud({MakePoint(1.0f, 0.0f, 0.3f)}), MakeCloud({}),
+        MakeCloud({MakePoint(1.0f, 0.0f, -0.2f)}));
+    EXPECT_EQ(StaticNodeEvidence::STATIC_OCCUPIED,
+              handler->QueryStaticNodeEvidence(old_nav_corner));
+}
+
+TEST(MapHandlerDualInput, EmptyOrDifferentFloorSnapshotCannotDeleteHistory) {
+    std::unique_ptr<MapHandler> handler = MakeDualInputHandler();
+    const Point3D old_nav_corner(1.0f, 0.0f, 0.3f);
+
+    handler->SetLocalVoxelSnapshot(
+        MakeCloud({}), MakeCloud({}), MakeCloud({}));
+    EXPECT_EQ(StaticNodeEvidence::UNKNOWN,
+              handler->QueryStaticNodeEvidence(old_nav_corner));
+
+    handler->SetLocalVoxelSnapshot(
+        MakeCloud({}), MakeCloud({}),
+        MakeCloud({MakePoint(1.0f, 0.0f, -2.0f)}));
+    EXPECT_EQ(StaticNodeEvidence::UNKNOWN,
+              handler->QueryStaticNodeEvidence(old_nav_corner));
 }
 
 TEST(MapHandlerDualInput, AtomicReplacementReportsStaticAndTransientRemoval) {

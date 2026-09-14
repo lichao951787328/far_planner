@@ -17,7 +17,12 @@ find_package(catkin REQUIRED COMPONENTS
   geometry_msgs
   nav_msgs
   rosgraph_msgs
+  rosbag
+  std_srvs
   tf
+  tf2
+  tf2_ros
+  tf2_msgs
   visibility_graph_msg
   pcl_ros
   octomap_msgs
@@ -41,7 +46,12 @@ catkin_package(
   geometry_msgs
   nav_msgs
   rosgraph_msgs
+  rosbag
+  std_srvs
   tf
+  tf2
+  tf2_ros
+  tf2_msgs
   pcl_ros
   octomap_msgs
   semantic_octomap
@@ -73,6 +83,7 @@ link_directories(
 ## Depedent cpp files
 set(SOURCES ${SOURCES}
   src/dynamic_graph.cpp
+  src/debug_visualization.cpp
   src/planner_visualizer.cpp
   src/utility.cpp
   src/graph_planner.cpp
@@ -118,6 +129,11 @@ add_dependencies(ssmi_bag_graph_monitor
   ${catkin_EXPORTED_TARGETS})
 target_link_libraries(ssmi_bag_graph_monitor
   ${catkin_LIBRARIES} ${PCL_LIBRARIES})
+
+add_executable(five_class_bag_frame_stepper
+  src/five_class_bag_frame_stepper.cpp)
+add_dependencies(five_class_bag_frame_stepper ${catkin_EXPORTED_TARGETS})
+target_link_libraries(five_class_bag_frame_stepper ${catkin_LIBRARIES})
 
 catkin_install_python(PROGRAMS
   scripts/replay_goal_selection.py
@@ -178,6 +194,20 @@ if(CATKIN_ENABLE_TESTING)
       ${catkin_LIBRARIES})
   endif()
 
+  catkin_add_gtest(local_voxel_morphology_test
+    src/local_voxel_morphology_test.cpp)
+  if(TARGET local_voxel_morphology_test)
+    target_link_libraries(local_voxel_morphology_test
+      ${catkin_LIBRARIES} ${OpenCV_LIBS})
+  endif()
+
+  catkin_add_gtest(local_observation_window_test
+    src/local_observation_window_test.cpp)
+  if(TARGET local_observation_window_test)
+    target_link_libraries(local_observation_window_test
+      ${catkin_LIBRARIES})
+  endif()
+
   catkin_add_gtest(map_handler_dual_input_test
     src/map_handler_dual_input_test.cpp
     src/map_handler.cpp
@@ -212,6 +242,7 @@ install(TARGETS ${PROJECT_NAME} pose_stamped_to_odometry
   pose_stamped_to_point_stamped point_stamped_tf_adapter
   navigation_demo_monitor
   ssmi_bag_graph_monitor
+  five_class_bag_frame_stepper
   ARCHIVE DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
   LIBRARY DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
   RUNTIME DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}

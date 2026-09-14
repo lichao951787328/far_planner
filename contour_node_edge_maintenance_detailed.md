@@ -2135,9 +2135,9 @@ col = center + round((world_y - odom_y) / resolution * ratio)
 
 这里图像 row 对应世界 x，col 对应世界 y。转回世界坐标时做逆变换，z 暂时取 odom z。
 
-### 4.2 障碍投影与膨胀
+### 4.2 障碍投影与配置空间膨胀
 
-每个障碍点先落入基础栅格，然后固定对周围 `3 x 3` 像素加 1。这一步独立于 `Util/obs_inflate_size`，后者主要用于其他地形/局部处理。
+每个障碍点只写入对应的一个基础栅格，不再固定写入 `3 x 3` 邻域。
 
 对于当前语义 OctoMap 输入，调用参数 `is_verified_occupied=true`，二值化规则是：
 
@@ -2147,21 +2147,28 @@ pixel > 0 -> occupied
 
 因此当前主路径中 `CDetector/filter_count_value=3` **不参与语义障碍轮廓的保留门限**。它只影响非 verified 输入且 `is_static_env=false` 的旧原始点云去噪分支。
 
-### 4.3 resize 和 box filter
+### 4.3 精细栅格与欧氏配置空间
 
 基础占用图：
 
-1. 转为 `CV_8UC1`，占用值乘 255；
-2. 双线性 resize 到 `resize_ratio` 倍；
-3. 使用 `kBlurSize x kBlurSize` box filter，且 `normalize=false`。
+1. 转为二值 `CV_8UC1`；
+2. 把每个基础占据格的中心无插值地映射到 `resize_ratio` 倍精细图；
+3. 对自由格执行 `DIST_L2 / DIST_MASK_PRECISE` 欧氏距离变换；
+4. 距离任一占据 seed 不超过 `robot_collision_clearance` 的精细格全部设为占据。
 
-`kBlurSize` 不是 YAML 直接配置，而是：
+五分类配置下：
 
 ```text
-round(robot_collision_clearance / contour_grid_resolution)
+contour_grid_resolution = 0.2 m
+resize_ratio = 3
+精细栅格分辨率 = 0.0667 m
+configuration-space clearance = robot_collision_clearance = 0.45 m
 ```
 
-默认 `round(0.45 / 0.4) = 1`，所以默认 box filter 实际没有扩大邻域。
+精细图只提高距离变换和轮廓坐标的表达精度，不增加传感器信息。一个基础格只映射
+为一个中心 seed，避免最近邻整块复制额外增加半个基础格。旧的双线性非零晕边、
+box filter 和 3x3 隐式膨胀已取消。生成的配置空间图同时供 `findContours()` 和
+`ContourGraph` 的整线碰撞检查使用。
 
 ### 4.4 `findContours` 和 RDP
 

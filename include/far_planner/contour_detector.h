@@ -2,6 +2,7 @@
 #define CONTOUR_DETECTOR_H
 
 #include <cmath>
+#include <cstdint>
 
 #include "utility.h"
 
@@ -10,10 +11,18 @@ struct ContourDetectParams {
     ContourDetectParams() = default;
     float sensor_range;
     float contour_grid_resolution;
+    // Robot-centre configuration-space radius.  Raw occupied cells are
+    // inflated exactly once by this metric distance after image refinement.
+    float configuration_space_clearance = 0.45f;
     float kRatio;
     int   kThredValue;
-    int   kBlurSize;
+    // FAR topology-raster smoothing kernel.  This is deliberately independent
+    // of robot_collision_clearance: topology extraction and robot-centre
+    // collision checking no longer share one inflated image.
+    int   topology_blur_size = 1;
     float dynamic_simplify_ratio = 2.0f;
+    // Legacy compatibility parameters. The FAR sparse path no longer runs a
+    // second world-space collinear pass after AdjacentDistanceFilter.
     float collinear_tolerance = 0.20f;
     float collinear_angle_deg = 8.0f;
     bool  is_save_img;
@@ -96,8 +105,27 @@ private:
     ContourDetectParams cd_params_;
     PointCloudPtr new_corners_cloud_;
     cv::Mat img_mat_;
+    // Debug-only snapshots of the most recent extraction. They are cloned by
+    // FAR before the next static/dynamic layer overwrites this detector.
+    cv::Mat debug_base_img_;
+    cv::Mat debug_processed_img_;
+    // FAR-style image used only to extract obstacle topology.  It contains
+    // the original 3x3 occupied-cell expansion, INTER_LINEAR resize and
+    // boxFilter stages; it is not a robot-centre collision map.
+    cv::Mat topology_img_;
+    // Binary CV_8UC1 robot-centre configuration-space occupancy used only by
+    // graph/waypoint collision validation.  It deliberately remains separate
+    // from the topology image above.
+    cv::Mat configuration_space_img_;
     std::size_t img_counter_;
     std::vector<CVPointStack> refined_contours_;
+    // FAR's TC89_L1 source chains kept in lockstep with refined_contours_.
+    // The legacy "dense" names are retained temporarily because the current
+    // Graph interface still consumes this correspondence; they are no longer
+    // pixel-faithful CHAIN_APPROX_NONE contours.
+    std::vector<CVPointStack> dense_contours_;
+    std::vector<PointStack> dense_world_contours_;
+    std::vector<std::vector<std::size_t>> simplified_dense_indices_;
     std::vector<cv::Vec4i> refined_hierarchy_;
     NavNodePtr odom_node_ptr_;
 
@@ -121,14 +149,18 @@ private:
                                 std::vector<CVPointStack>& refined_contours,
                                 float distance_limit);
 
-    void ResizeAndBlurImg(const cv::Mat& img, cv::Mat& Rimg);
+    void BuildConfigurationSpaceImg(const cv::Mat& img, cv::Mat& Rimg);
+
+    void BuildFarTopologyImg(const cv::Mat& img, cv::Mat& Rimg);
 
     void ConvertContoursToRealWorld(const std::vector<CVPointStack>& ori_contours,
                                     std::vector<PointStack>& realWorld_contours);
 
-    void TopoFilterContours(std::vector<CVPointStack>& contoursInOut);
+    void TopoFilterContours(std::vector<CVPointStack>& contoursInOut,
+                            std::vector<CVPointStack>& denseContoursInOut);
 
     void AdjecentDistanceFilter(std::vector<CVPointStack>& contoursInOut,
+                                std::vector<CVPointStack>& denseContoursInOut,
                                 float distance_limit);
 
     /* inline functions */
@@ -332,6 +364,25 @@ public:
     /* Get Internal Values */
     const PointCloudPtr GetNewVertices() const { return new_corners_cloud_;};
     const cv::Mat       GetCloudImgMat() const { return img_mat_;};
+    const cv::Mat& GetDebugBaseImage() const { return debug_base_img_; }
+    const cv::Mat& GetDebugProcessedImage() const {
+        return debug_processed_img_;
+    }
+    const cv::Mat& GetConfigurationSpaceImage() const {
+        return configuration_space_img_;
+    }
+    const cv::Mat& GetTopologyImage() const { return topology_img_; }
+    const std::vector<PointStack>& GetDenseWorldContours() const {
+        return dense_world_contours_;
+    }
+    const std::vector<std::vector<std::size_t>>&
+    GetSimplifiedDenseIndices() const {
+        return simplified_dense_indices_;
+    }
+    const Point3D& GetRasterCenter() const { return raster_center_; }
+    float GetConfigurationSpaceResolution() const {
+        return cd_params_.contour_grid_resolution / cd_params_.kRatio;
+    }
 };
 
 #endif

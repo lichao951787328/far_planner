@@ -1,12 +1,12 @@
 <?xml version="1.0"?>
 <launch>
   <!-- One-command five-class bag pipeline:
-       bag -> local semantic voxel map -> SemanticOcTree -> FAR Planner
+       bag -> local semantic voxel map -> FAR Planner
        -> localPlanner -> /path -> optional pathFollower. The follower emits
        only a generic Twist; no Go2 command adapter is started here. -->
   <arg name="bag"
        default="/home/yanaibo/mapless_navigation/dataset/2026-08-22-09-33-02.bag"/>
-  <!-- One shared class table drives local voxel, SemanticOctomap and FAR. -->
+  <!-- One shared class table drives the local voxel map and FAR. -->
   <arg name="semanticSchema"
        default="$(find far_planner)/config/five_class_semantic_schema.yaml"/>
   <!-- Start at the selected stable scene time. The first cloud at this offset
@@ -45,38 +45,15 @@
     <arg name="rviz" value="false"/>
   </include>
 
-  <!-- The adapter is intentionally enabled: unlike the direct local-map
-       encoder, it reads this dataset's configurable five-class schema. -->
-  <include file="$(find semantic_octomap)/launch/semantic_octomap_grid.launch">
-    <arg name="input_topic"
-         value="/local_3d_semantic_voxel_map/global_semantic_admission_grid"/>
-    <arg name="output_topic"
-         value="/semantic_pcl/five_class_global_admitted"/>
-    <arg name="semantic_schema"
-         value="$(arg semanticSchema)"/>
-    <arg name="load_semantic_schema" value="false"/>
-    <arg name="use_grid_adapter" value="true"/>
-    <arg name="world_frame_id" value="map_start"/>
-    <arg name="use_initial_pose_reference" value="false"/>
-    <arg name="reference_frame_id" value="map_start"/>
-    <arg name="enable_explicit_revocation" value="true"/>
-    <arg name="enable_raycast_clearing"
-         value="$(arg enableLegacyRaycastClearing)"/>
-    <arg name="enable_two_layer_angular_clearing"
-         value="$(arg enableTwoLayerAngularClearing)"/>
-    <arg name="rviz" value="false"/>
-  </include>
-
-  <!-- This branch exposes the split through use_local_voxel_map rather than
-       the newer input_mode interface. Load the normal planner tuning first,
-       then overlay only this bag's source and five-class semantic contract. -->
+  <!-- use_local_voxel_map makes the voxel snapshot the sole geometry source;
+       FAR retains historical navigation topology but does not fuse the
+       SemanticOctree into local contours or edge checks. -->
   <node pkg="far_planner" type="far_planner" name="far_planner"
         output="screen" required="true">
     <rosparam command="load" file="$(find far_planner)/config/default.yaml"/>
     <rosparam command="load"
               file="$(find far_planner)/config/five_class_bag.yaml"/>
     <param name="world_frame" value="map_start"/>
-    <param name="semantic_map_topic" value="/octomap_full"/>
     <param name="local_voxel_topic"
            value="/local_3d_semantic_voxel_map/voxel_cloud"/>
     <param name="local_voxel_timeout" value="1.0"/>

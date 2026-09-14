@@ -10,6 +10,9 @@
 #include "far_planner/intersection.h"
 #include "far_planner/terminal_visibility_policy.h"
 
+#include <cstdint>
+#include <limits>
+
 PointCloudPtr ContourGraph::local_collision_cloud_(new PointCloud());
 PointKdTreePtr ContourGraph::local_collision_kdtree_(
     new pcl::KdTreeFLANN<PCLPoint>());
@@ -19,15 +22,29 @@ PointKdTreePtr ContourGraph::local_static_collision_kdtree_(
 PointCloudPtr ContourGraph::local_dynamic_collision_cloud_(new PointCloud());
 PointKdTreePtr ContourGraph::local_dynamic_collision_kdtree_(
     new pcl::KdTreeFLANN<PCLPoint>());
+ContourGraph::LocalCollisionGrid2D ContourGraph::local_static_collision_grid_;
+ContourGraph::LocalCollisionGrid2D ContourGraph::local_dynamic_collision_grid_;
+ContourGraph::LocalCollisionGrid2D ContourGraph::local_collision_grid_;
 float ContourGraph::contour_projection_min_ = 0.15f;
 float ContourGraph::contour_projection_step_ = 0.075f;
 float ContourGraph::contour_projection_max_ = 0.60f;
 float ContourGraph::contour_boundary_guard_ = 0.40f;
+LocalObservationWindow2D ContourGraph::local_observation_window_;
 
 /***************************************************************************************/
 
 void ContourGraph::Init(const ContourGraphParams& params) {
     ctgraph_params_ = params;
+    constexpr float kStaticIdentityHardCap = 0.60f;
+    ctgraph_params_.static_match_tight_radius = std::min(
+        kStaticIdentityHardCap,
+        std::max(0.0f, params.static_match_tight_radius));
+    ctgraph_params_.static_match_max_radius = std::min(
+        kStaticIdentityHardCap,
+        std::max(ctgraph_params_.static_match_tight_radius,
+                 params.static_match_max_radius));
+    ctgraph_params_.dynamic_match_max_radius = std::max(
+        0.0f, params.dynamic_match_max_radius);
     contour_projection_min_ = std::max(0.0f, params.contour_projection_min);
     contour_projection_step_ = std::max(
         FARUtil::kEpsilon, params.contour_projection_step);
@@ -35,6 +52,13 @@ void ContourGraph::Init(const ContourGraphParams& params) {
         contour_projection_min_, params.contour_projection_max);
     contour_boundary_guard_ = std::max(
         FARUtil::kLeafSize, params.contour_boundary_guard);
+    local_observation_window_.enabled =
+        params.use_local_observation_window;
+    local_observation_window_.min_x = params.local_window_min_x;
+    local_observation_window_.max_x = params.local_window_max_x;
+    local_observation_window_.min_y = params.local_window_min_y;
+    local_observation_window_.max_y = params.local_window_max_y;
+    local_observation_window_.guard = contour_boundary_guard_;
     ContourGraph::contour_graph_.clear();
     ContourGraph::contour_polygons_.clear();
     ALIGN_ANGLE_COS = cos(M_PI - FARUtil::kAcceptAlign / 2.0f);
@@ -53,19 +77,50 @@ void ContourGraph::UpdateContourGraph(
     const NavNodePtr& odom_node_ptr,
     const std::vector<std::vector<Point3D>>& static_contours,
     const std::vector<std::vector<Point3D>>& dynamic_contours) {
+    this->UpdateContourGraph(
+        odom_node_ptr, static_contours, dynamic_contours,
+        std::vector<PointStack>(), std::vector<PointStack>(),
+        std::vector<std::vector<std::size_t>>(),
+        std::vector<std::vector<std::size_t>>());
+}
+
+void ContourGraph::UpdateContourGraph(
+    const NavNodePtr& odom_node_ptr,
+    const std::vector<std::vector<Point3D>>& static_contours,
+    const std::vector<std::vector<Point3D>>& dynamic_contours,
+    const std::vector<std::vector<Point3D>>& static_dense_contours,
+    const std::vector<std::vector<Point3D>>& dynamic_dense_contours,
+    const std::vector<std::vector<std::size_t>>&
+        static_simplified_dense_indices,
+    const std::vector<std::vector<std::size_t>>&
+        dynamic_simplified_dense_indices) {
     odom_node_ptr_ = odom_node_ptr;
     this->ClearContourGraph();
     const auto add_polygons = [this](
         const std::vector<std::vector<Point3D>>& contours,
+        const std::vector<std::vector<Point3D>>& dense_contours,
+        const std::vector<std::vector<std::size_t>>& correspondences,
         const GraphNodeSource source) {
-      for (const auto& poly : contours) {
+      for (std::size_t index = 0; index < contours.size(); ++index) {
+        const PointStack& poly = contours[index];
+        const PointStack dense = index < dense_contours.size()
+            ? dense_contours[index] : PointStack();
+        const std::vector<std::size_t> correspondence =
+            index < correspondences.size()
+                ? correspondences[index]
+                : std::vector<std::size_t>();
         PolygonPtr new_poly_ptr = NULL;
-        this->CreatePolygon(poly, new_poly_ptr, source);
+        this->CreatePolygon(poly, new_poly_ptr, source, dense,
+                            correspondence);
         this->AddPolyToContourPolygon(new_poly_ptr);
       }
     };
-    add_polygons(static_contours, GraphNodeSource::STATIC_CANDIDATE);
-    add_polygons(dynamic_contours, GraphNodeSource::DYNAMIC_LOCAL);
+    add_polygons(static_contours, static_dense_contours,
+                 static_simplified_dense_indices,
+                 GraphNodeSource::STATIC_CANDIDATE);
+    add_polygons(dynamic_contours, dynamic_dense_contours,
+                 dynamic_simplified_dense_indices,
+                 GraphNodeSource::DYNAMIC_LOCAL);
     ContourGraph::UpdateOdomFreePosition(odom_node_ptr_, FARUtil::free_odom_p);
     for (const auto& poly_ptr : ContourGraph::contour_polygons_) {
         poly_ptr->is_robot_inside = FARUtil::PointInsideAPoly(poly_ptr->vertices, FARUtil::free_odom_p);
@@ -82,6 +137,7 @@ void ContourGraph::UpdateContourGraph(
             const int N = poly_ptr->vertices.size();
             for (std::size_t idx=0; idx<N; idx++) {
                 this->CreateCTNode(poly_ptr->vertices[idx], new_ctnode_ptr, poly_ptr, false);
+                new_ctnode_ptr->contour_index = idx;
                 new_ctnode_ptr->is_boundary_clipped =
                     !IsPointInsideReliableContourWindow(
                         poly_ptr->vertices[idx]);
@@ -99,7 +155,10 @@ void ContourGraph::UpdateContourGraph(
             if (!ctnode_stack.empty()) ContourGraph::polys_ctnodes_.push_back(ctnode_stack.front());
         }
     }
-    this->AnalysisSurfAngleAndConvexity(ContourGraph::contour_graph_);      
+    this->AnalysisSurfAngleAndConvexity(ContourGraph::contour_graph_);
+    for (const auto& node_ptr : ContourGraph::contour_graph_) {
+        UpdateFreeSpaceDirection(node_ptr);
+    }
 }
 
 void ContourGraph::SetLocalCollisionCloud(
@@ -109,6 +168,12 @@ void ContourGraph::SetLocalCollisionCloud(
 
 void ContourGraph::SetLocalCollisionCloud(
     const PointCloudPtr& static_cloud, const PointCloudPtr& dynamic_cloud) {
+    // A cloud update starts a new snapshot.  FAR supplies the matching grids
+    // after contour extraction; direct unit-test/legacy callers intentionally
+    // remain on the raw-cloud fallback.
+    local_static_collision_grid_.Clear();
+    local_dynamic_collision_grid_.Clear();
+    local_collision_grid_.Clear();
     const auto rebuild = [](const PointCloudPtr& input,
                             PointCloudPtr& output,
                             PointKdTreePtr& tree) {
@@ -135,6 +200,192 @@ void ContourGraph::SetLocalCollisionCloud(
     }
 }
 
+void ContourGraph::SetLocalCollisionGrids(
+    const cv::Mat& static_occupied, const cv::Mat& dynamic_occupied,
+    const Point3D& raster_center, const float resolution) {
+    const auto assign = [&raster_center, resolution](
+        const cv::Mat& input, LocalCollisionGrid2D& output) {
+        output.Clear();
+        if (input.empty() || input.type() != CV_8UC1 ||
+            resolution <= FARUtil::kEpsilon) return;
+        output.occupied = input.clone();
+        output.center = raster_center;
+        output.resolution = resolution;
+        output.center_row = static_cast<float>(input.rows / 2);
+        output.center_col = static_cast<float>(input.cols / 2);
+    };
+    assign(static_occupied, local_static_collision_grid_);
+    assign(dynamic_occupied, local_dynamic_collision_grid_);
+
+    local_collision_grid_.Clear();
+    if (local_static_collision_grid_.IsValid()) {
+        local_collision_grid_ = local_static_collision_grid_;
+        local_collision_grid_.occupied =
+            local_static_collision_grid_.occupied.clone();
+        if (local_dynamic_collision_grid_.IsValid() &&
+            local_dynamic_collision_grid_.occupied.size() ==
+                local_collision_grid_.occupied.size()) {
+            cv::bitwise_or(local_collision_grid_.occupied,
+                           local_dynamic_collision_grid_.occupied,
+                           local_collision_grid_.occupied);
+        }
+    } else if (local_dynamic_collision_grid_.IsValid()) {
+        local_collision_grid_ = local_dynamic_collision_grid_;
+        local_collision_grid_.occupied =
+            local_dynamic_collision_grid_.occupied.clone();
+    }
+}
+
+ContourGraph::GridCellState ContourGraph::GridStateAtPoint(
+    const Point3D& point, const LocalCollisionGrid2D& grid) {
+    if (!grid.IsValid()) return GridCellState::OUTSIDE;
+    const int row = static_cast<int>(std::floor(
+        grid.center_row + (point.x - grid.center.x) /
+            grid.resolution + 0.5f));
+    const int col = static_cast<int>(std::floor(
+        grid.center_col + (point.y - grid.center.y) /
+            grid.resolution + 0.5f));
+    if (row < 0 || row >= grid.occupied.rows ||
+        col < 0 || col >= grid.occupied.cols) {
+        return GridCellState::OUTSIDE;
+    }
+    return grid.occupied.at<std::uint8_t>(row, col) == 0
+        ? GridCellState::FREE : GridCellState::OCCUPIED;
+}
+
+void ContourGraph::UpdateFreeSpaceDirection(const CTNodePtr& node_ptr) {
+    if (!node_ptr) return;
+    node_ptr->free_space_dir = Point3D(0.0f, 0.0f, 0.0f);
+    node_ptr->is_free_space_dir_reliable = false;
+    if (node_ptr->free_direct != NodeFreeDirect::CONVEX &&
+        node_ptr->free_direct != NodeFreeDirect::CONCAVE) {
+        return;
+    }
+
+    Point3D bisector = FARUtil::SurfTopoDirect(node_ptr->surf_dirs);
+    if (bisector.norm_flat() <= FARUtil::kEpsilon) return;
+    Point3D candidate = node_ptr->free_direct == NodeFreeDirect::CONVEX
+        ? -bisector : bisector;
+    candidate = candidate.normalize_flat();
+    node_ptr->free_space_dir = candidate;
+
+    const LocalCollisionGrid2D& grid =
+        node_ptr->source == GraphNodeSource::DYNAMIC_LOCAL
+            ? local_dynamic_collision_grid_ : local_static_collision_grid_;
+    if (!grid.IsValid()) return;
+
+    if (node_ptr->is_boundary_clipped) {
+        // One neighbour of a cropped endpoint may be OpenCV's synthetic
+        // closing cap.  Never let that segment participate in the corner
+        // bisector used for motion.  Derive a local normal solely from an
+        // observed contour tangent, then let the configuration-space grid
+        // and the current-window gate select its free side.
+        CTNodePtr physical_neighbor;
+        const auto consider_neighbor = [&node_ptr, &physical_neighbor](
+            const CTNodePtr& neighbor) {
+            if (!neighbor || neighbor == node_ptr ||
+                IsArtificialBoundaryClosingSegment(
+                    node_ptr->position, neighbor->position)) {
+                return;
+            }
+            if (!physical_neighbor ||
+                (neighbor->position - node_ptr->position).norm_flat() >
+                    (physical_neighbor->position -
+                     node_ptr->position).norm_flat()) {
+                physical_neighbor = neighbor;
+            }
+        };
+        consider_neighbor(node_ptr->front);
+        consider_neighbor(node_ptr->back);
+        if (!physical_neighbor) return;
+
+        Point3D tangent =
+            (node_ptr->position - physical_neighbor->position)
+                .normalize_flat();
+        if (tangent.norm_flat() <= FARUtil::kEpsilon) return;
+        const Point3D normals[2] = {
+            Point3D(-tangent.y, tangent.x, 0.0f),
+            Point3D(tangent.y, -tangent.x, 0.0f)};
+        struct DirectionSupport {
+            int free = 0;
+            int occupied = 0;
+            int inside = 0;
+            int reliable_inside = 0;
+        } support[2];
+        const float base_sample = std::max(
+            FARUtil::kNavClearDist + grid.resolution * 2.0f,
+            grid.resolution * 3.0f);
+        const float sample_step = std::max(grid.resolution * 2.0f, 0.05f);
+        for (int direction_index = 0; direction_index < 2;
+             ++direction_index) {
+            for (int sample_index = 0; sample_index < 3; ++sample_index) {
+                const float distance =
+                    base_sample + sample_step * sample_index;
+                const Point3D sample = node_ptr->position +
+                    normals[direction_index] * distance;
+                if (!IsPointInsideCurrentObservationWindow(sample)) continue;
+                ++support[direction_index].inside;
+                if (IsPointInsideReliableContourWindow(sample)) {
+                    ++support[direction_index].reliable_inside;
+                }
+                const GridCellState state = GridStateAtPoint(sample, grid);
+                if (state == GridCellState::FREE) {
+                    ++support[direction_index].free;
+                } else if (state == GridCellState::OCCUPIED) {
+                    ++support[direction_index].occupied;
+                }
+            }
+        }
+        const auto score = [&support](const int index) {
+            return support[index].free * 4 +
+                   support[index].reliable_inside -
+                   support[index].occupied * 5;
+        };
+        const int best = score(1) > score(0) ? 1 : 0;
+        const int other = 1 - best;
+        if (support[best].inside >= 2 && support[best].free >= 2 &&
+            support[best].occupied == 0 && score(best) > score(other)) {
+            node_ptr->free_space_dir = normals[best];
+            node_ptr->is_free_space_dir_reliable = true;
+        }
+        return;
+    }
+
+    int forward_free = 0;
+    int forward_occupied = 0;
+    int reverse_free = 0;
+    int reverse_occupied = 0;
+    const float base_sample = std::max(
+        FARUtil::kLeafSize * 0.75f, grid.resolution * 2.0f);
+    for (int sample_index = 1; sample_index <= 3; ++sample_index) {
+        const float distance = base_sample * sample_index;
+        const Point3D forward = node_ptr->position + candidate * distance;
+        const Point3D reverse = node_ptr->position - candidate * distance;
+        // W_guard/outside is not positive free-space evidence.
+        if (IsPointInsideReliableContourWindow(forward)) {
+            const GridCellState state = GridStateAtPoint(forward, grid);
+            if (state == GridCellState::FREE) ++forward_free;
+            else if (state == GridCellState::OCCUPIED) ++forward_occupied;
+        }
+        if (IsPointInsideReliableContourWindow(reverse)) {
+            const GridCellState state = GridStateAtPoint(reverse, grid);
+            if (state == GridCellState::FREE) ++reverse_free;
+            else if (state == GridCellState::OCCUPIED) ++reverse_occupied;
+        }
+    }
+
+    const bool forward_supported =
+        forward_free >= 2 && reverse_occupied >= 2;
+    const bool reverse_supported =
+        reverse_free >= 2 && forward_occupied >= 2;
+    if (forward_supported && !reverse_supported) {
+        node_ptr->is_free_space_dir_reliable = true;
+    } else if (reverse_supported && !forward_supported) {
+        node_ptr->free_space_dir = -candidate;
+        node_ptr->is_free_space_dir_reliable = true;
+    }
+}
+
 /* Match current contour with global navigation nodes */
 // 已经拿到关键分支了：这套代码不是做“整轮轮廓刚性配准”，而是“局部匹配 + 未匹配保留 + 内外部可达性判断”。我现在把这三层逻辑串起来，直接对应到代码里的集合和条件。
 // 是的，这段代码不是在做“局部轮廓和全局轮廓强行重合”的刚性配准，而是做三层处理：
@@ -147,6 +398,8 @@ void ContourGraph::SetLocalCollisionCloud(
 void ContourGraph::MatchContourWithNavGraph(
     const NodePtrStack& global_nodes, const NodePtrStack& near_nodes,
     CTNodeStack& new_convex_vertices, const float static_duplicate_radius) {
+    match_debug_records_.clear();
+    duplicate_debug_records_.clear();
     for (const auto& node_ptr : global_nodes) {
         node_ptr->is_contour_match = false;
         node_ptr->ctnode = NULL;
@@ -167,9 +420,9 @@ void ContourGraph::MatchContourWithNavGraph(
         NavNodePtr nav_node;
         float score;
         float distance;
+        std::size_t debug_record_index = 0;
     };
     std::vector<MatchCandidate> match_candidates;
-    const float direction_threshold = 0.5f;
     for (const auto& ctnode_ptr : ContourGraph::contour_graph_) {
         if (!ctnode_ptr ||
             ctnode_ptr->free_direct == NodeFreeDirect::UNKNOW) {
@@ -206,51 +459,87 @@ void ContourGraph::MatchContourWithNavGraph(
                 node_ptr->free_direct == NodeFreeDirect::PILLAR;
             if (contour_pillar != node_pillar) continue;
 
-            float direction_score = 0.0f;
-            if (dynamic_contour && dynamic_node) {
-                direction_score = 1.0f;
-            } else if (!contour_pillar &&
-                       node_ptr->free_direct != NodeFreeDirect::UNKNOW &&
-                       ctnode_ptr->free_direct == node_ptr->free_direct) {
-                const Point3D nav_direction =
-                    FARUtil::SurfTopoDirect(node_ptr->surf_dirs);
-                const Point3D contour_direction =
-                    FARUtil::SurfTopoDirect(ctnode_ptr->surf_dirs);
-                direction_score =
-                    (nav_direction * contour_direction - direction_threshold) /
-                    (1.0f - direction_threshold);
-            } else if (contour_pillar && node_pillar) {
-                direction_score = 0.5f;
-            }
-            // Preserve FAR's source/type and surface-direction identity, but
-            // do not let a noisy semantic contour direction create another
-            // vertex at practically the same corner. A weak/misaligned
-            // direction gets only a tight grid-scale positional fallback;
-            // it can never merge two distinct nearby door-frame corners.
             if (!dynamic_contour && !contour_pillar &&
                 node_ptr->free_direct != ctnode_ptr->free_direct) {
                 continue;
             }
-            const float tight_position_radius = std::max(
-                FARUtil::kLeafSize * 2.0f,
-                FARUtil::robot_dim * 0.5f);
-            const float match_radius = direction_score > 0.0f
-                ? FARUtil::kMatchDist * std::max(0.5f, direction_score)
-                : tight_position_radius;
+
+            const bool directions_reliable =
+                static_contour && !contour_pillar &&
+                node_ptr->is_free_space_dir_reliable &&
+                ctnode_ptr->is_free_space_dir_reliable;
+            float free_direction_cosine = 0.0f;
+            if (directions_reliable) {
+                free_direction_cosine = std::max(
+                    -1.0f, std::min(1.0f,
+                        node_ptr->free_space_dir.norm_flat_dot(
+                            ctnode_ptr->free_space_dir)));
+            }
+            const float match_radius = static_contour
+                ? StaticCornerMatchRadius(
+                    ctgraph_params_.static_match_tight_radius,
+                    ctgraph_params_.static_match_max_radius,
+                    directions_reliable, free_direction_cosine)
+                : ctgraph_params_.dynamic_match_max_radius;
             const float distance =
                 (node_ptr->position - ctnode_ptr->position).norm_flat();
-            if (distance >= match_radius ||
-                !IsCTMatchLineFreePolygon(ctnode_ptr, node_ptr, false)) {
+            if (static_contour &&
+                !AreStaticCornerFreeDirectionsCompatible(
+                    directions_reliable, free_direction_cosine)) {
+                if (debug_visualization_enabled_ &&
+                    distance < ctgraph_params_.static_match_max_radius) {
+                    ContourMatchDebugRecord record;
+                    record.contour_position = ctnode_ptr->position;
+                    record.graph_position = node_ptr->position;
+                    record.graph_node_id = node_ptr->id;
+                    record.distance = distance;
+                    record.direction_angle_deg = std::acos(
+                        free_direction_cosine) * 180.0f /
+                        static_cast<float>(M_PI);
+                    record.match_radius = match_radius;
+                    record.score = distance;
+                    record.free_direction_reliable = true;
+                    record.outcome =
+                        ContourMatchDebugOutcome::DIRECTION_REJECTED;
+                    match_debug_records_.push_back(record);
+                }
                 continue;
             }
-            // Position is primary; direction agreement acts as a small
-            // regularizer. Stable node id and contour coordinates below
-            // resolve exact voxel-grid ties.
-            const float score = distance /
-                std::max(match_radius, FARUtil::kEpsilon) +
-                (1.0f - std::max(0.0f, direction_score)) * 0.10f;
+            if (distance >= match_radius) {
+                continue;
+            }
+            const bool line_free =
+                IsCTMatchLineFreePolygon(ctnode_ptr, node_ptr, false);
+            float direction_angle_deg = 0.0f;
+            if (directions_reliable) {
+                direction_angle_deg = std::acos(free_direction_cosine) * 180.0f /
+                    static_cast<float>(M_PI);
+            }
+            // Direction controls admission only.  Assignment order uses real
+            // metric distance, so a larger permitted radius never makes a
+            // farther candidate look artificially closer.
+            const float score = distance;
+            std::size_t debug_record_index = 0;
+            if (debug_visualization_enabled_) {
+                ContourMatchDebugRecord record;
+                record.contour_position = ctnode_ptr->position;
+                record.graph_position = node_ptr->position;
+                record.graph_node_id = node_ptr->id;
+                record.distance = distance;
+                record.direction_angle_deg = direction_angle_deg;
+                record.match_radius = match_radius;
+                record.score = score;
+                record.free_direction_reliable = directions_reliable;
+                record.outcome = line_free
+                    ? ContourMatchDebugOutcome::CANDIDATE
+                    : ContourMatchDebugOutcome::LINE_BLOCKED;
+                match_debug_records_.push_back(record);
+                debug_record_index = match_debug_records_.size() - 1;
+            }
+            if (!line_free) continue;
             match_candidates.push_back(
-                {ctnode_ptr, node_ptr, score, distance});
+                {ctnode_ptr, node_ptr, score, distance,
+                 debug_record_index});
         }
     }
     std::sort(match_candidates.begin(), match_candidates.end(),
@@ -274,12 +563,20 @@ void ContourGraph::MatchContourWithNavGraph(
     for (const auto& candidate : match_candidates) {
         if (assigned_nav_ids.count(candidate.nav_node->id) ||
             assigned_contour_nodes.count(candidate.contour_node.get())) {
+            if (debug_visualization_enabled_) {
+                match_debug_records_[candidate.debug_record_index].outcome =
+                    ContourMatchDebugOutcome::ONE_TO_ONE_LOST;
+            }
             continue;
         }
         this->MatchCTNodeWithNavNode(candidate.contour_node,
                                      candidate.nav_node);
         assigned_nav_ids.insert(candidate.nav_node->id);
         assigned_contour_nodes.insert(candidate.contour_node.get());
+        if (debug_visualization_enabled_) {
+            match_debug_records_[candidate.debug_record_index].outcome =
+                ContourMatchDebugOutcome::ACCEPTED;
+        }
     }
     this->EnclosePolygonsCheck();
     new_convex_vertices.clear();
@@ -319,7 +616,8 @@ void ContourGraph::MatchContourWithNavGraph(
         if (!ctnode_ptr->is_global_match &&
             ctnode_ptr->free_direct != NodeFreeDirect::UNKNOW) {
             if (is_static_contour(ctnode_ptr) &&
-                ctnode_ptr->free_direct == NodeFreeDirect::CONCAVE) {
+                ctnode_ptr->free_direct == NodeFreeDirect::CONCAVE &&
+                !ctnode_ptr->is_contour_necessary) {
                 ++rejected_concave;
                 continue;
             }
@@ -345,6 +643,17 @@ void ContourGraph::MatchContourWithNavGraph(
                             node_ptr->surf_dirs, node_ptr->free_direct) &&
                         IsCTMatchLineFreePolygon(
                             ctnode_ptr, node_ptr, false)) {
+                        if (debug_visualization_enabled_) {
+                            ContourDuplicateDebugRecord record;
+                            record.suppressed_position = ctnode_ptr->position;
+                            record.keeper_position = node_ptr->position;
+                            record.keeper_node_id = node_ptr->id;
+                            record.distance = (ctnode_ptr->position -
+                                               node_ptr->position).norm_flat();
+                            record.duplicate_radius = duplicate_radius;
+                            record.keeper_is_historical = true;
+                            duplicate_debug_records_.push_back(record);
+                        }
                         duplicate = true;
                         break;
                     }
@@ -356,6 +665,18 @@ void ContourGraph::MatchContourWithNavGraph(
                                 ctnode_ptr, accepted->position,
                                 accepted->surf_dirs,
                                 accepted->free_direct)) {
+                            if (debug_visualization_enabled_) {
+                                ContourDuplicateDebugRecord record;
+                                record.suppressed_position =
+                                    ctnode_ptr->position;
+                                record.keeper_position = accepted->position;
+                                record.distance = (ctnode_ptr->position -
+                                                   accepted->position)
+                                                      .norm_flat();
+                                record.duplicate_radius = duplicate_radius;
+                                record.keeper_is_historical = false;
+                                duplicate_debug_records_.push_back(record);
+                            }
                             duplicate = true;
                             break;
                         }
@@ -373,6 +694,23 @@ void ContourGraph::MatchContourWithNavGraph(
         5.0,
         "CG static routing filter: rejected_concave=%zu suppressed_duplicates=%zu",
         rejected_concave, suppressed_duplicates);
+}
+
+void ContourGraph::RecordHistoricalDuplicate(
+    const NavNodePtr& obsolete, const NavNodePtr& keeper,
+    const float duplicate_radius) {
+    if (!debug_visualization_enabled_ || !obsolete || !keeper) return;
+    ContourDuplicateDebugRecord record;
+    record.suppressed_position = obsolete->position;
+    record.keeper_position = keeper->position;
+    record.suppressed_node_id = obsolete->id;
+    record.keeper_node_id = keeper->id;
+    record.distance =
+        (obsolete->position - keeper->position).norm_flat();
+    record.duplicate_radius = duplicate_radius;
+    record.keeper_is_historical = true;
+    record.is_history_consolidation = true;
+    duplicate_debug_records_.push_back(record);
 }
 
 bool ContourGraph::IsNavNodesConnectFreePolygon(const NavNodePtr& node_ptr1, const NavNodePtr& node_ptr2) {
@@ -476,14 +814,49 @@ EdgeRejectReason ContourGraph::ValidateVisibilityEdgeGeometry(
         node_ptr1->ctnode ? node_ptr1->ctnode->poly_ptr : PolygonPtr();
     const PolygonPtr endpoint_poly2 =
         node_ptr2->ctnode ? node_ptr2->ctnode->poly_ptr : PolygonPtr();
+    const bool first_projected = std::hypot(
+        edge.start_p.x - node_ptr1->position.x,
+        edge.start_p.y - node_ptr1->position.y) > FARUtil::kEpsilon;
+    const bool second_projected = std::hypot(
+        edge.end_p.x - node_ptr2->position.x,
+        edge.end_p.y - node_ptr2->position.y) > FARUtil::kEpsilon;
+
+    // A projected endpoint is part of the robot-centre trajectory, not an
+    // obstacle anchor. It must itself be free. The legacy endpoint exclusion
+    // otherwise lets an unmatched historical corner such as N20 keep active
+    // visibility edges even after its fixed 0.15 m projection has moved
+    // inside the latest configuration-space obstacle.
+    const Point3D projected_first(edge.start_p.x, edge.start_p.y,
+                                  node_ptr1->position.z);
+    const Point3D projected_second(edge.end_p.x, edge.end_p.y,
+                                   node_ptr2->position.z);
+    if ((first_projected &&
+         !IsPointCollisionFreeStaticLayer(projected_first)) ||
+        (second_projected &&
+         !IsPointCollisionFreeStaticLayer(projected_second))) {
+        return EdgeRejectReason::STATIC_CLOUD_BLOCKED;
+    }
+    if (include_dynamic &&
+        ((first_projected &&
+          !IsPointCollisionFreeDynamicLayer(projected_first)) ||
+         (second_projected &&
+          !IsPointCollisionFreeDynamicLayer(projected_second)))) {
+        return EdgeRejectReason::DYNAMIC_CLOUD_BLOCKED;
+    }
+    // When both obstacle corners have a real projection, validate the whole
+    // stored route without an endpoint blind zone. Pillars/unknown directions
+    // retain the small legacy exclusion because they cannot provide a
+    // robot-centre endpoint distinct from the obstacle anchor.
+    const float endpoint_exclusion =
+        first_projected && second_projected ? 0.0f : -1.0f;
     if (!IsEdgeCollisionFreeInCloud(
             edge, height, local_static_collision_cloud_,
-            local_static_collision_kdtree_)) {
+            local_static_collision_kdtree_, endpoint_exclusion)) {
         return EdgeRejectReason::STATIC_CLOUD_BLOCKED;
     }
     if (include_dynamic && !IsEdgeCollisionFreeInCloud(
             edge, height, local_dynamic_collision_cloud_,
-            local_dynamic_collision_kdtree_)) {
+            local_dynamic_collision_kdtree_, endpoint_exclusion)) {
         return EdgeRejectReason::DYNAMIC_CLOUD_BLOCKED;
     }
     if (!IsPointsConnectFreePolygonForLayer(
@@ -543,6 +916,7 @@ EdgeValidationResult ContourGraph::ValidateVisibilityEdgeWithRoute(
                                  node_ptr1->position.z);
     result.route_end = Point3D(edge.end_p.x, edge.end_p.y,
                                node_ptr2->position.z);
+    result.route_points = {result.route_start, result.route_end};
     result.route_cost =
         (node_ptr1->position - result.route_start).norm() +
         (result.route_start - result.route_end).norm() +
@@ -569,6 +943,7 @@ EdgeValidationResult ContourGraph::ValidateTerminalVisibilityEdgeWithRoute(
             ? obstacle_node->position : terminal_node->position;
         invalid.route_end = obstacle_is_start
             ? terminal_node->position : obstacle_node->position;
+        invalid.route_points = {invalid.route_start, invalid.route_end};
         return invalid;
     }
 
@@ -644,7 +1019,9 @@ EdgeValidationResult ContourGraph::ValidateTerminalVisibilityEdgeWithRoute(
                 }
                 if (is_global_check &&
                     !IsRouteClearOfGlobalContours(
-                        route, height, FARUtil::kNavClearDist)) {
+                        route, height,
+                        local_static_collision_grid_.IsValid()
+                            ? 0.0f : FARUtil::kNavClearDist)) {
                     attempt.reason = EdgeRejectReason::POLYGON_BLOCKED;
                     attempt.projection_distance = projection;
                     return attempt;
@@ -672,6 +1049,7 @@ EdgeValidationResult ContourGraph::ValidateTerminalVisibilityEdgeWithRoute(
                 attempt.reason = EdgeRejectReason::NONE;
                 attempt.route_start = route_start;
                 attempt.route_end = route_end;
+                attempt.route_points = {route_start, route_end};
                 attempt.projection_distance = projection;
                 attempt.route_cost =
                     (obstacle_node->position - projected_corner).norm() +
@@ -777,7 +1155,9 @@ EdgeValidationResult ContourGraph::ValidateDirectOdomGoalEdgeWithRoute(
     const bool is_global_check = IsNeedGlobalCheck(route_start, route_end);
     if (is_global_check &&
         !IsRouteClearOfGlobalContours(
-            route, height, FARUtil::kNavClearDist)) {
+            route, height,
+            local_static_collision_grid_.IsValid()
+                ? 0.0f : FARUtil::kNavClearDist)) {
         result.reason = EdgeRejectReason::POLYGON_BLOCKED;
         return result;
     }
@@ -799,6 +1179,7 @@ EdgeValidationResult ContourGraph::ValidateDirectOdomGoalEdgeWithRoute(
     result.reason = EdgeRejectReason::NONE;
     result.route_start = route_start;
     result.route_end = route_end;
+    result.route_points = {route_start, route_end};
     result.route_cost = (route_end - route_start).norm();
     result.projection_distance = 0.0f;
     return result;
@@ -818,6 +1199,18 @@ bool ContourGraph::IsRouteConnectFreeDynamicLayer(
         PolygonPtr(), PolygonPtr(), false);
 }
 
+bool ContourGraph::IsRouteConnectFreeDynamicLayer(
+    const std::vector<Point3D>& route_points) {
+    if (route_points.size() < 2) return false;
+    for (std::size_t index = 1; index < route_points.size(); ++index) {
+        if (!IsRouteConnectFreeDynamicLayer(route_points[index - 1],
+                                            route_points[index])) {
+            return false;
+        }
+    }
+    return true;
+}
+
 bool ContourGraph::IsRouteConnectFreeStaticLayer(
     const Point3D& route_start, const Point3D& route_end) {
     const ConnectPair route(route_start, route_end);
@@ -830,6 +1223,18 @@ bool ContourGraph::IsRouteConnectFreeStaticLayer(
     return IsPointsConnectFreePolygonForLayer(
         route, route, height, false, CollisionLayer::STATIC_ONLY,
         PolygonPtr(), PolygonPtr(), false);
+}
+
+bool ContourGraph::IsRouteConnectFreeStaticLayer(
+    const std::vector<Point3D>& route_points) {
+    if (route_points.size() < 2) return false;
+    for (std::size_t index = 1; index < route_points.size(); ++index) {
+        if (!IsRouteConnectFreeStaticLayer(route_points[index - 1],
+                                           route_points[index])) {
+            return false;
+        }
+    }
+    return true;
 }
 
 bool ContourGraph::IsPointCollisionFreeStaticLayer(const Point3D& point) {
@@ -845,6 +1250,9 @@ bool ContourGraph::IsPointCollisionFreeDynamicLayer(const Point3D& point) {
 
 bool ContourGraph::IsPointInsideReliableContourWindow(
     const Point3D& point) {
+    if (local_observation_window_.enabled) {
+        return local_observation_window_.Contains(point);
+    }
     const float half_extent = std::max(
         0.0f, FARUtil::kSensorRange - contour_boundary_guard_);
     return std::abs(point.x - FARUtil::odom_pos.x) <= half_extent &&
@@ -853,6 +1261,9 @@ bool ContourGraph::IsPointInsideReliableContourWindow(
 
 bool ContourGraph::DoesSegmentIntersectReliableContourWindow(
     const Point3D& start, const Point3D& end) {
+    if (local_observation_window_.enabled) {
+        return local_observation_window_.SegmentIntersects(start, end);
+    }
     const float half_extent = std::max(
         0.0f, FARUtil::kSensorRange - contour_boundary_guard_);
     const float min_x = FARUtil::odom_pos.x - half_extent;
@@ -878,6 +1289,51 @@ bool ContourGraph::DoesSegmentIntersectReliableContourWindow(
     };
     return clip_axis(start.x, dx, min_x, max_x) &&
            clip_axis(start.y, dy, min_y, max_y);
+}
+
+bool ContourGraph::IsSegmentFullyInsideReliableContourWindow(
+    const Point3D& start, const Point3D& end) {
+    if (local_observation_window_.enabled) {
+        return local_observation_window_.SegmentFullyContained(start, end);
+    }
+    return IsPointInsideReliableContourWindow(start) &&
+           IsPointInsideReliableContourWindow(end);
+}
+
+bool ContourGraph::IsPointInsideCurrentObservationWindow(
+    const Point3D& point) {
+    if (local_observation_window_.enabled) {
+        // Contour raster dilation/interpolation can move a boundary vertex a
+        // few cells beyond the exact voxel box. The contour is rasterized
+        // around the graph-update pose while the local footprint is stamped
+        // at the source-cloud pose, so retain one additional contour cell for
+        // quantization and sub-frame pose skew. Keep this enlarged halo
+        // current-only; it is never used to confirm persistent geometry.
+        const float current_clip_tolerance =
+            contour_boundary_guard_ + FARUtil::kLeafSize;
+        return local_observation_window_.ContainsFull(
+            point, current_clip_tolerance);
+    }
+    return std::abs(point.x - FARUtil::odom_pos.x) <= FARUtil::kSensorRange &&
+           std::abs(point.y - FARUtil::odom_pos.y) <= FARUtil::kSensorRange;
+}
+
+bool ContourGraph::IsSegmentFullyInsideCurrentObservationWindow(
+    const Point3D& start, const Point3D& end) {
+    if (local_observation_window_.enabled) {
+        const float current_clip_tolerance =
+            contour_boundary_guard_ + FARUtil::kLeafSize;
+        return local_observation_window_.SegmentFullyContainedFull(
+            start, end, current_clip_tolerance);
+    }
+    return IsPointInsideCurrentObservationWindow(start) &&
+           IsPointInsideCurrentObservationWindow(end);
+}
+
+void ContourGraph::SetLocalObservationPose(
+    const Point3D& origin, const Point3D& forward) {
+    local_observation_window_.origin = origin;
+    local_observation_window_.forward = forward;
 }
 
 bool ContourGraph::IsPointObservedOnCurrentStaticContour(
@@ -929,16 +1385,19 @@ bool ContourGraph::IsPointConfirmedOnCurrentStaticSegmentInterior(
 
     for (const auto& polygon : contour_polygons_) {
         if (!polygon || polygon->source == GraphNodeSource::DYNAMIC_LOCAL ||
-            polygon->is_pillar || polygon->is_boundary_clipped ||
-            polygon->vertices.size() < 2) {
+            polygon->is_pillar || polygon->vertices.size() < 2) {
             continue;
         }
         for (std::size_t index = 0; index < polygon->vertices.size(); ++index) {
             const Point3D& first = polygon->vertices[index];
             const Point3D& second = polygon->vertices[
                 (index + 1) % polygon->vertices.size()];
-            if (!IsPointInsideReliableContourWindow(first) ||
-                !IsPointInsideReliableContourWindow(second)) {
+            // A clipped polygon is not wholly unreliable.  Only its
+            // synthetic window-closing cap is unobserved; a physical contour
+            // side from an interior corner to a CLIP endpoint still provides
+            // reliable evidence around an old vertex well inside W_inner.
+            if (polygon->is_boundary_clipped &&
+                IsArtificialBoundaryClosingSegment(first, second)) {
                 continue;
             }
             const float dx = second.x - first.x;
@@ -961,10 +1420,32 @@ bool ContourGraph::IsPointConfirmedOnCurrentStaticSegmentInterior(
             const Point3D projected(first.x + projection * dx,
                                     first.y + projection * dy, point.z);
             const float distance = (projected - point).norm_flat();
-            if (distance <= distance_tolerance && distance < best_distance) {
-                best_distance = distance;
-                best_polygon = polygon;
+            if (distance > distance_tolerance || distance >= best_distance ||
+                !IsPointInsideReliableContourWindow(projected)) continue;
+
+            // Require a complete local neighbourhood on both sides of the
+            // projection to lie in W_inner.  This makes reliability local to
+            // the historical vertex instead of rejecting an entire polygon
+            // merely because a remote endpoint is clipped.
+            const float inverse_length = 1.0f / segment_length;
+            const Point3D tangent(dx * inverse_length,
+                                  dy * inverse_length, 0.0f);
+            // Endpoint clearance answers whether this is truly the segment
+            // interior; it is intentionally larger than the amount of local
+            // contour needed to prove that the projection itself was
+            // observed. Two contour cells are enough for the latter and keep
+            // a valid interior section next to W_guard from being discarded.
+            const float reliable_span = std::max(
+                FARUtil::kLeafSize * 2.0f,
+                std::min(distance_tolerance, contour_boundary_guard_));
+            const Point3D before = projected - tangent * reliable_span;
+            const Point3D after = projected + tangent * reliable_span;
+            if (!IsPointInsideReliableContourWindow(before) ||
+                !IsPointInsideReliableContourWindow(after)) {
+                continue;
             }
+            best_distance = distance;
+            best_polygon = polygon;
         }
     }
     if (!best_polygon) return false;
@@ -999,108 +1480,273 @@ EdgeValidationResult ContourGraph::ValidateContourFollowEdge(
         return result;
     }
 
-    if (!ContourGraph::IsNavNodesConnectFromContour(node_ptr1, node_ptr2)) {
+    const bool observed_contour =
+        ContourGraph::IsNavNodesConnectFromContour(node_ptr1, node_ptr2);
+    const bool clip_attempt = !observed_contour &&
+        ContourGraph::IsNavNodesConnectFromClipAttempt(node_ptr1, node_ptr2);
+    if (!observed_contour && !clip_attempt) {
         return result;
     }
 
     const CTNodePtr ct1 = node_ptr1->ctnode;
     const CTNodePtr ct2 = node_ptr2->ctnode;
-    const PolygonPtr endpoint_poly = ct1->poly_ptr;
-    const bool static_structure =
-        ct1->source != GraphNodeSource::DYNAMIC_LOCAL;
-    EdgeRejectReason last_reason = EdgeRejectReason::OFFSET_FAILED;
+    // Both CT nodes belong to the contour graph reconstructed from this
+    // observation.  A boundary-clipped vertex is therefore already proven
+    // to be part of the current snapshot.  Rechecking its quantized world
+    // coordinate against the moving local-window boundary is redundant and
+    // can reject every incident contour edge after millimetre-scale pose
+    // motion (the rasterized vertex commonly lies exactly on the halo).
+    // CLIP persistence is handled by the snapshot-local node lifecycle; do
+    // not turn that lifecycle rule into a current-frame topology gate here.
+    CTNodeStack contour_chain;
+    bool crossed_artificial_cap = false;
+    if (!GetContourChain(ct1, ct2, contour_chain, clip_attempt,
+                         &crossed_artificial_cap) ||
+        (clip_attempt && !crossed_artificial_cap)) {
+        return result;
+    }
+
+    // A FAR contour edge is a reduced topological relation, not a sampled
+    // robot-centre trajectory.  Runtime waypoint projection and the local
+    // planner provide free-space clearance when this relation is selected.
+    result.valid = true;
+    result.reason = EdgeRejectReason::NONE;
+    result.mode = clip_attempt ? EdgeValidationMode::CLIP_ATTEMPT
+                               : EdgeValidationMode::CONTOUR_FOLLOW;
+    result.route_start = node_ptr1->position;
+    result.route_end = node_ptr2->position;
+    result.route_points = {node_ptr1->position, node_ptr2->position};
+    result.route_cost =
+        (node_ptr2->position - node_ptr1->position).norm();
+    result.projection_distance = 0.0f;
+    result.dynamic_blocked = false;
+    return result;
+}
+
+bool ContourGraph::ValidateProjectedContourRoute(
+    const std::vector<Point3D>& route_points,
+    const PolygonPtr& endpoint_polygon, const bool static_structure,
+    EdgeRejectReason& reason) {
+    if (route_points.size() < 2) {
+        reason = EdgeRejectReason::OFFSET_FAILED;
+        return false;
+    }
+    for (std::size_t index = 1; index < route_points.size(); ++index) {
+        const Point3D& segment_start = route_points[index - 1];
+        const Point3D& segment_end = route_points[index];
+        const ConnectPair route(segment_start, segment_end);
+        const HeightPair route_height(segment_start, segment_end);
+        const Point3D route_center =
+            (segment_start + segment_end) / 2.0f;
+
+        if (!local_static_collision_grid_.IsValid() && endpoint_polygon &&
+            !endpoint_polygon->is_pillar &&
+            !endpoint_polygon->is_boundary_clipped &&
+            (endpoint_polygon->is_robot_inside !=
+                 FARUtil::PointInsideAPoly(endpoint_polygon->vertices,
+                                           route_center) ||
+             IsEdgeCollidePoly(endpoint_polygon->vertices, route))) {
+            reason = EdgeRejectReason::SELF_POLYGON_BLOCKED;
+            return false;
+        }
+        if (!IsEdgeCollisionFreeInCloud(
+                route, route_height, local_static_collision_cloud_,
+                local_static_collision_kdtree_, 0.0f)) {
+            reason = EdgeRejectReason::STATIC_CLOUD_BLOCKED;
+            return false;
+        }
+        if (!local_static_collision_grid_.IsValid() &&
+            !IsPointsConnectFreePolygonForLayer(
+                route, route, route_height, false,
+                CollisionLayer::STATIC_ONLY, endpoint_polygon,
+                endpoint_polygon, false)) {
+            reason = EdgeRejectReason::OTHER_STATIC_BLOCKED;
+            return false;
+        }
+        if (!static_structure &&
+            (!IsEdgeCollisionFreeInCloud(
+                 route, route_height, local_dynamic_collision_cloud_,
+                 local_dynamic_collision_kdtree_, 0.0f) ||
+             (!local_dynamic_collision_grid_.IsValid() &&
+              !IsPointsConnectFreePolygonForLayer(
+                  route, route, route_height, false,
+                  CollisionLayer::DYNAMIC_ONLY, endpoint_polygon,
+                  endpoint_polygon, false)))) {
+            reason = EdgeRejectReason::DYNAMIC_CLOUD_BLOCKED;
+            return false;
+        }
+    }
+    reason = EdgeRejectReason::NONE;
+    return true;
+}
+
+bool ContourGraph::BuildConvexHullContourRoute(
+    const CTNodePtr& first, const CTNodePtr& second,
+    const PointStack& dense_chain, const PolygonPtr& polygon,
+    std::vector<Point3D>& route_points, float& projection_distance,
+    EdgeRejectReason& reason) {
+    route_points.clear();
+    projection_distance = 0.0f;
+    if (!first || !second || !polygon || polygon->is_pillar ||
+        polygon->is_boundary_clipped || dense_chain.size() < 2) {
+        return false;
+    }
+    const PointStack& boundary = polygon->dense_vertices.size() >= 3
+        ? polygon->dense_vertices : polygon->vertices;
+    if (boundary.size() < 3) return false;
+
+    std::vector<cv::Point2f> input;
+    input.reserve(boundary.size());
+    for (const Point3D& point : boundary) {
+        input.emplace_back(point.x, point.y);
+    }
+    std::vector<cv::Point2f> hull_cv;
+    cv::convexHull(input, hull_cv, false, true);
+    if (hull_cv.size() < 3) return false;
+
+    PointStack hull;
+    hull.reserve(hull_cv.size());
+    const float route_height = (first->position.z + second->position.z) * 0.5f;
+    for (const cv::Point2f& point : hull_cv) {
+        hull.emplace_back(point.x, point.y, route_height);
+    }
+    const auto nearest_hull_index = [&hull](const Point3D& point) {
+        std::size_t best_index = 0;
+        float best_distance = FARUtil::kINF;
+        for (std::size_t index = 0; index < hull.size(); ++index) {
+            const float distance =
+                (hull[index] - point).norm_flat();
+            if (distance < best_distance) {
+                best_distance = distance;
+                best_index = index;
+            }
+        }
+        return best_index;
+    };
+    const std::size_t first_index = nearest_hull_index(first->position);
+    const std::size_t second_index = nearest_hull_index(second->position);
+    if (first_index == second_index) return false;
+
+    float signed_twice_area = 0.0f;
+    for (std::size_t index = 0; index < hull.size(); ++index) {
+        const Point3D& current = hull[index];
+        const Point3D& next = hull[(index + 1) % hull.size()];
+        signed_twice_area += current.x * next.y - next.x * current.y;
+    }
+    const bool counter_clockwise = signed_twice_area > 0.0f;
+    const auto outward_normal = [counter_clockwise](
+        const Point3D& from, const Point3D& to) {
+        const Point3D edge = (to - from).normalize_flat();
+        return counter_clockwise
+            ? Point3D(edge.y, -edge.x, 0.0f)
+            : Point3D(-edge.y, edge.x, 0.0f);
+    };
+
+    const Point3D dense_midpoint = dense_chain[dense_chain.size() / 2];
+    const auto distance_to_arc = [&hull, &dense_midpoint](
+        const std::vector<std::size_t>& arc) {
+        float distance = FARUtil::kINF;
+        for (std::size_t index = 1; index < arc.size(); ++index) {
+            distance = std::min(
+                distance, FARUtil::DistanceToLineSeg2D(
+                    dense_midpoint,
+                    PointPair(hull[arc[index - 1]], hull[arc[index]])));
+        }
+        return distance;
+    };
+    const auto make_arc = [&hull, first_index, second_index](
+        const int step) {
+        std::vector<std::size_t> arc;
+        std::size_t index = first_index;
+        for (std::size_t count = 0; count <= hull.size(); ++count) {
+            arc.push_back(index);
+            if (index == second_index) break;
+            index = step > 0
+                ? (index + 1) % hull.size()
+                : (index + hull.size() - 1) % hull.size();
+        }
+        return arc;
+    };
+    std::vector<std::size_t> forward_arc = make_arc(1);
+    std::vector<std::size_t> backward_arc = make_arc(-1);
+    const std::vector<std::size_t>& selected_arc =
+        distance_to_arc(forward_arc) <= distance_to_arc(backward_arc)
+            ? forward_arc : backward_arc;
 
     for (float projection = contour_projection_min_;
          projection <= contour_projection_max_ + FARUtil::kEpsilon;
          projection += contour_projection_step_) {
-        Point3D route_start = ct1->position;
-        Point3D route_end = ct2->position;
-        const cv::Point2f projected_start = ProjectNode(ct1, projection);
-        const cv::Point2f projected_end = ProjectNode(ct2, projection);
-        route_start.x = projected_start.x;
-        route_start.y = projected_start.y;
-        route_end.x = projected_end.x;
-        route_end.y = projected_end.y;
-        const ConnectPair route(route_start, route_end);
-        const HeightPair route_height(route_start, route_end);
-
-        // ProjectNode() selects the CT vertex's free-space direction. Verify
-        // that the complete candidate segment still lies on the robot's side
-        // of its owning polygon before testing unrelated obstacles.
-        const Point3D route_center(
-            (route_start.x + route_end.x) * 0.5f,
-            (route_start.y + route_end.y) * 0.5f,
-            (route_start.z + route_end.z) * 0.5f);
-        // A boundary-clipped OpenCV polygon contains an artificial closing
-        // segment at the raster edge. Do not treat that synthetic cap as the
-        // endpoint obstacle itself. Persistent static voxels below remain
-        // authoritative, as do every other static/dynamic polygon.
-        if (endpoint_poly && !endpoint_poly->is_pillar &&
-            !endpoint_poly->is_boundary_clipped &&
-            (endpoint_poly->is_robot_inside !=
-                 FARUtil::PointInsideAPoly(endpoint_poly->vertices,
-                                           route_center) ||
-             IsEdgeCollidePoly(endpoint_poly->vertices, route))) {
-            last_reason = EdgeRejectReason::SELF_POLYGON_BLOCKED;
-            continue;
-        }
-
-        if (!IsEdgeCollisionFreeInCloud(
-                route, route_height, local_static_collision_cloud_,
-                local_static_collision_kdtree_, 0.0f)) {
-            last_reason = EdgeRejectReason::STATIC_CLOUD_BLOCKED;
-            continue;
-        }
-        if (!IsPointsConnectFreePolygonForLayer(
-                route, route, route_height, false,
-                CollisionLayer::STATIC_ONLY, endpoint_poly, endpoint_poly,
-                false)) {
-            last_reason = EdgeRejectReason::OTHER_STATIC_BLOCKED;
-            continue;
-        }
-
-        // A dynamic contour is structural in this snapshot, so its own
-        // free-side route must clear the complete current dynamic layer. A
-        // persistent static contour is instead retained and dynamically
-        // masked below without changing its static geometry.
-        if (!static_structure) {
-            if (!IsEdgeCollisionFreeInCloud(
-                    route, route_height, local_dynamic_collision_cloud_,
-                    local_dynamic_collision_kdtree_, 0.0f)) {
-                last_reason = EdgeRejectReason::DYNAMIC_CLOUD_BLOCKED;
-                continue;
+        PointStack offset_hull(hull.size());
+        bool offset_valid = true;
+        for (std::size_t index = 0; index < hull.size(); ++index) {
+            const std::size_t previous =
+                (index + hull.size() - 1) % hull.size();
+            const std::size_t next = (index + 1) % hull.size();
+            const Point3D previous_normal =
+                outward_normal(hull[previous], hull[index]);
+            const Point3D next_normal =
+                outward_normal(hull[index], hull[next]);
+            Point3D bisector = previous_normal + next_normal;
+            if (bisector.norm_flat() <= FARUtil::kEpsilon) {
+                offset_valid = false;
+                break;
             }
-            if (!IsPointsConnectFreePolygonForLayer(
-                    route, route, route_height, false,
-                    CollisionLayer::DYNAMIC_ONLY, endpoint_poly,
-                    endpoint_poly, false)) {
-                last_reason = EdgeRejectReason::POLYGON_BLOCKED;
-                continue;
+            bisector = bisector.normalize_flat();
+            const float denominator = std::min(
+                bisector.norm_flat_dot(previous_normal),
+                bisector.norm_flat_dot(next_normal));
+            if (denominator <= 0.1f) {
+                offset_valid = false;
+                break;
+            }
+            const float miter = std::min(
+                projection / denominator, projection * 3.0f);
+            offset_hull[index] = hull[index] + bisector * miter;
+        }
+        if (!offset_valid) continue;
+
+        PointStack candidate;
+        candidate.reserve(selected_arc.size() + 2);
+        const cv::Point2f first_projected = ProjectNode(first, projection);
+        const cv::Point2f second_projected = ProjectNode(second, projection);
+        candidate.emplace_back(first_projected.x, first_projected.y,
+                               first->position.z);
+        for (const std::size_t index : selected_arc) {
+            if ((candidate.back() - offset_hull[index]).norm_flat() >
+                FARUtil::kEpsilon) {
+                candidate.push_back(offset_hull[index]);
             }
         }
-
-        result.valid = true;
-        result.reason = EdgeRejectReason::NONE;
-        result.route_start = route_start;
-        result.route_end = route_end;
-        result.projection_distance = projection;
-        result.route_cost =
-            (node_ptr1->position - route_start).norm() +
-            (route_start - route_end).norm() +
-            (route_end - node_ptr2->position).norm();
-
-        if (static_structure) {
-            result.dynamic_blocked =
-                !IsRouteConnectFreeDynamicLayer(route_start, route_end);
-            if (result.dynamic_blocked) {
-                result.reason = EdgeRejectReason::DYNAMIC_CLOUD_BLOCKED;
+        const Point3D projected_second(second_projected.x,
+                                       second_projected.y,
+                                       second->position.z);
+        if ((candidate.back() - projected_second).norm_flat() >
+            FARUtil::kEpsilon) {
+            candidate.push_back(projected_second);
+        }
+        bool inside_window = true;
+        for (const Point3D& point : candidate) {
+            if (!IsPointInsideCurrentObservationWindow(point)) {
+                inside_window = false;
+                break;
             }
         }
-        return result;
+        if (!inside_window || !IsRouteConnectFreeStaticLayer(candidate)) {
+            reason = EdgeRejectReason::STATIC_CLOUD_BLOCKED;
+            continue;
+        }
+        EdgeRejectReason validation_reason = EdgeRejectReason::NONE;
+        if (!ValidateProjectedContourRoute(
+                candidate, polygon, true, validation_reason)) {
+            reason = validation_reason;
+            continue;
+        }
+        route_points = std::move(candidate);
+        projection_distance = projection;
+        reason = EdgeRejectReason::NONE;
+        return true;
     }
-
-    result.reason = last_reason;
-    return result;
+    return false;
 }
 
 bool ContourGraph::IsPoint3DConnectFreePolygon(const Point3D& p1, const Point3D& p2) {
@@ -1150,6 +1796,19 @@ bool ContourGraph::IsPillarConnectBlocked(const PolygonPtr& poly_ptr,
         return false;
     }
 
+    if (local_static_collision_grid_.IsValid()) {
+        // The current polygon was extracted from an already inflated
+        // configuration-space obstacle.  Applying kNavClearDist again here
+        // would double the robot radius.  Only actual intersection/interior
+        // is blocking; the raster supercover performs the authoritative
+        // current-layer check.
+        const Point3D midpoint(
+            (edge.start_p.x + edge.end_p.x) * 0.5f,
+            (edge.start_p.y + edge.end_p.y) * 0.5f, 0.0f);
+        return IsEdgeCollidePoly(poly_ptr->vertices, edge) ||
+               FARUtil::PointInsideAPoly(poly_ptr->vertices, midpoint);
+    }
+
     const PointPair edge_line(
         Point3D(edge.start_p.x, edge.start_p.y, 0.0f),
         Point3D(edge.end_p.x, edge.end_p.y, 0.0f));
@@ -1175,6 +1834,64 @@ bool ContourGraph::IsPointsConnectFreePolygon(const ConnectPair& cedge,
     return ContourGraph::IsPointsConnectFreePolygonForLayer(
         cedge, bd_cedge, h_pair, is_global_check,
         CollisionLayer::COMBINED);
+}
+
+bool ContourGraph::IsArtificialBoundaryClosingSegment(
+    const Point3D& first, const Point3D& second) {
+    if (IsPointInsideReliableContourWindow(first) ||
+        IsPointInsideReliableContourWindow(second)) {
+        return false;
+    }
+
+    const float tolerance = std::max(0.05f, FARUtil::kLeafSize * 1.5f);
+    const auto near_same_side = [tolerance](
+        const float first_value, const float second_value,
+        const float boundary) {
+        return std::abs(first_value - boundary) <= tolerance &&
+               std::abs(second_value - boundary) <= tolerance;
+    };
+
+    if (local_observation_window_.enabled &&
+        local_observation_window_.IsValid()) {
+        const Point3D local_first = local_observation_window_.ToLocal(first);
+        const Point3D local_second = local_observation_window_.ToLocal(second);
+        const float halo = local_observation_window_.guard;
+        return near_same_side(local_first.x, local_second.x,
+                              local_observation_window_.min_x - halo) ||
+               near_same_side(local_first.x, local_second.x,
+                              local_observation_window_.min_x) ||
+               near_same_side(local_first.x, local_second.x,
+                              local_observation_window_.max_x) ||
+               near_same_side(local_first.x, local_second.x,
+                              local_observation_window_.max_x + halo) ||
+               near_same_side(local_first.y, local_second.y,
+                              local_observation_window_.min_y - halo) ||
+               near_same_side(local_first.y, local_second.y,
+                              local_observation_window_.min_y) ||
+               near_same_side(local_first.y, local_second.y,
+                              local_observation_window_.max_y) ||
+               near_same_side(local_first.y, local_second.y,
+                              local_observation_window_.max_y + halo);
+    }
+
+    const float range = FARUtil::kSensorRange;
+    return near_same_side(first.x, second.x, FARUtil::odom_pos.x - range) ||
+           near_same_side(first.x, second.x, FARUtil::odom_pos.x + range) ||
+           near_same_side(first.y, second.y, FARUtil::odom_pos.y - range) ||
+           near_same_side(first.y, second.y, FARUtil::odom_pos.y + range);
+}
+
+bool ContourGraph::IsBoundaryClippedPolygonBlocked(
+    const PolygonPtr& polygon, const ConnectPair& edge) {
+    if (!polygon || polygon->vertices.size() < 2) return false;
+    for (std::size_t index = 0; index < polygon->vertices.size(); ++index) {
+        const Point3D& first = polygon->vertices[index];
+        const Point3D& second =
+            polygon->vertices[(index + 1) % polygon->vertices.size()];
+        if (IsArtificialBoundaryClosingSegment(first, second)) continue;
+        if (IsEdgeCollideSegment(PointPair(first, second), edge)) return true;
+    }
+    return false;
 }
 
 bool ContourGraph::IsPointsConnectFreePolygonForLayer(
@@ -1226,11 +1943,14 @@ bool ContourGraph::IsPointsConnectFreePolygonForLayer(
                                          0.0f);
         for (const auto& poly_ptr : ContourGraph::contour_polygons_) {
             if (!includes_polygon(poly_ptr)) continue;
-            // A boundary-clipped contour is physically open even though
-            // OpenCV represents it as a closed polygon.  Its raw semantic
-            // voxels remain authoritative for collision; ignore the
-            // artificial polygon interior/closing segment.
-            if (poly_ptr->is_boundary_clipped) continue;
+            // A boundary-clipped contour is physically open only along its
+            // synthetic window cap. Its observed sides remain obstacles.
+            if (poly_ptr->is_boundary_clipped) {
+                if (IsBoundaryClippedPolygonBlocked(poly_ptr, cedge)) {
+                    return false;
+                }
+                continue;
+            }
             const bool is_endpoint_polygon =
                 poly_ptr == endpoint_poly1 || poly_ptr == endpoint_poly2;
             if (poly_ptr->is_pillar) {
@@ -1273,7 +1993,12 @@ bool ContourGraph::IsPointsConnectFreePolygonForLayer(
         }
         for (const auto& poly_ptr : ContourGraph::contour_polygons_) {
             if (!includes_polygon(poly_ptr)) continue;
-            if (poly_ptr->is_boundary_clipped) continue;
+            if (poly_ptr->is_boundary_clipped) {
+                if (IsBoundaryClippedPolygonBlocked(poly_ptr, cedge)) {
+                    return false;
+                }
+                continue;
+            }
             const bool is_endpoint_polygon =
                 poly_ptr == endpoint_poly1 || poly_ptr == endpoint_poly2;
             if (poly_ptr->is_pillar) {
@@ -1296,10 +2021,134 @@ bool ContourGraph::IsEdgeCollisionFreeInLocalCloud(
         edge, edge_height, local_collision_cloud_, local_collision_kdtree_);
 }
 
+const ContourGraph::LocalCollisionGrid2D*
+ContourGraph::CollisionGridForCloud(const PointCloudPtr& cloud) {
+    if (!cloud) return nullptr;
+    if (cloud.get() == local_static_collision_cloud_.get() &&
+        local_static_collision_grid_.IsValid()) {
+        return &local_static_collision_grid_;
+    }
+    if (cloud.get() == local_dynamic_collision_cloud_.get() &&
+        local_dynamic_collision_grid_.IsValid()) {
+        return &local_dynamic_collision_grid_;
+    }
+    if (cloud.get() == local_collision_cloud_.get() &&
+        local_collision_grid_.IsValid()) {
+        return &local_collision_grid_;
+    }
+    return nullptr;
+}
+
+bool ContourGraph::IsEdgeCollisionFreeInGrid(
+    const ConnectPair& edge, const LocalCollisionGrid2D& grid,
+    const float endpoint_exclusion) {
+    if (!grid.IsValid()) return true;
+
+    const float world_dx = edge.end_p.x - edge.start_p.x;
+    const float world_dy = edge.end_p.y - edge.start_p.y;
+    const float length = std::hypot(world_dx, world_dy);
+    if (length < FARUtil::kEpsilon) return true;
+
+    // Explicit non-negative exclusions retain their previous meaning.  The
+    // legacy negative value is used only when an obstacle endpoint cannot be
+    // projected (notably a one-node pillar); exclude no more than two refined
+    // cells because clearance is already encoded in the configuration grid.
+    const float endpoint_margin = endpoint_exclusion >= 0.0f
+        ? std::min(endpoint_exclusion, length * 0.45f)
+        : std::min(length * 0.45f, grid.resolution * 2.0f);
+    if (length < endpoint_margin * 2.0f + FARUtil::kEpsilon) return true;
+
+    const float first_ratio = endpoint_margin / length;
+    const float last_ratio = (length - endpoint_margin) / length;
+    const float start_x = edge.start_p.x + world_dx * first_ratio;
+    const float start_y = edge.start_p.y + world_dy * first_ratio;
+    const float end_x = edge.start_p.x + world_dx * last_ratio;
+    const float end_y = edge.start_p.y + world_dy * last_ratio;
+
+    // World x maps to image row and world y maps to image column.  Adding
+    // 0.5 converts pixel-centre coordinates to cell-boundary coordinates so
+    // floor() selects the containing cell for Amanatides-Woo traversal.
+    const double grid_start_row = grid.center_row +
+        (start_x - grid.center.x) / grid.resolution + 0.5;
+    const double grid_start_col = grid.center_col +
+        (start_y - grid.center.y) / grid.resolution + 0.5;
+    const double grid_end_row = grid.center_row +
+        (end_x - grid.center.x) / grid.resolution + 0.5;
+    const double grid_end_col = grid.center_col +
+        (end_y - grid.center.y) / grid.resolution + 0.5;
+
+    int row = static_cast<int>(std::floor(grid_start_row));
+    int col = static_cast<int>(std::floor(grid_start_col));
+    const int end_row = static_cast<int>(std::floor(grid_end_row));
+    const int end_col = static_cast<int>(std::floor(grid_end_col));
+    const auto occupied = [&grid](const int query_row,
+                                  const int query_col) {
+        // The configuration grid is authoritative only inside its raster.
+        // Historical contours/window policy handle the unobserved exterior.
+        if (query_row < 0 || query_row >= grid.occupied.rows ||
+            query_col < 0 || query_col >= grid.occupied.cols) {
+            return false;
+        }
+        return grid.occupied.at<std::uint8_t>(query_row, query_col) != 0;
+    };
+    if (occupied(row, col)) return false;
+
+    const double delta_row = grid_end_row - grid_start_row;
+    const double delta_col = grid_end_col - grid_start_col;
+    const int step_row = delta_row > 0.0 ? 1 : (delta_row < 0.0 ? -1 : 0);
+    const int step_col = delta_col > 0.0 ? 1 : (delta_col < 0.0 ? -1 : 0);
+    const double infinity = std::numeric_limits<double>::infinity();
+    const double t_delta_row = step_row == 0
+        ? infinity : 1.0 / std::abs(delta_row);
+    const double t_delta_col = step_col == 0
+        ? infinity : 1.0 / std::abs(delta_col);
+    double t_max_row = step_row == 0 ? infinity :
+        ((step_row > 0 ? std::floor(grid_start_row) + 1.0
+                       : std::floor(grid_start_row)) - grid_start_row) /
+        delta_row;
+    double t_max_col = step_col == 0 ? infinity :
+        ((step_col > 0 ? std::floor(grid_start_col) + 1.0
+                       : std::floor(grid_start_col)) - grid_start_col) /
+        delta_col;
+
+    // A line passing exactly through a cell corner belongs to all touched
+    // cells in a supercover.  Checking both orthogonal neighbours prevents
+    // diagonal corner cutting between two occupied configuration cells.
+    constexpr double kTraversalEpsilon = 1e-10;
+    const int max_iterations = grid.occupied.rows + grid.occupied.cols + 8;
+    int iterations = 0;
+    while ((row != end_row || col != end_col) &&
+           iterations++ < max_iterations) {
+        if (t_max_row + kTraversalEpsilon < t_max_col) {
+            row += step_row;
+            t_max_row += t_delta_row;
+            if (occupied(row, col)) return false;
+        } else if (t_max_col + kTraversalEpsilon < t_max_row) {
+            col += step_col;
+            t_max_col += t_delta_col;
+            if (occupied(row, col)) return false;
+        } else {
+            if (occupied(row + step_row, col) ||
+                occupied(row, col + step_col)) {
+                return false;
+            }
+            row += step_row;
+            col += step_col;
+            t_max_row += t_delta_row;
+            t_max_col += t_delta_col;
+            if (occupied(row, col)) return false;
+        }
+    }
+    return true;
+}
+
 bool ContourGraph::IsEdgeCollisionFreeInCloud(
     const ConnectPair& edge, const HeightPair& edge_height,
     const PointCloudPtr& cloud, const PointKdTreePtr& kdtree,
     const float endpoint_exclusion) {
+    if (const LocalCollisionGrid2D* grid = CollisionGridForCloud(cloud)) {
+        return IsEdgeCollisionFreeInGrid(edge, *grid, endpoint_exclusion);
+    }
     if (!cloud || cloud->empty() || !kdtree || !kdtree->getInputCloud()) {
         return true;
     }
@@ -1364,6 +2213,19 @@ bool ContourGraph::IsEdgeCollisionFreeInCloud(
 bool ContourGraph::IsPointCollisionFreeInCloud(
     const Point3D& point, const PointCloudPtr& cloud,
     const PointKdTreePtr& kdtree) {
+    if (const LocalCollisionGrid2D* grid = CollisionGridForCloud(cloud)) {
+        const int row = static_cast<int>(std::floor(
+            grid->center_row + (point.x - grid->center.x) /
+                grid->resolution + 0.5f));
+        const int col = static_cast<int>(std::floor(
+            grid->center_col + (point.y - grid->center.y) /
+                grid->resolution + 0.5f));
+        if (row < 0 || row >= grid->occupied.rows ||
+            col < 0 || col >= grid->occupied.cols) {
+            return true;
+        }
+        return grid->occupied.at<std::uint8_t>(row, col) == 0;
+    }
     if (!cloud || cloud->empty() || !kdtree || !kdtree->getInputCloud()) {
         return true;
     }
@@ -1388,14 +2250,43 @@ bool ContourGraph::IsNavNodesConnectFromContour(const NavNodePtr& node_ptr1, con
     return ContourGraph::IsCTNodesConnectFromContour(ctnode1, ctnode2);
 }
 
+bool ContourGraph::IsNavNodesConnectFromClipAttempt(
+    const NavNodePtr& node_ptr1, const NavNodePtr& node_ptr2) {
+    if (!node_ptr1 || !node_ptr2 || node_ptr1->is_odom || node_ptr2->is_odom ||
+        !node_ptr1->ctnode || !node_ptr2->ctnode) {
+        return false;
+    }
+    return IsCTNodesConnectFromClipAttempt(node_ptr1->ctnode,
+                                           node_ptr2->ctnode);
+}
+
 bool ContourGraph::IsCTNodesConnectFromContour(const CTNodePtr& ctnode1, const CTNodePtr& ctnode2) {
-    if (ctnode1 == ctnode2 || ctnode1->poly_ptr != ctnode2->poly_ptr) return false;
-    // Preserve FAR's incremental exploration behaviour: the endpoint created
-    // where the current raster cuts a wall may temporarily close the OpenCV
-    // contour and provide a route around the currently visible wall end. The
-    // corresponding NavNode is explicitly transient, and every generated
-    // route still has to pass the full persistent-static and current-dynamic
-    // cloud corridor checks below.
+    CTNodeStack chain;
+    return GetContourChain(ctnode1, ctnode2, chain);
+}
+
+bool ContourGraph::IsCTNodesConnectFromClipAttempt(
+    const CTNodePtr& ctnode1, const CTNodePtr& ctnode2) {
+    if (!ctnode1 || !ctnode2 || !ctnode1->is_boundary_clipped ||
+        !ctnode2->is_boundary_clipped) {
+        return false;
+    }
+    CTNodeStack chain;
+    bool crossed_artificial_cap = false;
+    return GetContourChain(ctnode1, ctnode2, chain, true,
+                           &crossed_artificial_cap) &&
+           crossed_artificial_cap;
+}
+
+bool ContourGraph::GetContourChain(const CTNodePtr& ctnode1,
+                                   const CTNodePtr& ctnode2,
+                                   CTNodeStack& chain,
+                                   const bool allow_artificial_cap,
+                                   bool* crossed_artificial_cap) {
+    chain.clear();
+    if (crossed_artificial_cap) *crossed_artificial_cap = false;
+    if (!ctnode1 || !ctnode2 || ctnode1 == ctnode2 ||
+        ctnode1->poly_ptr != ctnode2->poly_ptr) return false;
     // check for boundary collision
     const ConnectPair cedge = ConnectPair(ctnode1->position, ctnode2->position);
     for (const auto& contour : ContourGraph::boundary_contour_) {
@@ -1403,33 +2294,126 @@ bool ContourGraph::IsCTNodesConnectFromContour(const CTNodePtr& ctnode1, const C
             return false;
         }
     }
-    // forward search
-    CTNodePtr next_ctnode = ctnode1->front; 
-    while (next_ctnode != NULL && next_ctnode != ctnode1) {
-        if (next_ctnode == ctnode2) {
-            return true;
+
+    // Match upstream FAR: walk each contour direction until the target is
+    // reached. A different matched CT vertex owns the next reduced interval;
+    // an unmatched intermediate vertex may be skipped only while it remains
+    // inside kNearDist of the endpoint chord. Deep bends are handled by
+    // EnclosePolygonsCheck(), which promotes the blocking vertex as a
+    // contour-necessary node instead of encoding a dense execution route.
+    const auto trace = [&ctnode1, &ctnode2, allow_artificial_cap](
+        const bool use_front, CTNodeStack& candidate,
+        bool& candidate_crossed_cap) {
+        candidate.clear();
+        candidate_crossed_cap = false;
+        candidate.push_back(ctnode1);
+        CTNodePtr previous = ctnode1;
+        CTNodePtr current = use_front ? ctnode1->front : ctnode1->back;
+        while (current && current != ctnode1) {
+            // findContours closes every cropped obstacle into a polygon by
+            // drawing a segment along the raster/window boundary. That cap
+            // is not an observed obstacle surface and must never become a
+            // contour-follow topology edge. The CLIP vertex itself remains a
+            // valid snapshot-local endpoint through its physical neighbour.
+            if (ctnode1->poly_ptr &&
+                ctnode1->poly_ptr->is_boundary_clipped &&
+                IsArtificialBoundaryClosingSegment(
+                    previous->position, current->position)) {
+                if (!allow_artificial_cap) {
+                    candidate.clear();
+                    return false;
+                }
+                candidate_crossed_cap = true;
+            }
+            if (current == ctnode2) {
+                candidate.push_back(current);
+                return true;
+            }
+            if (current->is_global_match ||
+                !FARUtil::IsInCylinder(
+                    ctnode1->position, ctnode2->position,
+                    current->position, FARUtil::kNearDist, true)) {
+                candidate.clear();
+                return false;
+            }
+            candidate.push_back(current);
+            previous = current;
+            current = use_front ? current->front : current->back;
         }
-        if (next_ctnode->is_global_match || !FARUtil::IsInCylinder(ctnode1->position, ctnode2->position, next_ctnode->position, FARUtil::kNearDist, true)) 
-        {
-            break;
-        } else {
-            next_ctnode = next_ctnode->front;
+        candidate.clear();
+        return false;
+    };
+    CTNodeStack forward_chain;
+    CTNodeStack backward_chain;
+    bool forward_crossed_cap = false;
+    bool backward_crossed_cap = false;
+    const bool has_forward = trace(
+        true, forward_chain, forward_crossed_cap);
+    const bool has_backward = trace(
+        false, backward_chain, backward_crossed_cap);
+    if (!has_forward && !has_backward) return false;
+    // FAR tests front first and accepts it immediately. Preserve that stable
+    // contour-order tie break rather than selecting a route by arc length.
+    if (has_forward && has_backward) {
+        chain = forward_chain;
+        if (crossed_artificial_cap) {
+            *crossed_artificial_cap = forward_crossed_cap;
+        }
+    } else {
+        chain = has_forward ? forward_chain : backward_chain;
+        if (crossed_artificial_cap) {
+            *crossed_artificial_cap = has_forward
+                ? forward_crossed_cap : backward_crossed_cap;
         }
     }
-    // backward search
-    next_ctnode = ctnode1->back;
-    while (next_ctnode != NULL && next_ctnode != ctnode1) {
-        if (next_ctnode == ctnode2) {
-            return true;
+    return chain.size() >= 2;
+}
+
+bool ContourGraph::GetDenseContourChain(
+    const CTNodePtr& ctnode1, const CTNodePtr& ctnode2,
+    const CTNodeStack& sparse_chain, PointStack& dense_chain) {
+    dense_chain.clear();
+    if (!ctnode1 || !ctnode2 || sparse_chain.size() < 2 ||
+        sparse_chain.front() != ctnode1 || sparse_chain.back() != ctnode2 ||
+        ctnode1->poly_ptr != ctnode2->poly_ptr) {
+        return false;
+    }
+    const PolygonPtr polygon = ctnode1->poly_ptr;
+    if (!polygon || polygon->dense_vertices.size() < 2 ||
+        polygon->simplified_dense_indices.size() !=
+            polygon->vertices.size() ||
+        ctnode1->contour_index >=
+            polygon->simplified_dense_indices.size() ||
+        ctnode2->contour_index >=
+            polygon->simplified_dense_indices.size()) {
+        for (const CTNodePtr& node : sparse_chain) {
+            if (node) dense_chain.push_back(node->position);
         }
-        if (next_ctnode->is_global_match || !FARUtil::IsInCylinder(ctnode1->position, ctnode2->position, next_ctnode->position, FARUtil::kNearDist, true)) 
-        {
-            break;
-        } else {
-            next_ctnode = next_ctnode->back;
+        return dense_chain.size() >= 2;
+    }
+
+    const bool use_front = sparse_chain[1] == ctnode1->front;
+    const bool use_back = sparse_chain[1] == ctnode1->back;
+    if (!use_front && !use_back) return false;
+    const std::size_t count = polygon->dense_vertices.size();
+    std::size_t current = polygon->simplified_dense_indices[
+        ctnode1->contour_index] % count;
+    const std::size_t target = polygon->simplified_dense_indices[
+        ctnode2->contour_index] % count;
+    dense_chain.push_back(polygon->dense_vertices[current]);
+    for (std::size_t steps = 0; current != target && steps < count; ++steps) {
+        current = use_front
+            ? (current + count - 1) % count
+            : (current + 1) % count;
+        dense_chain.push_back(polygon->dense_vertices[current]);
+    }
+    if (current != target || dense_chain.size() < 2) {
+        dense_chain.clear();
+        for (const CTNodePtr& node : sparse_chain) {
+            if (node) dense_chain.push_back(node->position);
         }
     }
-    return false;
+    return dense_chain.size() >= 2;
 }
 
 CTNodePtr ContourGraph::FirstMatchedCTNode(const CTNodePtr& ctnode_ptr) {
@@ -1526,27 +2510,122 @@ bool ContourGraph::IsCTNodesConnectWithinOrder(const CTNodePtr& ctnode1, const C
 }
 
 void ContourGraph::EnclosePolygonsCheck() {
-    for (const auto& ctnode_ptr : ContourGraph::polys_ctnodes_) { // loop each polygon
-        if (ctnode_ptr->poly_ptr->is_pillar) continue;
-        const CTNodePtr start_ctnode_ptr = FirstMatchedCTNode(ctnode_ptr);
-        if (start_ctnode_ptr == NULL) continue;
-        CTNodePtr pre_ctnode_ptr = start_ctnode_ptr;
-        CTNodePtr cur_ctnode_ptr = start_ctnode_ptr->front;
-        while (cur_ctnode_ptr != start_ctnode_ptr) {
-            if (!cur_ctnode_ptr->is_global_match) {
-                cur_ctnode_ptr = cur_ctnode_ptr->front;
-                continue;
-            }
-            CTNodePtr block_vertex = NULL;
-            if (!IsCTNodesConnectWithinOrder(pre_ctnode_ptr, cur_ctnode_ptr, block_vertex) && block_vertex != NULL) {
-                if (block_vertex->is_ground_associate && FARUtil::IsPointInMarginRange(block_vertex->position)) {
-                    block_vertex->is_contour_necessary = true;
+    const auto is_static = [](const CTNodePtr& node) {
+        return node &&
+            (node->source == GraphNodeSource::STATIC_CANDIDATE ||
+             node->source == GraphNodeSource::STATIC_GLOBAL);
+    };
+    const auto is_routing_anchor = [this](const CTNodePtr& node) {
+        if (!node || node->free_direct == NodeFreeDirect::UNKNOW ||
+            node->free_direct == NodeFreeDirect::CONCAVE) {
+            return false;
+        }
+        if (node->is_global_match ||
+            node->free_direct == NodeFreeDirect::PILLAR) {
+            return true;
+        }
+        return node->surf_dirs.first * node->surf_dirs.second >=
+               ALIGN_ANGLE_COS;
+    };
+    const auto can_retain_as_necessary = [](const CTNodePtr& node) {
+        if (!node || node->free_direct != NodeFreeDirect::CONCAVE) {
+            return false;
+        }
+        // Missing terrain support is UNKNOWN in the local-only semantic
+        // pipeline, not evidence that the contour bend is invalid.  The
+        // graph-node admission stage still rejects a known height conflict.
+        return UsesLocalObservationWindow()
+            ? IsPointInsideCurrentObservationWindow(node->position)
+            : FARUtil::IsPointInMarginRange(node->position);
+    };
+
+    std::size_t necessary_count = 0;
+    for (const auto& polygon_start : ContourGraph::polys_ctnodes_) {
+        if (!polygon_start || !polygon_start->poly_ptr ||
+            polygon_start->poly_ptr->is_pillar ||
+            !is_static(polygon_start)) {
+            continue;
+        }
+
+        CTNodeStack ordered;
+        CTNodePtr current = polygon_start;
+        do {
+            ordered.push_back(current);
+            current = current->front;
+        } while (current && current != polygon_start &&
+                 ordered.size() <= polygon_start->poly_ptr->N);
+        if (!current || ordered.size() < 3) continue;
+
+        std::vector<std::size_t> anchors;
+        for (std::size_t index = 0; index < ordered.size(); ++index) {
+            if (is_routing_anchor(ordered[index])) anchors.push_back(index);
+        }
+        if (anchors.size() < 2) continue;
+
+        // Reduce every physical contour interval independently.  If an
+        // endpoint chord hides a bend farther than kNearDist, retain the
+        // farthest eligible CONCAVE vertex and recurse on both halves.  This
+        // is the contour equivalent of RDP: only the vertices required to
+        // express the bend enter the graph, while ordinary concave samples
+        // remain collision geometry only.
+        const auto mark_interval = [&ordered, &can_retain_as_necessary,
+                                    &necessary_count](
+            const std::vector<std::size_t>& path) {
+            std::function<void(std::size_t, std::size_t)> split;
+            split = [&ordered, &path, &can_retain_as_necessary,
+                     &necessary_count, &split](
+                const std::size_t begin, const std::size_t end) {
+                if (end <= begin + 1) return;
+                const PointPair chord(ordered[path[begin]]->position,
+                                      ordered[path[end]]->position);
+                float max_distance = FARUtil::kNearDist;
+                std::size_t split_index = end;
+                for (std::size_t index = begin + 1; index < end; ++index) {
+                    const CTNodePtr& candidate = ordered[path[index]];
+                    if (!can_retain_as_necessary(candidate)) continue;
+                    const float distance = FARUtil::DistanceToLineSeg2D(
+                        candidate->position, chord);
+                    if (distance > max_distance) {
+                        max_distance = distance;
+                        split_index = index;
+                    }
                 }
+                if (split_index == end) return;
+                CTNodePtr& necessary = ordered[path[split_index]];
+                if (!necessary->is_contour_necessary) {
+                    necessary->is_contour_necessary = true;
+                    ++necessary_count;
+                }
+                split(begin, split_index);
+                split(split_index, end);
+            };
+            split(0, path.size() - 1);
+        };
+
+        for (std::size_t anchor = 0; anchor < anchors.size(); ++anchor) {
+            const std::size_t begin = anchors[anchor];
+            const std::size_t end = anchors[(anchor + 1) % anchors.size()];
+            std::vector<std::size_t> path;
+            path.push_back(begin);
+            std::size_t index = begin;
+            bool artificial_cap = false;
+            while (index != end && path.size() <= ordered.size()) {
+                const std::size_t next = (index + 1) % ordered.size();
+                if (IsArtificialBoundaryClosingSegment(
+                        ordered[index]->position, ordered[next]->position)) {
+                    artificial_cap = true;
+                }
+                path.push_back(next);
+                index = next;
             }
-            pre_ctnode_ptr = cur_ctnode_ptr;
-            cur_ctnode_ptr = cur_ctnode_ptr->front;
+            if (!artificial_cap && path.size() >= 3) {
+                mark_interval(path);
+            }
         }
     }
+    ROS_INFO_THROTTLE(
+        5.0, "CG contour reduction retained necessary_concave=%zu",
+        necessary_count);
 }
 
 void ContourGraph::CreateCTNode(const Point3D& pos, CTNodePtr& ctnode_ptr, const PolygonPtr& poly_ptr, const bool& is_pillar) {
@@ -1566,10 +2645,34 @@ void ContourGraph::CreateCTNode(const Point3D& pos, CTNodePtr& ctnode_ptr, const
 
 void ContourGraph::CreatePolygon(const PointStack& poly_points,
                                  PolygonPtr& poly_ptr,
-                                 const GraphNodeSource source) {
+                                 const GraphNodeSource source,
+                                 const PointStack& dense_points,
+                                 const std::vector<std::size_t>&
+                                     simplified_dense_indices) {
     poly_ptr = std::make_shared<Polygon>();
     poly_ptr->N = poly_points.size();
     poly_ptr->vertices = poly_points;
+    poly_ptr->dense_vertices = dense_points.empty()
+        ? poly_points : dense_points;
+    poly_ptr->simplified_dense_indices = simplified_dense_indices;
+    if (poly_ptr->simplified_dense_indices.size() != poly_points.size()) {
+        poly_ptr->simplified_dense_indices.clear();
+        poly_ptr->simplified_dense_indices.reserve(poly_points.size());
+        for (const Point3D& vertex : poly_points) {
+            std::size_t best_index = 0;
+            float best_distance = FARUtil::kINF;
+            for (std::size_t index = 0;
+                 index < poly_ptr->dense_vertices.size(); ++index) {
+                const float distance =
+                    (vertex - poly_ptr->dense_vertices[index]).norm_flat();
+                if (distance < best_distance) {
+                    best_distance = distance;
+                    best_index = index;
+                }
+            }
+            poly_ptr->simplified_dense_indices.push_back(best_index);
+        }
+    }
     poly_ptr->is_robot_inside = FARUtil::PointInsideAPoly(poly_points, odom_node_ptr_->position);
     float perimeter = 0.0f;
     poly_ptr->is_pillar = this->IsAPillarPolygon(poly_points, perimeter);
@@ -1582,66 +2685,6 @@ void ContourGraph::CreatePolygon(const PointStack& poly_points,
     }
     poly_ptr->perimeter = perimeter;
     poly_ptr->source = source;
-}
-
-NavNodePtr ContourGraph::NearestNavNodeForCTNode(const CTNodePtr& ctnode_ptr, const NodePtrStack& near_nodes) {
-    float nearest_dist = FARUtil::kINF;
-    NavNodePtr nearest_node = NULL;
-    float min_edist = FARUtil::kINF;
-    const float dir_thred = 0.5f; //cos(pi/3);
-    for (const auto& node_ptr : near_nodes) {
-        if (node_ptr->is_odom || node_ptr->is_navpoint || FARUtil::IsOutsideGoal(node_ptr) || !IsInMatchHeight(ctnode_ptr, node_ptr)) continue;
-        const bool static_contour =
-            ctnode_ptr->source == GraphNodeSource::STATIC_CANDIDATE ||
-            ctnode_ptr->source == GraphNodeSource::STATIC_GLOBAL;
-        const bool static_node =
-            node_ptr->source == GraphNodeSource::STATIC_CANDIDATE ||
-            node_ptr->source == GraphNodeSource::STATIC_GLOBAL;
-        const bool dynamic_contour =
-            ctnode_ptr->source == GraphNodeSource::DYNAMIC_LOCAL;
-        const bool dynamic_node =
-            node_ptr->source == GraphNodeSource::DYNAMIC_LOCAL;
-        if ((static_contour && !static_node) ||
-            (dynamic_contour && !dynamic_node)) continue;
-        // no match with pillar to non-pillar local vertices
-        if ((node_ptr->free_direct == NodeFreeDirect::PILLAR && ctnode_ptr->free_direct != NodeFreeDirect::PILLAR) ||
-            (ctnode_ptr->free_direct == NodeFreeDirect::PILLAR && node_ptr->free_direct != NodeFreeDirect::PILLAR)) 
-        {
-            continue;
-        }
-        float dist_thred = FARUtil::kMatchDist;
-        float dir_score = 0.0f;
-        if (dynamic_contour && dynamic_node) {
-            // Current dynamic corners may move and change slightly with voxel
-            // quantisation. Source/type checks above plus nearest one-to-one
-            // assignment make the full match radius safe and stable.
-            dir_score = 1.0f;
-        } else if (ctnode_ptr->free_direct != NodeFreeDirect::PILLAR && node_ptr->free_direct != NodeFreeDirect::UNKNOW && node_ptr->free_direct != NodeFreeDirect::PILLAR) {
-            if (ctnode_ptr->free_direct == node_ptr->free_direct) {
-                const Point3D topo_dir1 = FARUtil::SurfTopoDirect(node_ptr->surf_dirs);
-                const Point3D topo_dir2 = FARUtil::SurfTopoDirect(ctnode_ptr->surf_dirs);
-                dir_score = (topo_dir1 * topo_dir2 - dir_thred) / (1.0f - dir_thred);
-            }
-        } else if (node_ptr->free_direct == NodeFreeDirect::PILLAR && ctnode_ptr->free_direct == NodeFreeDirect::PILLAR) {
-            dir_score = 0.5f;
-        }
-        dist_thred *= dir_score;
-        const float edist = (node_ptr->position - ctnode_ptr->position).norm_flat();
-        if (edist < dist_thred && edist < min_edist) {
-            nearest_node = node_ptr;
-            min_edist = edist;
-        }
-    }
-    if (nearest_node != NULL && nearest_node->is_contour_match) {
-        const float pre_dist = (nearest_node->position - nearest_node->ctnode->position).norm_flat();
-        if (min_edist < pre_dist) {
-            // reset matching for previous ctnode
-            RemoveMatchWithNavNode(nearest_node);
-        } else {
-            nearest_node = NULL;
-        }
-    }
-    return nearest_node;
 }
 
 void ContourGraph::AnalysisSurfAngleAndConvexity(const CTNodeStack& contour_graph) {

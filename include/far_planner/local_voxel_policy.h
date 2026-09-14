@@ -14,9 +14,13 @@ enum class LocalVoxelLayer {
 };
 
 struct LocalVoxelPolicyParams {
+    // Retained for schema/backward compatibility.  Non-dynamic high-cost
+    // voxels no longer need to belong to this set to be ordinary obstacles.
     std::vector<uint32_t> static_labels{2, 3, 4, 5, 6, 7, 8};
     std::vector<uint32_t> terrain_labels{0, 1, 9};
     std::vector<uint32_t> dynamic_labels{11, 12, 13, 14, 15, 16, 17, 18};
+    // Retained as an input-contract setting and diagnostic value. Confidence
+    // no longer demotes high-cost geometry into the transient layer.
     float minimum_semantic_confidence = 0.55f;
     float obstacle_cost_threshold = 0.60f;
 };
@@ -29,10 +33,14 @@ inline bool LocalVoxelLabelInSet(
 /**
  * Classify one voxel from the atomic high-resolution local snapshot.
  *
- * Dynamic semantics are an unconditional transient obstacle. Every other
- * obstacle contour must first pass the final fused-cost gate. Semantic role
- * then decides whether that high-cost contour is static or transient; this
- * prevents a high semantic prior by itself from bypassing the common gate.
+ * Only an explicitly dynamic semantic label enters the transient layer.
+ * Every other voxel must pass the final fused-cost gate before it can be an
+ * obstacle; once it does, it is treated as ordinary/static geometry even when
+ * its label is unknown or its semantic confidence is low.  This deliberately
+ * makes geometry conservative when the upstream model cannot distinguish a
+ * person or vegetation: motion is never inferred merely from uncertainty.
+ * Low-cost terrain labels provide height support and all other low-cost or
+ * unscored voxels are ignored.
  */
 inline LocalVoxelLayer ClassifyLocalVoxel(
     const uint32_t label, const bool has_semantic_label,
@@ -57,13 +65,12 @@ inline LocalVoxelLayer ClassifyLocalVoxel(
         return LocalVoxelLayer::IGNORE;
     }
 
-    if (has_semantic_label &&
-        LocalVoxelLabelInSet(label, params.static_labels)) {
-        return confidence >= params.minimum_semantic_confidence
-            ? LocalVoxelLayer::STATIC_OBSTACLE
-            : LocalVoxelLayer::TRANSIENT_OBSTACLE;
-    }
-    return LocalVoxelLayer::TRANSIENT_OBSTACLE;
+    // label/confidence may help diagnostics, but they do not turn an
+    // unrecognised high-cost obstacle into a dynamic obstacle.  The temporal
+    // graph lifecycle later decides whether this ordinary obstacle is stable
+    // enough to retain as historical topology.
+    (void)confidence;
+    return LocalVoxelLayer::STATIC_OBSTACLE;
 }
 
 #endif  // FAR_PLANNER_LOCAL_VOXEL_POLICY_H

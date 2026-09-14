@@ -1,0 +1,217 @@
+Panels:
+  - Class: rviz/Displays
+    Name: Displays
+    Property Tree Widget:
+      Expanded:
+        - /Debug Pipeline1
+        - /Graph Result1
+      Splitter Ratio: 0.55
+    Tree Height: 720
+  - Class: rviz/Selection
+    Name: Selection
+  - Class: rviz/Views
+    Name: Views
+  - Class: rviz/Time
+    Name: Time
+    SyncMode: 0
+    SyncSource: Debug Classification
+Preferences:
+  PromptSaveOnExit: false
+Toolbars:
+  toolButtonStyle: 2
+Visualization Manager:
+  Class: ""
+  Displays:
+    - Alpha: 0.35
+      Cell Size: 1
+      Class: rviz/Grid
+      Color: 120; 120; 120
+      Enabled: true
+      Name: Grid
+      Plane: XY
+      Plane Cell Count: 40
+      Reference Frame: <Fixed Frame>
+      Value: true
+    - Class: rviz/Group
+      Displays:
+        - Alpha: 1
+          Axis: Z
+          Channel Name: intensity
+          Class: rviz/PointCloud2
+          Color: 255; 255; 255
+          Color Transformer: RGB8
+          Decay Time: 0
+          Enabled: true
+          Invert Rainbow: false
+          Name: Debug Classification
+          Position Transformer: XYZ
+          Queue Size: 2
+          Selectable: true
+          Size (Pixels): 3
+          Size (m): 0.06
+          Style: Flat Squares
+          Topic: /far_debug/classified_cloud
+          Unreliable: false
+          Use Fixed Frame: true
+          Use rainbow: false
+          Value: true
+        - Class: rviz/MarkerArray
+          Enabled: true
+          Marker Topic: /far_debug/current_contours
+          Name: Static + Dynamic Contours
+          Namespaces: {}
+          Queue Size: 2
+          Value: true
+        - Class: rviz/MarkerArray
+          Enabled: true
+          Marker Topic: /far_debug/current_ctnodes
+          Name: Typed CTNodes
+          Namespaces: {}
+          Queue Size: 2
+          Value: true
+        - Class: rviz/MarkerArray
+          Enabled: true
+          Marker Topic: /far_debug/graph_before_update
+          Name: Graph Before Update
+          Namespaces: {}
+          Queue Size: 2
+          Value: true
+        - Class: rviz/MarkerArray
+          Enabled: true
+          Marker Topic: /far_debug/match_results
+          Name: Identity Match Decisions
+          Namespaces: {}
+          Queue Size: 2
+          Value: true
+        - Class: rviz/MarkerArray
+          Enabled: true
+          Marker Topic: /far_debug/duplicate_suppressed
+          Name: Same-frame Suppression
+          Namespaces: {}
+          Queue Size: 2
+          Value: true
+      Enabled: true
+      Name: Debug Pipeline
+    - Class: rviz/Group
+      Displays:
+        - Class: rviz/MarkerArray
+          Enabled: true
+          Marker Topic: /far_debug/color_legend
+          Name: Color Legend
+          Namespaces:
+            debug_color_legend_0: false
+            debug_color_legend_1: false
+            debug_color_legend_2: true
+            debug_color_legend_3: true
+          Queue Size: 2
+          Value: true
+        - Class: rviz/MarkerArray
+          Enabled: true
+          Marker Topic: /far_debug/node_events
+          Name: Node Create Promote Remove
+          Namespaces: {}
+          Queue Size: 2
+          Value: true
+        - Class: rviz/MarkerArray
+          Enabled: true
+          Marker Topic: /far_debug/edge_events
+          Name: Edge Create Block Restore Delete
+          Namespaces: {}
+          Queue Size: 2
+          Value: true
+        - Class: rviz/MarkerArray
+          Enabled: true
+          Marker Topic: /far_debug/edge_diagnostics
+          Name: Edge Rejection Reasons
+          Namespaces: {}
+          Queue Size: 2
+          Value: true
+        - Class: rviz/MarkerArray
+          Enabled: true
+          Marker Topic: /far_debug/graph_after_update
+          Name: Graph After Update
+          Namespaces: {}
+          Queue Size: 2
+          Value: true
+        - Class: rviz/MarkerArray
+          Enabled: true
+          Marker Topic: /viz_current_eligible_graph
+          Name: Eligible Graph
+          Namespaces: {}
+          Queue Size: 2
+          Value: true
+        - Class: rviz/MarkerArray
+          Enabled: true
+          Marker Topic: /viz_current_search_graph
+          Name: Current Search Graph
+          Namespaces: {}
+          Queue Size: 2
+          Value: true
+      Enabled: true
+      Name: Graph Result
+    - Class: rviz/Image
+      Enabled: true
+      Image Topic: /far_debug/frame_summary_image
+      Max Value: 1
+      Median window: 5
+      Min Value: 0
+      Name: Four-stage Summary
+      Normalize Range: true
+      Queue Size: 2
+      Transport Hint: raw
+      Unreliable: false
+      Value: true
+  Enabled: true
+  Global Options:
+    Background Color: 35; 35; 35
+    Default Light: true
+    Fixed Frame: map_start
+    Frame Rate: 30
+  Name: root
+  Tools:
+    - Class: rviz/Interact
+      Hide Inactive Objects: true
+    - Class: rviz/MoveCamera
+    - Class: rviz/Select
+    - Class: rviz/FocusCamera
+    - Class: rviz/Measure
+    - Class: rviz/SetGoal
+      Topic: /move_base_simple/goal
+    - Class: rviz/PublishPoint
+      Single click: true
+      Topic: /clicked_point
+  Value: true
+  Views:
+    Current:
+      Class: rviz/Orbit
+      Distance: 24
+      Enable Stereo Rendering:
+        Stereo Eye Separation: 0.06
+        Stereo Focal Distance: 1
+        Swap Stereo Eyes: false
+        Value: false
+      Field of View: 0.785398
+      Focal Point:
+        X: 0
+        Y: 0
+        Z: 0
+      Focal Shape Fixed Size: true
+      Focal Shape Size: 0.05
+      Invert Z Axis: false
+      Name: Current View
+      Near Clip Distance: 0.01
+      Pitch: 1.55
+      Target Frame: map_start
+      Yaw: 3.14
+    Saved: ~
+Window Geometry:
+  Displays:
+    collapsed: false
+  Four-stage Summary:
+    collapsed: false
+  Height: 1000
+  Hide Left Dock: false
+  Hide Right Dock: true
+  Width: 1700
+  X: 40
+  Y: 40

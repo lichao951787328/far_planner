@@ -8,10 +8,12 @@
 #include "graph_planner.h"
 #include "map_handler.h"
 #include "local_voxel_policy.h"
+#include "local_voxel_morphology.h"
 #include "planner_visualizer.h"
 #include "scan_handler.h"
 #include "graph_msger.h"
 #include "waypoint_projection_policy.h"
+#include "debug_visualization.h"
 
 #include <cstdint>
 #include <fstream>
@@ -44,6 +46,16 @@ struct FARMasterParams {
     std::string world_frame;
     std::string semantic_map_topic;
     std::string local_voxel_topic;
+    // Robot/body frame in which the upstream local voxel box bounds are
+    // defined. Used only to stamp the observation footprint at cloud time.
+    std::string local_voxel_observation_frame;
+    // Source-frame XY opening applied independently to static, explicit
+    // dynamic and terrain-support layers before any FAR subsystem sees them.
+    bool local_voxel_morphology_enabled = true;
+    // Keep a fine, fixed raster so tuning the physical opening radius does
+    // not also change the projection geometry.
+    float local_voxel_morphology_raster_resolution = 0.01f;
+    float local_voxel_morphology_radius = 0.01f;
 };
 
 class FARMaster {
@@ -72,6 +84,7 @@ private:
     ros::Publisher  runtime_pub_, planning_time_pub_, traverse_time_pub_, reach_goal_pub_;
     ros::Publisher  semantic_snapshot_time_pub_, semantic_update_time_pub_;
     ros::Publisher  semantic_callback_time_pub_, main_loop_time_pub_;
+    ros::Publisher  debug_frame_done_pub_;
 
     ros::Timer planning_event_;
     std_msgs::Float32 runtimer_, plan_timer_;
@@ -150,6 +163,23 @@ private:
     CTNodeStack new_ctnodes_;
     std::vector<PointStack> static_contours_;
     std::vector<PointStack> dynamic_contours_;
+    std::vector<PointStack> static_dense_contours_;
+    std::vector<PointStack> dynamic_dense_contours_;
+    std::vector<std::vector<std::size_t>> static_simplified_dense_indices_;
+    std::vector<std::vector<std::size_t>> dynamic_simplified_dense_indices_;
+
+    // Optional, read-only frame diagnostics. These buffers are populated only
+    // when Debug/enabled is true and never participate in planning decisions.
+    DebugVisualizationParams debug_params_;
+    GraphDebugVisualizer debug_visualizer_;
+    std::vector<DebugVoxelPoint> latest_debug_voxels_;
+    std_msgs::Header latest_debug_source_header_;
+    DebugGraphSnapshot debug_graph_before_;
+    cv::Mat debug_static_base_img_;
+    cv::Mat debug_static_processed_img_;
+    cv::Mat debug_dynamic_base_img_;
+    cv::Mat debug_dynamic_processed_img_;
+    std::uint64_t debug_frame_sequence_ = 0;
 
     tf::TransformListener* tf_listener_;
 
@@ -288,6 +318,10 @@ private:
         near_nav_graph_.clear();
         static_contours_.clear();
         dynamic_contours_.clear();
+        static_dense_contours_.clear();
+        dynamic_dense_contours_.clear();
+        static_simplified_dense_indices_.clear();
+        dynamic_simplified_dense_indices_.clear();
     }
 
     inline void ResetInternalValues() {

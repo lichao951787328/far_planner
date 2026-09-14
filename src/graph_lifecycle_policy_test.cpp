@@ -4,6 +4,28 @@
 
 namespace {
 
+TEST(GraphLifecyclePolicy, StaticCornerMatchRadiusHasMetricHardCap) {
+    EXPECT_FLOAT_EQ(0.4f,
+                    StaticCornerMatchRadius(0.4f, 0.6f, false, 1.0f));
+    EXPECT_FLOAT_EQ(0.4f,
+                    StaticCornerMatchRadius(0.4f, 0.6f, true, 0.0f));
+    EXPECT_FLOAT_EQ(0.5f,
+                    StaticCornerMatchRadius(0.4f, 0.6f, true, 0.5f));
+    EXPECT_FLOAT_EQ(0.6f,
+                    StaticCornerMatchRadius(0.4f, 0.6f, true, 1.0f));
+    EXPECT_LE(StaticCornerMatchRadius(0.4f, 0.6f, true, 2.0f), 0.6f);
+}
+
+TEST(GraphLifecyclePolicy, VerifiedOppositeFreeDirectionsCannotMatch) {
+    EXPECT_FALSE(AreStaticCornerFreeDirectionsCompatible(true, -1.0f));
+    EXPECT_FALSE(AreStaticCornerFreeDirectionsCompatible(true, -0.01f));
+    EXPECT_TRUE(AreStaticCornerFreeDirectionsCompatible(true, 0.0f));
+    EXPECT_TRUE(AreStaticCornerFreeDirectionsCompatible(true, 1.0f));
+    // Missing grid evidence falls back to the tight positional gate instead
+    // of allowing a noisy direction to reject a nearly identical corner.
+    EXPECT_TRUE(AreStaticCornerFreeDirectionsCompatible(false, -1.0f));
+}
+
 NavNode MakeNode(const GraphNodeSource source) {
     NavNode node;
     node.source = source;
@@ -62,6 +84,63 @@ void MatchStableNodeToPolygon(const NavNodePtr& node,
     node->ctnode->source = GraphNodeSource::STATIC_CANDIDATE;
 }
 
+TEST(GraphLifecyclePolicy,
+     StaticHistoryMergeAcceptsUnknownAndExplicitFreeButNotOccupied) {
+    NavNode keeper = MakeNode(GraphNodeSource::STATIC_GLOBAL);
+    NavNode obsolete = MakeNode(GraphNodeSource::STATIC_CANDIDATE);
+    keeper.position = Point3D(0.0f, 0.0f, 0.5f);
+    obsolete.position = Point3D(0.30f, 0.0f, 0.5f);
+    keeper.observed_in_semantic_snapshot = true;
+    keeper.is_contour_match = true;
+    keeper.ctnode = std::make_shared<CTNode>();
+    obsolete.observed_in_semantic_snapshot = false;
+    obsolete.is_contour_match = false;
+    keeper.free_direct = obsolete.free_direct = NodeFreeDirect::CONVEX;
+    keeper.is_free_space_dir_reliable = true;
+    obsolete.is_free_space_dir_reliable = true;
+    keeper.free_space_dir = Point3D(1.0f, 0.0f, 0.0f);
+    obsolete.free_space_dir = Point3D(1.0f, 0.0f, 0.0f);
+    const float direction_cos = std::cos(30.0f * M_PI / 180.0f);
+
+    EXPECT_TRUE(AreStaticHistoryNodesMergeCompatible(
+        keeper, obsolete, StaticNodeEvidence::UNKNOWN,
+        0.4f, 0.5f, direction_cos));
+    EXPECT_TRUE(AreStaticHistoryNodesMergeCompatible(
+        keeper, obsolete, StaticNodeEvidence::EXPLICIT_FREE,
+        0.4f, 0.5f, direction_cos));
+    EXPECT_FALSE(AreStaticHistoryNodesMergeCompatible(
+        keeper, obsolete, StaticNodeEvidence::STATIC_OCCUPIED,
+        0.4f, 0.5f, direction_cos));
+}
+
+TEST(GraphLifecyclePolicy,
+     StaticHistoryMergeRejectsOppositeDirectionsAndTwoCurrentCorners) {
+    NavNode keeper = MakeNode(GraphNodeSource::STATIC_GLOBAL);
+    NavNode obsolete = MakeNode(GraphNodeSource::STATIC_GLOBAL);
+    keeper.position = Point3D(0.0f, 0.0f, 0.5f);
+    obsolete.position = Point3D(0.20f, 0.0f, 0.5f);
+    keeper.observed_in_semantic_snapshot = true;
+    keeper.is_contour_match = true;
+    keeper.ctnode = std::make_shared<CTNode>();
+    keeper.free_direct = obsolete.free_direct = NodeFreeDirect::CONVEX;
+    keeper.is_free_space_dir_reliable = true;
+    obsolete.is_free_space_dir_reliable = true;
+    keeper.free_space_dir = Point3D(1.0f, 0.0f, 0.0f);
+    obsolete.free_space_dir = Point3D(-1.0f, 0.0f, 0.0f);
+    const float direction_cos = std::cos(30.0f * M_PI / 180.0f);
+
+    EXPECT_FALSE(AreStaticHistoryNodesMergeCompatible(
+        keeper, obsolete, StaticNodeEvidence::UNKNOWN,
+        0.4f, 0.5f, direction_cos));
+    obsolete.free_space_dir = keeper.free_space_dir;
+    obsolete.observed_in_semantic_snapshot = true;
+    obsolete.is_contour_match = true;
+    obsolete.ctnode = std::make_shared<CTNode>();
+    EXPECT_FALSE(AreStaticHistoryNodesMergeCompatible(
+        keeper, obsolete, StaticNodeEvidence::UNKNOWN,
+        0.4f, 0.5f, direction_cos));
+}
+
 void ConnectValidatedContourRoute(const NavNodePtr& first,
                                   const NavNodePtr& second) {
     ConnectActiveStaticEdge(first, second);
@@ -72,6 +151,31 @@ void ConnectValidatedContourRoute(const NavNodePtr& first,
     forward.validation_mode = reverse.validation_mode =
         EdgeValidationMode::CONTOUR_FOLLOW;
     forward.has_clearance_geometry = reverse.has_clearance_geometry = true;
+}
+
+TEST(GraphLifecyclePolicy, CurrentMatchedGlobalCanBridgeLocalContour) {
+    const PolygonPtr polygon = MakeStaticPolygon();
+    const NavNodePtr historical =
+        MakeNodePtr(91, GraphNodeSource::STATIC_GLOBAL);
+    const NavNodePtr current =
+        MakeNodePtr(92, GraphNodeSource::STATIC_CANDIDATE);
+    MatchStableNodeToPolygon(historical, polygon);
+    current->is_contour_match = true;
+    current->ctnode = std::make_shared<CTNode>();
+    current->ctnode->poly_ptr = polygon;
+    current->ctnode->source = GraphNodeSource::STATIC_CANDIDATE;
+    ConnectValidatedContourRoute(historical, current);
+
+    EXPECT_TRUE(HasCurrentValidatedContourIncidentEdge(*historical));
+    EXPECT_TRUE(IsStaticGlobalEligibleForCurrentSearch(
+        *historical, false));
+
+    historical->observed_in_semantic_snapshot = false;
+    EXPECT_FALSE(HasCurrentValidatedContourIncidentEdge(*historical));
+    EXPECT_FALSE(IsStaticGlobalEligibleForCurrentSearch(
+        *historical, false));
+    EXPECT_TRUE(IsStaticGlobalEligibleForCurrentSearch(
+        *historical, true));
 }
 
 TEST(GraphLifecyclePolicy, StaticCandidateNeedsThreeObservations) {
@@ -283,7 +387,7 @@ TEST(GraphLifecyclePolicy, CroppedContourEndpointNeverBecomesGlobalHistory) {
                   1.0f, 20.0f, 28.5f, 3, 3));
 }
 
-TEST(GraphLifecyclePolicy, CroppedEndpointCannotBorrowConfirmedCornerIdentity) {
+TEST(GraphLifecyclePolicy, CroppedEndpointCannotBorrowAnyPreviousIdentity) {
     NavNode global = MakeNode(GraphNodeSource::STATIC_GLOBAL);
     NavNode ordinary_candidate = MakeNode(GraphNodeSource::STATIC_CANDIDATE);
     NavNode transient_candidate =
@@ -294,7 +398,7 @@ TEST(GraphLifecyclePolicy, CroppedEndpointCannotBorrowConfirmedCornerIdentity) {
         true, true, global));
     EXPECT_FALSE(IsContourEndpointLifetimeMatchCompatible(
         true, true, ordinary_candidate));
-    EXPECT_TRUE(IsContourEndpointLifetimeMatchCompatible(
+    EXPECT_FALSE(IsContourEndpointLifetimeMatchCompatible(
         true, true, transient_candidate));
     EXPECT_TRUE(IsContourEndpointLifetimeMatchCompatible(
         true, false, global));
@@ -307,13 +411,47 @@ TEST(GraphLifecyclePolicy, CurrentCroppedEndpointIsATerminalCandidateOnlyNow) {
     endpoint.is_transient_contour_endpoint = true;
     endpoint.observed_in_semantic_snapshot = true;
     endpoint.free_direct = NodeFreeDirect::CONVEX;
+    endpoint.is_contour_match = true;
+    endpoint.ctnode = std::make_shared<CTNode>();
 
+    EXPECT_TRUE(IsCurrentSnapshotContourEndpoint(endpoint));
     EXPECT_TRUE(IsGraphNodeSearchEligible(endpoint));
     EXPECT_TRUE(IsGoalConnectionCandidate(endpoint));
+    EXPECT_TRUE(IsStartConnectionCandidate(endpoint));
 
     endpoint.observed_in_semantic_snapshot = false;
+    EXPECT_FALSE(IsCurrentSnapshotContourEndpoint(endpoint));
     EXPECT_FALSE(IsGraphNodeSearchEligible(endpoint));
     EXPECT_FALSE(IsGoalConnectionCandidate(endpoint));
+    EXPECT_FALSE(IsStartConnectionCandidate(endpoint));
+
+    endpoint.observed_in_semantic_snapshot = true;
+    endpoint.is_contour_match = false;
+    EXPECT_FALSE(IsCurrentSnapshotContourEndpoint(endpoint));
+    endpoint.is_contour_match = true;
+    endpoint.ctnode.reset();
+    EXPECT_FALSE(IsCurrentSnapshotContourEndpoint(endpoint));
+}
+
+TEST(GraphLifecyclePolicy, ClipAttemptIsSearchableButNotClearanceGeometry) {
+    const NavNodePtr first =
+        MakeNodePtr(1101, GraphNodeSource::STATIC_CANDIDATE);
+    const NavNodePtr second =
+        MakeNodePtr(1102, GraphNodeSource::STATIC_CANDIDATE);
+    first->observed_in_semantic_snapshot = true;
+    second->observed_in_semantic_snapshot = true;
+    first->is_transient_contour_endpoint = true;
+    second->is_transient_contour_endpoint = true;
+    ConnectActiveStaticEdge(first, second);
+    GraphEdgeState& forward = first->edge_states[second->id];
+    GraphEdgeState& reverse = second->edge_states[first->id];
+    forward.validation_mode = reverse.validation_mode =
+        EdgeValidationMode::CLIP_ATTEMPT;
+    forward.has_clearance_geometry = reverse.has_clearance_geometry = false;
+
+    EXPECT_TRUE(IsContourTopologyMode(forward.validation_mode));
+    EXPECT_TRUE(IsGraphEdgeSearchEligible(*first, *second));
+    EXPECT_FALSE(forward.has_clearance_geometry);
 }
 
 TEST(GraphLifecyclePolicy, StartQueryUsesConfirmedStaticOutsideCurrentSnapshot) {
@@ -569,6 +707,25 @@ TEST(GraphLifecyclePolicy, OneBadGeometryFrameBlocksButDoesNotEraseHistory) {
     EXPECT_TRUE(state.has_clearance_geometry);
 }
 
+TEST(GraphLifecyclePolicy, ContourPhysicalBlockUsesThreeFrameIdentityDelay) {
+    GraphEdgeState state;
+    state.source = GraphEdgeSource::STATIC_CONTOUR;
+    state.validation_mode = EdgeValidationMode::CONTOUR_FOLLOW;
+    state.has_clearance_geometry = true;
+
+    ApplyContourStaticValidationObservation(state, false, 3);
+    EXPECT_FALSE(state.IsActive());
+    EXPECT_EQ(1, state.static_visibility_misses);
+    ApplyContourStaticValidationObservation(state, false, 3);
+    EXPECT_EQ(2, state.static_visibility_misses);
+    ApplyContourStaticValidationObservation(state, false, 3);
+    EXPECT_EQ(3, state.static_visibility_misses);
+
+    ApplyContourStaticValidationObservation(state, true, 3);
+    EXPECT_TRUE(state.IsActive());
+    EXPECT_EQ(0, state.static_visibility_misses);
+}
+
 TEST(GraphLifecyclePolicy, VisibilityFailureBlocksImmediatelyAndDeletesAfterThree) {
     GraphEdgeState state;
     state.source = GraphEdgeSource::STATIC_VISIBILITY;
@@ -617,7 +774,7 @@ TEST(GraphLifecyclePolicy, VisibilityDebounceAppliesOnlyToStaticGeometry) {
         EdgeRejectReason::STATIC_CLOUD_BLOCKED));
 }
 
-TEST(GraphLifecyclePolicy, ContourEdgeRemovalNeedsConfirmedStaticBypass) {
+TEST(GraphLifecyclePolicy, ContourEdgeRemovalNeedsConfirmedCurrentContourBypass) {
     NavNodePtr first = MakeNodePtr(1, GraphNodeSource::STATIC_GLOBAL);
     NavNodePtr second = MakeNodePtr(2, GraphNodeSource::STATIC_GLOBAL);
     NavNodePtr replacement_first =
@@ -649,7 +806,10 @@ TEST(GraphLifecyclePolicy, ContourEdgeRemovalNeedsConfirmedStaticBypass) {
         replacement_second->edge_states[replacement_first->id];
     forward.validation_mode = reverse.validation_mode =
         EdgeValidationMode::CONTOUR_FOLLOW;
-    forward.has_clearance_geometry = reverse.has_clearance_geometry = true;
+    // A FAR contour relation is topology rather than a stored executable
+    // clearance route, so current-contour replacement evidence must not
+    // require has_clearance_geometry.
+    forward.has_clearance_geometry = reverse.has_clearance_geometry = false;
     EXPECT_TRUE(HasActiveStaticAlternatePathWithoutEdge(
         first, second, graph));
 
@@ -712,7 +872,7 @@ TEST(GraphLifecyclePolicy, ReplacementRequiresAllThreePrecommitGuards) {
     EXPECT_TRUE(ShouldCommitStaticCornerReplacement(true, true, true));
 }
 
-TEST(GraphLifecyclePolicy, ReplacementRouteRequiresStableCurrentEndpoints) {
+TEST(GraphLifecyclePolicy, ReplacementRouteRequiresConfirmedCurrentEndpoints) {
     const PolygonPtr polygon = MakeStaticPolygon();
     const NavNodePtr obsolete =
         MakeNodePtr(1, GraphNodeSource::STATIC_GLOBAL);
@@ -726,13 +886,52 @@ TEST(GraphLifecyclePolicy, ReplacementRouteRequiresStableCurrentEndpoints) {
 
     EXPECT_TRUE(IsStableValidatedContourReplacement(
         first, second, obsolete, polygon));
+    // Three consecutive segment-interior observations supply temporal
+    // stability. A nearby-new-point reset of FAR's optional RANSAC filter
+    // must not prevent the already confirmed endpoint from replacing a stale
+    // historical corner forever.
     second->is_finalized = false;
-    EXPECT_FALSE(IsStableValidatedContourReplacement(
+    EXPECT_TRUE(IsStableValidatedContourReplacement(
         first, second, obsolete, polygon));
     second->is_finalized = true;
     second->edge_states[first->id].dynamic_blocked = true;
     EXPECT_FALSE(IsStableValidatedContourReplacement(
         first, second, obsolete, polygon));
+}
+
+TEST(GraphLifecyclePolicy, CurrentClipCanTerminateStableCornerReplacement) {
+    const PolygonPtr polygon = MakeStaticPolygon();
+    polygon->is_boundary_clipped = true;
+    const NavNodePtr obsolete =
+        MakeNodePtr(1, GraphNodeSource::STATIC_GLOBAL);
+    const NavNodePtr persistent =
+        MakeNodePtr(2, GraphNodeSource::STATIC_GLOBAL);
+    const NavNodePtr clip =
+        MakeNodePtr(3, GraphNodeSource::STATIC_CANDIDATE);
+    MatchStableNodeToPolygon(persistent, polygon);
+    clip->is_contour_match = true;
+    clip->is_transient_contour_endpoint = true;
+    clip->observed_in_semantic_snapshot = true;
+    clip->free_direct = NodeFreeDirect::CONVEX;
+    clip->ctnode = std::make_shared<CTNode>();
+    clip->ctnode->poly_ptr = polygon;
+    clip->ctnode->source = GraphNodeSource::STATIC_CANDIDATE;
+    clip->ctnode->is_boundary_clipped = true;
+    ConnectValidatedContourRoute(persistent, clip);
+
+    EXPECT_TRUE(IsStableValidatedContourReplacement(
+        persistent, clip, obsolete, polygon));
+
+    const NavNodePtr second_clip =
+        MakeNodePtr(4, GraphNodeSource::STATIC_CANDIDATE);
+    second_clip->is_contour_match = true;
+    second_clip->is_transient_contour_endpoint = true;
+    second_clip->observed_in_semantic_snapshot = true;
+    second_clip->free_direct = NodeFreeDirect::CONVEX;
+    second_clip->ctnode = std::make_shared<CTNode>(*clip->ctnode);
+    ConnectValidatedContourRoute(clip, second_clip);
+    EXPECT_FALSE(IsStableValidatedContourReplacement(
+        clip, second_clip, obsolete, polygon));
 }
 
 TEST(GraphLifecyclePolicy, StaticArticulationCornerIsProtected) {
@@ -837,6 +1036,36 @@ TEST(GraphConnectionPolicy, EqualDistanceUsesStableNodeIdTieBreak) {
         origin, first, second, 0.99f));
     EXPECT_FALSE(IsCloserVisibilityCandidateInDirection(
         origin, second, first, 0.99f));
+}
+
+TEST(GraphConnectionPolicy, FlatTriangleDropsOnlyItsUniqueLongestEdge) {
+    // Reproduces the early five-class bag geometry N2--N13--N58.
+    const Point3D n2(4.467f, 4.067f, 0.0f);
+    const Point3D n13(2.800f, 4.467f, 0.0f);
+    const Point3D n58(3.067f, 4.667f, 0.0f);
+    EXPECT_TRUE(IsRedundantLongestEdgeOfFlatTriangle(
+        n2, n13, n58, 1.10f, 0.20f));
+    EXPECT_FALSE(IsRedundantLongestEdgeOfFlatTriangle(
+        n2, n13, n58, 1.05f, 0.20f));
+
+    // The shorter side cannot be removed merely because the same three
+    // vertices form a flat triangle.
+    EXPECT_FALSE(IsRedundantLongestEdgeOfFlatTriangle(
+        n13, n58, n2, 1.10f, 0.20f));
+}
+
+TEST(GraphConnectionPolicy, OdomFlatTriangleAndWideTriangleAreSeparated) {
+    const Point3D odom(-0.001f, -0.009f, 0.0f);
+    const Point3D n19(0.200f, -3.333f, 0.0f);
+    const Point3D n20(0.000f, -2.200f, 0.0f);
+    EXPECT_TRUE(IsRedundantLongestEdgeOfFlatTriangle(
+        odom, n19, n20, 1.10f, 0.20f));
+
+    // N1--N10--N20 is an ordinary broad triangle (altitude/longest about
+    // 0.50), so none of its edges is eligible for flat-triangle pruning.
+    const Point3D n10(2.067f, -2.200f, 0.0f);
+    EXPECT_FALSE(IsRedundantLongestEdgeOfFlatTriangle(
+        odom, n10, n20, 1.10f, 0.20f));
 }
 
 TEST(GraphConnectionPolicy, UnknownTerrainDoesNotRejectAnyEdgeType) {

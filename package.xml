@@ -14,7 +14,12 @@
   <build_depend>geometry_msgs</build_depend>
   <build_depend>nav_msgs</build_depend>
   <build_depend>rosgraph_msgs</build_depend>
+  <build_depend>rosbag</build_depend>
+  <build_depend>std_srvs</build_depend>
   <build_depend>tf</build_depend>
+  <build_depend>tf2</build_depend>
+  <build_depend>tf2_ros</build_depend>
+  <build_depend>tf2_msgs</build_depend>
   <build_depend>visibility_graph_msg</build_depend>
   <build_depend>pcl_ros</build_depend>
   <build_depend>octomap_msgs</build_depend>
@@ -27,7 +32,11 @@
   <run_depend>geometry_msgs</run_depend>
   <run_depend>nav_msgs</run_depend>
   <run_depend>rosgraph_msgs</run_depend>
+  <run_depend>std_srvs</run_depend>
   <run_depend>tf</run_depend>
+  <run_depend>tf2</run_depend>
+  <run_depend>tf2_ros</run_depend>
+  <run_depend>tf2_msgs</run_depend>
   <run_depend>visibility_graph_msg</run_depend>
   <run_depend>pcl_ros</run_depend>
   <run_depend>octomap_msgs</run_depend>

@@ -20,21 +20,21 @@ TEST(LocalVoxelPolicy, ConfidentStaticSemanticCreatesStaticCandidateGeometry) {
               ClassifyLocalVoxel(3, true, 0.8f, false, 0.0f, params));
 }
 
-TEST(LocalVoxelPolicy, LowConfidenceStaticStaysTransientWhenDangerous) {
+TEST(LocalVoxelPolicy, LowConfidenceStaticIsStillOrdinaryObstacleGeometry) {
     LocalVoxelPolicyParams params;
-    EXPECT_EQ(LocalVoxelLayer::TRANSIENT_OBSTACLE,
+    EXPECT_EQ(LocalVoxelLayer::STATIC_OBSTACLE,
               ClassifyLocalVoxel(3, true, 0.2f, true, 0.9f, params));
     EXPECT_EQ(LocalVoxelLayer::IGNORE,
               ClassifyLocalVoxel(3, true, 0.2f, true, 0.1f, params));
 }
 
-TEST(LocalVoxelPolicy, HighCostTerrainOrUnknownCannotBecomeStatic) {
+TEST(LocalVoxelPolicy, EveryNonDynamicHighCostVoxelIsOrdinaryObstacleGeometry) {
     LocalVoxelPolicyParams params;
-    EXPECT_EQ(LocalVoxelLayer::TRANSIENT_OBSTACLE,
+    EXPECT_EQ(LocalVoxelLayer::STATIC_OBSTACLE,
               ClassifyLocalVoxel(0, true, 1.0f, true, 0.8f, params));
-    EXPECT_EQ(LocalVoxelLayer::TRANSIENT_OBSTACLE,
+    EXPECT_EQ(LocalVoxelLayer::STATIC_OBSTACLE,
               ClassifyLocalVoxel(999, true, 1.0f, true, 0.8f, params));
-    EXPECT_EQ(LocalVoxelLayer::TRANSIENT_OBSTACLE,
+    EXPECT_EQ(LocalVoxelLayer::STATIC_OBSTACLE,
               ClassifyLocalVoxel(0, false, 0.0f, true, 0.8f, params));
 }
 

@@ -248,6 +248,15 @@ void MapHandler::Init(const MapHandlerParams& params) {
     dynamic_added_cloud_.reset(new pcl::PointCloud<PCLPoint>());
     dynamic_removed_cloud_.reset(new pcl::PointCloud<PCLPoint>());
     changed_obs_cloud_.reset(new pcl::PointCloud<PCLPoint>());
+    local_static_evidence_kdtree_.reset(
+        new pcl::KdTreeFLANN<PCLPoint>());
+    local_dynamic_evidence_kdtree_.reset(
+        new pcl::KdTreeFLANN<PCLPoint>());
+    local_terrain_evidence_kdtree_.reset(
+        new pcl::KdTreeFLANN<PCLPoint>());
+    local_static_evidence_kdtree_->setSortedResults(false);
+    local_dynamic_evidence_kdtree_->setSortedResults(false);
+    local_terrain_evidence_kdtree_->setSortedResults(false);
     previous_local_obs_voxels_.clear();
     previous_local_dynamic_voxels_.clear();
     persistent_static_obs_voxels_.clear();
@@ -465,9 +474,9 @@ void MapHandler::RefreshConfirmedGlobalStaticOctomap() {
             confirmed_global_static_cloud_);
     }
 
-    // This is the only path that may extend persistent static collision
-    // memory in dual-input mode. Current local static geometry never enters
-    // this cache merely by being visible in a recent voxel snapshot.
+    // This legacy SemanticOcTree path may extend persistent static collision
+    // memory. Local-only voxel mode never calls it and never copies current
+    // local geometry into this cache.
     this->UpdatePersistentStaticObstacleLayer(
         confirmed_global_static_cloud_,
         static_cast<float>(source_resolution));
@@ -490,6 +499,18 @@ void MapHandler::SetLocalVoxelSnapshot(
     FinalizeCloud(current_dynamic_obs_cloud_);
     FinalizeCloud(effective_dynamic_obs_cloud_);
     FinalizeCloud(semantic_terrain_support_cloud_);
+    const auto rebuild_evidence_tree = [](
+        const PointCloudPtr& cloud, PointKdTreePtr& tree) {
+        tree.reset(new pcl::KdTreeFLANN<PCLPoint>());
+        tree->setSortedResults(false);
+        if (cloud && !cloud->empty()) tree->setInputCloud(cloud);
+    };
+    rebuild_evidence_tree(semantic_obs_cloud_,
+                          local_static_evidence_kdtree_);
+    rebuild_evidence_tree(effective_dynamic_obs_cloud_,
+                          local_dynamic_evidence_kdtree_);
+    rebuild_evidence_tree(semantic_terrain_support_cloud_,
+                          local_terrain_evidence_kdtree_);
 
     const float resolution = std::max(
         1e-3f, semantic_params_.local_voxel_resolution);
@@ -614,6 +635,15 @@ void MapHandler::ResetGripMapCloud() {
     if (dynamic_added_cloud_) dynamic_added_cloud_->clear();
     if (dynamic_removed_cloud_) dynamic_removed_cloud_->clear();
     if (changed_obs_cloud_) changed_obs_cloud_->clear();
+    local_static_evidence_kdtree_.reset(
+        new pcl::KdTreeFLANN<PCLPoint>());
+    local_dynamic_evidence_kdtree_.reset(
+        new pcl::KdTreeFLANN<PCLPoint>());
+    local_terrain_evidence_kdtree_.reset(
+        new pcl::KdTreeFLANN<PCLPoint>());
+    local_static_evidence_kdtree_->setSortedResults(false);
+    local_dynamic_evidence_kdtree_->setSortedResults(false);
+    local_terrain_evidence_kdtree_->setSortedResults(false);
     previous_local_obs_voxels_.clear();
     previous_local_dynamic_voxels_.clear();
     persistent_static_obs_voxels_.clear();
@@ -638,7 +668,6 @@ void MapHandler::GetCloudOfPoint(const Point3D& center, const PointCloudPtr& clo
 {
     if (!cloudOut) return;
     cloudOut->clear();
-    if (!has_semantic_map_ || !semantic_tree_snapshot_) return;
     if (type != CloudType::OBS_CLOUD && type != CloudType::FREE_CLOUD) {
         if (FARUtil::IsDebug) ROS_ERROR("MH: Assigned cloud type invalid.");
         return;
@@ -648,6 +677,26 @@ void MapHandler::GetCloudOfPoint(const Point3D& center, const PointCloudPtr& clo
         ? semantic_params_.local_window_radius
         : semantic_params_.local_window_radius * 0.5f;
     if (horizontal_half_extent <= 0.0f) return;
+    if (semantic_params_.use_local_voxel_map) {
+        const PointCloudPtr& source = type == CloudType::OBS_CLOUD
+            ? collision_obs_cloud_ : semantic_terrain_support_cloud_;
+        if (!source) return;
+        const float vertical_half_extent = std::max(
+            std::max(FARUtil::kTolerZ, FARUtil::kCellHeight * 2.0f),
+            FARUtil::vehicle_height +
+                semantic_params_.local_voxel_resolution);
+        for (const auto& point : source->points) {
+            if (std::abs(point.x - center.x) <= horizontal_half_extent &&
+                std::abs(point.y - center.y) <= horizontal_half_extent &&
+                std::abs(point.z - center.z) <= vertical_half_extent) {
+                cloudOut->points.push_back(point);
+            }
+        }
+        FinalizeCloud(cloudOut);
+        return;
+    }
+
+    if (!has_semantic_map_ || !semantic_tree_snapshot_) return;
     const float vertical_half_extent = std::max(
         std::max(FARUtil::kTolerZ, FARUtil::kCellHeight * 2.0f),
         FARUtil::vehicle_height +
@@ -891,6 +940,105 @@ void MapHandler::UpdatePersistentStaticObstacleLayer(
 
 StaticNodeEvidence MapHandler::QueryStaticNodeEvidence(
     const Point3D& point) const {
+    if (semantic_params_.use_local_voxel_map) {
+        if (!is_init_) return StaticNodeEvidence::UNKNOWN;
+
+        const float resolution = std::max(
+            1e-3f, semantic_params_.local_voxel_resolution);
+        const float horizontal_radius = std::max(
+            resolution * 1.5f, FARUtil::kLeafSize);
+        const float obstacle_vertical_radius =
+            FARUtil::vehicle_height + resolution;
+        const auto has_obstacle_near = [horizontal_radius,
+                                        obstacle_vertical_radius,
+                                        &point](const PointCloudPtr& cloud,
+                                                const PointKdTreePtr& tree) {
+            if (!cloud || cloud->empty() || !tree ||
+                !tree->getInputCloud()) {
+                return false;
+            }
+            PCLPoint query;
+            query.x = point.x;
+            query.y = point.y;
+            query.z = point.z;
+            query.intensity = 0.0f;
+            std::vector<int> indices;
+            std::vector<float> square_distances;
+            const float search_radius = std::hypot(
+                horizontal_radius, obstacle_vertical_radius);
+            if (tree->radiusSearch(query, search_radius, indices,
+                                   square_distances) <= 0) {
+                return false;
+            }
+            for (const int index : indices) {
+                if (index < 0 ||
+                    static_cast<std::size_t>(index) >= cloud->size()) {
+                    continue;
+                }
+                const PCLPoint& sample = cloud->points[index];
+                if (std::hypot(sample.x - point.x,
+                               sample.y - point.y) <= horizontal_radius &&
+                    std::abs(sample.z - point.z) <=
+                        obstacle_vertical_radius) {
+                    return true;
+                }
+            }
+            return false;
+        };
+
+        if (has_obstacle_near(semantic_obs_cloud_,
+                              local_static_evidence_kdtree_)) {
+            return StaticNodeEvidence::STATIC_OCCUPIED;
+        }
+        // An explicitly dynamic object may currently cover the old contour.
+        // It blocks traversal, but cannot prove that the static structure
+        // underneath disappeared.
+        if (has_obstacle_near(effective_dynamic_obs_cloud_,
+                              local_dynamic_evidence_kdtree_)) {
+            return StaticNodeEvidence::UNKNOWN;
+        }
+
+        // The local voxel stream has no explicit empty-voxel layer. Ground at
+        // the old contour's XY location is therefore the positive observation
+        // that the location was seen.  Compare height as well so ground on a
+        // different floor cannot clear a historical node.
+        const float expected_ground_height =
+            point.z - FARUtil::vehicle_height;
+        const float terrain_vertical_radius = std::max(
+            resolution * 2.0f, FARUtil::kCellHeight * 0.5f);
+        if (semantic_terrain_support_cloud_ &&
+            !semantic_terrain_support_cloud_->empty() &&
+            local_terrain_evidence_kdtree_ &&
+            local_terrain_evidence_kdtree_->getInputCloud()) {
+            PCLPoint query;
+            query.x = point.x;
+            query.y = point.y;
+            query.z = expected_ground_height;
+            query.intensity = 0.0f;
+            std::vector<int> indices;
+            std::vector<float> square_distances;
+            const float search_radius = std::hypot(
+                horizontal_radius, terrain_vertical_radius);
+            local_terrain_evidence_kdtree_->radiusSearch(
+                query, search_radius, indices, square_distances);
+            for (const int index : indices) {
+                if (index < 0 || static_cast<std::size_t>(index) >=
+                                     semantic_terrain_support_cloud_->size()) {
+                    continue;
+                }
+                const PCLPoint& sample =
+                    semantic_terrain_support_cloud_->points[index];
+                if (std::hypot(sample.x - point.x,
+                               sample.y - point.y) <= horizontal_radius &&
+                    std::abs(sample.z - expected_ground_height) <=
+                        terrain_vertical_radius) {
+                    return StaticNodeEvidence::EXPLICIT_FREE;
+                }
+            }
+        }
+        return StaticNodeEvidence::UNKNOWN;
+    }
+
     if (!has_semantic_map_ || !semantic_tree_snapshot_ || !is_init_) {
         return StaticNodeEvidence::UNKNOWN;
     }
@@ -909,8 +1057,7 @@ StaticNodeEvidence MapHandler::QueryStaticNodeEvidence(
     const float horizontal_radius = std::max(
         resolution * 1.25f, FARUtil::kLeafSize);
     const float vertical_radius = FARUtil::vehicle_height + resolution;
-    const PointCloudPtr& evidence_cloud = semantic_params_.use_local_voxel_map
-        ? persistent_static_obs_cloud_ : semantic_obs_cloud_;
+    const PointCloudPtr& evidence_cloud = semantic_obs_cloud_;
     if (evidence_cloud) {
         for (const auto& sample : evidence_cloud->points) {
             if (std::hypot(sample.x - point.x, sample.y - point.y) <=

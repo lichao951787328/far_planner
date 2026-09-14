@@ -28,6 +28,7 @@ const char* EdgeRejectReasonName(const EdgeRejectReason reason) {
         case EdgeRejectReason::UNREACHABLE: return "unreachable";
         case EdgeRejectReason::DIRECTION_REJECTED: return "direction";
         case EdgeRejectReason::DIRECTION_SPARSIFIED: return "direction_sparse";
+        case EdgeRejectReason::TRIANGLE_SPARSIFIED: return "triangle_sparse";
         case EdgeRejectReason::STATIC_CLOUD_BLOCKED: return "static_cloud";
         case EdgeRejectReason::DYNAMIC_CLOUD_BLOCKED: return "dynamic_cloud";
         case EdgeRejectReason::POLYGON_BLOCKED: return "polygon";
@@ -433,6 +434,9 @@ void GraphPlanner::UpdateGoalNavNodeConnects(const NavNodePtr& goal_ptr)
             forward.route_end = validation.route_end;
             reverse.route_start = validation.route_end;
             reverse.route_end = validation.route_start;
+            forward.route_points = validation.route_points;
+            reverse.route_points.assign(validation.route_points.rbegin(),
+                                        validation.route_points.rend());
             forward.route_cost = reverse.route_cost = validation.route_cost;
             forward.static_valid = reverse.static_valid = true;
             forward.dynamic_blocked = reverse.dynamic_blocked = false;
@@ -484,6 +488,11 @@ EdgeValidationResult GraphPlanner::ValidateConnectToGoal(
         result.reason = EdgeRejectReason::UNREACHABLE;
         return result;
     }
+    if (node_ptr->is_transient_contour_endpoint &&
+        !IsCurrentSnapshotContourEndpoint(*node_ptr)) {
+        result.reason = EdgeRejectReason::CLIPPED_CONTOUR;
+        return result;
+    }
     if (node_ptr->is_odom) {
         // Odom and goal are robot-centre points, not obstacle anchors.  A
         // direct edge must cover the complete line and must not inherit the
@@ -499,8 +508,7 @@ EdgeValidationResult GraphPlanner::ValidateConnectToGoal(
             node_ptr, goal_node_ptr);
     }
     if (result.valid &&
-        !DynamicGraph::IsOnTerrainRoute(result.route_start,
-                                        result.route_end)) {
+        !DynamicGraph::IsOnTerrainRoute(result.route_points)) {
         result.valid = false;
         result.reason = EdgeRejectReason::TERRAIN_BLOCKED;
     }
@@ -675,9 +683,20 @@ bool GraphPlanner::NextContourRouteWaypoint(
         }
         const float route_point_converge = std::max(
             0.15f, gp_params_.converge_dist * 0.4f);
-        waypoint = state->second.route_start;
-        if ((waypoint - robot_position).norm() < route_point_converge) {
-            waypoint = state->second.route_end;
+        if (!state->second.route_points.empty()) {
+            waypoint = state->second.route_points.back();
+            for (const Point3D& route_point : state->second.route_points) {
+                if ((route_point - robot_position).norm() >=
+                    route_point_converge) {
+                    waypoint = route_point;
+                    break;
+                }
+            }
+        } else {
+            waypoint = state->second.route_start;
+            if ((waypoint - robot_position).norm() < route_point_converge) {
+                waypoint = state->second.route_end;
+            }
         }
         return true;
     }

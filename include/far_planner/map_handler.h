@@ -30,9 +30,10 @@ struct SemanticMapParams {
     float local_planner_radius = 5.0f;
     float local_planner_resolution = 0.2f;
     float local_planner_obstacle_intensity = 200.0f;
-    // When enabled, current contour/terrain geometry is supplied by an
-    // independent high-resolution, time-decaying voxel snapshot. The
-    // SemanticOcTree then remains only confirmed global static evidence.
+    // When enabled, the high-resolution, time-decaying voxel snapshot is the
+    // sole current geometry and lifecycle-evidence authority.  Historical
+    // navigation topology is still retained by DynamicGraph, but no external
+    // global occupancy map is fused into local contour or edge validation.
     bool  use_local_voxel_map = false;
     float local_voxel_resolution = 0.10f;
     bool  use_top1_only = true;  // Multi-class output is not implemented.
@@ -157,17 +158,17 @@ public:
     /** Static obstacle voxels in the current semantic local window. */
     void GetCurrentStaticObsCloud(const PointCloudPtr& obsCloudOut) const;
     /**
-     * Static obstacle collision memory accumulated from accepted semantic
-     * snapshots. Cells are quantised with FAR's contour grid resolution and
-     * are removed only when the newest snapshot supplies explicit-free
-     * evidence at that cell. This is the static geometry authority for Graph
-     * edge validation; it is deliberately independent of navigation corners.
+     * Legacy SemanticOcTree-mode static collision memory.  Local-voxel mode
+     * deliberately leaves this layer empty and validates the historical Graph
+     * against the latest local static snapshot instead.
      */
     void GetPersistentStaticObsCloud(const PointCloudPtr& obsCloudOut) const;
     /**
-     * Evidence used for persistent static-node deletion. UNKNOWN includes
-     * unobserved and occluded space; only EXPLICIT_FREE may accumulate a
-     * deletion vote.
+     * Evidence used for persistent static-node deletion.  In local-voxel mode
+     * current static occupancy wins, explicit dynamic occupancy is UNKNOWN,
+     * and terrain support with no obstacle at the old contour is
+     * EXPLICIT_FREE. Empty/ignored/unobserved space remains UNKNOWN; only
+     * EXPLICIT_FREE may accumulate a deletion vote.
      */
     StaticNodeEvidence QueryStaticNodeEvidence(const Point3D& point) const;
     /** Current static obstacles plus dynamic obstacles in the latest local snapshot. */
@@ -187,7 +188,9 @@ public:
     /** Return obstacle positions added, removed, or reclassified by the latest local rebuild. */
     void GetChangedObsCloud(const PointCloudPtr& changedCloudOut) const;
 
-    /** Extract local semantic clouds around a given center.
+    /** Extract current obstacle or terrain-support points around a center.
+     * Local-voxel mode crops the latest atomic snapshot; legacy mode queries
+     * the SemanticOcTree snapshot.
      * @param center the query center
      * @param cloudOut output cloud ptr
      * @param type choose free or obstacle cloud for extraction
@@ -238,9 +241,8 @@ private:
     std::vector<SemanticClassGroup> dynamic_obstacle_groups_;
     static std::shared_ptr<octomap::OcTree> local_terrain_support_octree_;
     PointCloudPtr semantic_obs_cloud_;
-    // Current confirmed-static window extracted only from SemanticOcTree.
-    // It is intentionally separate from semantic_obs_cloud_, which becomes
-    // the high-resolution local static layer in dual-input mode.
+    // Current confirmed-static window extracted only in legacy
+    // SemanticOcTree mode. It remains empty in local-only voxel mode.
     PointCloudPtr confirmed_global_static_cloud_;
     PointCloudPtr persistent_static_obs_cloud_;
     PointCloudPtr semantic_terrain_support_cloud_;
@@ -250,6 +252,12 @@ private:
     PointCloudPtr dynamic_added_cloud_;
     PointCloudPtr dynamic_removed_cloud_;
     PointCloudPtr changed_obs_cloud_;
+    // Per-snapshot spatial indices keep historical-node evidence queries
+    // proportional to nearby voxels instead of scanning the complete local
+    // cloud once for every Graph vertex.
+    PointKdTreePtr local_static_evidence_kdtree_;
+    PointKdTreePtr local_dynamic_evidence_kdtree_;
+    PointKdTreePtr local_terrain_evidence_kdtree_;
     std::unordered_map<uint64_t, PCLPoint> previous_local_obs_voxels_;
     std::unordered_map<uint64_t, PCLPoint> previous_local_dynamic_voxels_;
     std::unordered_map<uint64_t, PCLPoint> persistent_static_obs_voxels_;

@@ -419,9 +419,9 @@ void FARMaster::Init() {
   // DEBUG Publisher
   dynamic_obs_pub_     = nh.advertise<sensor_msgs::PointCloud2>("FAR_dynamic_obs_debug",1);
   surround_obs_debug_  = nh.advertise<sensor_msgs::PointCloud2>("FAR_obs_debug",1);
-  // Expose the exact persistent-global plus current-local static cloud used
-  // by Graph edge validation. The local-planner cloud below is deliberately
-  // denser and therefore is not equivalent for reproducing Graph clearance.
+  // Expose the exact static cloud used by Graph edge validation. In local
+  // voxel mode this is strictly the latest local snapshot; historical Graph
+  // topology is retained separately and is not an occupancy-cloud fusion.
   graph_static_obs_pub_ =
       nh.advertise<sensor_msgs::PointCloud2>("semantic_graph_static_obstacles", 1);
   global_confirmed_static_obs_pub_ = nh.advertise<sensor_msgs::PointCloud2>(
@@ -439,14 +439,23 @@ void FARMaster::Init() {
   this->LoadROSParams();
   this->InitializeGoalRecorder();
 
-  semantic_map_sub_   = nh.subscribe(master_params_.semantic_map_topic, 1, &FARMaster::SemanticMapCallBack, this);
+  if (debug_params_.enabled || debug_params_.deterministic_step_mode) {
+    debug_frame_done_pub_ = nh.advertise<std_msgs::Header>(
+        "/far_debug/frame_done", 2, true);
+  }
+
   if (master_params_.use_local_voxel_map) {
     local_voxel_sub_ = nh.subscribe(
         master_params_.local_voxel_topic, 1,
         &FARMaster::LocalVoxelMapCallBack, this);
-    ROS_INFO("FARMaster: current contours use local voxel snapshots from %s; "
-             "SemanticOcTree is global static evidence only.",
+    ROS_INFO("FARMaster: local-only geometry mode uses voxel snapshots from "
+             "%s; historical navigation Graph is maintained without "
+             "SemanticOcTree fusion.",
              master_params_.local_voxel_topic.c_str());
+  } else {
+    semantic_map_sub_ = nh.subscribe(
+        master_params_.semantic_map_topic, 1,
+        &FARMaster::SemanticMapCallBack, this);
   }
 
   /*init path generation thred callback*/
@@ -460,6 +469,8 @@ void FARMaster::Init() {
   graph_planner_.Init(nh, gp_params_);
   contour_graph_.Init(cg_params_);
   planner_viz_.Init(nh);
+  debug_visualizer_.Init(nh, debug_params_, master_params_.world_frame);
+  ContourGraph::SetDebugVisualizationEnabled(debug_params_.enabled);
   map_handler_.Init(map_params_);
   scan_handler_.Init(scan_params_);
   graph_msger_.Init(nh, msger_parmas_);
@@ -655,19 +666,30 @@ bool FARMaster::PreconditionCheck() {
 
 void FARMaster::Loop() {
   ros::Rate loop_rate(master_params_.main_run_freq);
+  ros::WallRate wall_loop_rate(master_params_.main_run_freq);
+  const auto sleep_loop = [&]() {
+    // HighGUI needs regular event pumping even when stepped replay is paused
+    // and no new frame is being rendered.
+    debug_visualizer_.ProcessGuiEvents();
+    if (debug_params_.deterministic_step_mode) {
+      wall_loop_rate.sleep();
+    } else {
+      loop_rate.sleep();
+    }
+  };
   while (ros::ok()) {
     const ros::WallTime loop_start = ros::WallTime::now();
     if (is_reset_env_) {
       this->ResetEnvironmentAndGraph(); 
       is_reset_env_ = false;
       if (FARUtil::IsDebug) ROS_WARN("****************** Graph and Env Reset ******************");
-      loop_rate.sleep(); // skip this iteration
+      sleep_loop(); // skip this iteration
       continue;
     }
     /* Process callback functions */
     ros::spinOnce(); 
     if (!this->PreconditionCheck()) {
-      loop_rate.sleep();
+      sleep_loop();
       continue;
     }
     /* add main process after this line */
@@ -675,7 +697,7 @@ void FARMaster::Loop() {
     odom_node_ptr_ = graph_manager_.GetOdomNode();
     if (odom_node_ptr_ == NULL) {
       ROS_WARN("FAR: Waiting for Odometry...");
-      loop_rate.sleep();
+      sleep_loop();
       continue;
     }
 
@@ -685,7 +707,7 @@ void FARMaster::Loop() {
       odom_connections_dirty_ = true;
     }
 
-    // A new semantic snapshot owns the expensive contour/topology rebuild.
+    // A new accepted map snapshot owns the expensive contour/topology rebuild.
     // Between snapshots, robot motion only refreshes transient start edges.
     if (!semantic_graph_dirty_) {
       bool publish_graph_snapshot = false;
@@ -721,10 +743,14 @@ void FARMaster::Loop() {
             graph_manager_.GetEligibleSearchGraph(), nav_graph_);
       }
       PublishSeconds(main_loop_time_pub_, ros::WallTime::now() - loop_start);
-      loop_rate.sleep();
+      sleep_loop();
       continue;
     }
 
+    if (debug_params_.enabled) {
+      debug_graph_before_ = GraphDebugVisualizer::CaptureGraph(
+          graph_manager_.GetMatchingGraph());
+    }
     graph_manager_.BeginSemanticGraphUpdate();
     /* Extract Vertices and new nodes */
     FARUtil::Timer.start_time("Total V-Graph Update");
@@ -733,17 +759,62 @@ void FARMaster::Loop() {
     // 以当前 odom 节点为中心，把机器人周围的局部障碍点云投影成图像，然后提取这片局部环境的障碍轮廓。
     static_contours_.clear();
     dynamic_contours_.clear();
+    static_dense_contours_.clear();
+    dynamic_dense_contours_.clear();
+    static_simplified_dense_indices_.clear();
+    dynamic_simplified_dense_indices_.clear();
     contour_detector_.BuildTerrainImgAndExtractContour(
         odom_node_ptr_, current_static_obs_ptr_, static_contours_,
         true);  // semantic octomap points are verified occupied voxels
+    static_dense_contours_ = contour_detector_.GetDenseWorldContours();
+    static_simplified_dense_indices_ =
+        contour_detector_.GetSimplifiedDenseIndices();
+    const cv::Mat static_configuration_space =
+        contour_detector_.GetConfigurationSpaceImage().clone();
+    const Point3D configuration_space_center =
+        contour_detector_.GetRasterCenter();
+    const float configuration_space_resolution =
+        contour_detector_.GetConfigurationSpaceResolution();
+    if (debug_params_.enabled &&
+        (debug_params_.publish_images || debug_params_.show_opencv_window ||
+         debug_params_.save_frames)) {
+      debug_static_base_img_ =
+          contour_detector_.GetDebugBaseImage().clone();
+      debug_static_processed_img_ =
+          contour_detector_.GetDebugProcessedImage().clone();
+    }
     if (effective_dynamic_obs_ptr_ && !effective_dynamic_obs_ptr_->empty()) {
       contour_detector_.BuildTerrainImgAndExtractContour(
           odom_node_ptr_, effective_dynamic_obs_ptr_, dynamic_contours_, true,
           cdetect_params_.dynamic_simplify_ratio);
+      dynamic_dense_contours_ = contour_detector_.GetDenseWorldContours();
+      dynamic_simplified_dense_indices_ =
+          contour_detector_.GetSimplifiedDenseIndices();
+      if (debug_params_.enabled &&
+          (debug_params_.publish_images || debug_params_.show_opencv_window ||
+           debug_params_.save_frames)) {
+        debug_dynamic_base_img_ =
+            contour_detector_.GetDebugBaseImage().clone();
+        debug_dynamic_processed_img_ =
+            contour_detector_.GetDebugProcessedImage().clone();
+      }
+    } else if (debug_params_.enabled) {
+      debug_dynamic_base_img_.release();
+      debug_dynamic_processed_img_.release();
     }
+    const cv::Mat dynamic_configuration_space =
+        effective_dynamic_obs_ptr_ && !effective_dynamic_obs_ptr_->empty()
+            ? contour_detector_.GetConfigurationSpaceImage().clone()
+            : cv::Mat();
+    ContourGraph::SetLocalCollisionGrids(
+        static_configuration_space, dynamic_configuration_space,
+        configuration_space_center, configuration_space_resolution);
     // 把刚提取出的“真实世界轮廓”写进轮廓图模块，完成轮廓图的本帧更新。
-    contour_graph_.UpdateContourGraph(odom_node_ptr_, static_contours_,
-                                      dynamic_contours_);
+    contour_graph_.UpdateContourGraph(
+        odom_node_ptr_, static_contours_, dynamic_contours_,
+        static_dense_contours_, dynamic_dense_contours_,
+        static_simplified_dense_indices_,
+        dynamic_simplified_dense_indices_);
     if (is_graph_init_) {
       if (!FARUtil::IsDebug) printf("\033[2K");
       std::cout<<"    "<<"Local V-Graph Updated. Number of local vertices: "<<ContourGraph::contour_graph_.size()<<std::endl;
@@ -751,9 +822,8 @@ void FARMaster::Loop() {
     /* Adjust heights with terrain */
     // 你看到的这两行就是在把“平面上的图结构”贴到“可通行地形高程”上，说明这个规划不是纯 2D，而是带高度约束的 2.5D/3D 处理。
     // 为什么这里会有高程：
-    // 上游 semantic octomap 回调会更新局部 terrain-support/free 语义点缓存。
-    // TerrainCallBack 中调用 UpdateTerrainHeightGrid(...)，内部基于语义点更新 terrain KDTree。
-    // 高度查询由 KDTree 驱动，不再依赖本地 terrain 栅格推断。
+    // local voxel 快照中的 TERRAIN_SUPPORT 会原子替换地形支撑点缓存，并更新
+    // terrain KDTree；local-only 模式不从 SemanticOctree 补充高度。
     // AdjustCTNodeHeight(...) 和 AdjustNodesHeight(...)
     // 分别给轮廓图节点、导航图节点校正 z 值，让节点高度与可通行地面一致，避免路径“悬空”或“钻地”。
     // 所以你问“当前可通行地形是高程图吗”：
@@ -802,6 +872,16 @@ void FARMaster::Loop() {
     graph_manager_.UpdateNavGraph(new_nodes_, is_stop_update_, clear_nodes_);
     graph_manager_.CommitSemanticGraphUpdate(
         [this](const Point3D& point) {
+          if (master_params_.use_local_voxel_map) {
+            // Terrain near a crop boundary may lie within the evidence query
+            // radius even though the historical corner itself was not
+            // reliably observed.  Only the reliable interior may contribute
+            // an occupied/free lifecycle vote.
+            if (!ContourGraph::IsPointInsideReliableContourWindow(point)) {
+              return StaticNodeEvidence::UNKNOWN;
+            }
+            return map_handler_.QueryStaticNodeEvidence(point);
+          }
           if (graph_params_.static_promotion_requires_global_evidence &&
               !this->GlobalStaticEvidenceIsFresh()) {
             return StaticNodeEvidence::UNKNOWN;
@@ -824,8 +904,26 @@ void FARMaster::Loop() {
     graph_planner_.UpdaetVGraph(nav_graph_);     // Graph Planner Update
     // 把同一份最新全局图同步到消息发布模块，用于对外发送图结构（多机通信/可视化消费者）。
     graph_msger_.UpdateGlobalGraph(nav_graph_);  // Graph Messager Update
+    ++debug_frame_sequence_;
+    if (debug_params_.enabled) {
+      const DebugGraphSnapshot debug_graph_after =
+          GraphDebugVisualizer::CaptureGraph(
+              graph_manager_.GetMatchingGraph());
+      debug_visualizer_.PublishFrame(
+          debug_frame_sequence_, latest_debug_source_header_, robot_pos_,
+          latest_debug_voxels_, static_contours_, dynamic_contours_,
+          ContourGraph::contour_graph_,
+          ContourGraph::GetMatchDebugRecords(),
+          ContourGraph::GetDuplicateDebugRecords(), new_nodes_,
+          clear_nodes_,
+          debug_graph_before_, debug_graph_after,
+          DynamicGraph::GetContourEdgeDiagnostics(),
+          graph_manager_.GetEligibleSearchGraph(), nav_graph_,
+          debug_static_base_img_, debug_static_processed_img_,
+          debug_dynamic_base_img_, debug_dynamic_processed_img_);
+    }
     // Planning callbacks are allowed again only after contours, nodes, edges,
-    // and the GraphPlanner snapshot all correspond to the newest semantic map.
+    // and the GraphPlanner snapshot all correspond to the newest map snapshot.
     semantic_graph_dirty_ = false;
     odom_connections_dirty_ = false;
     last_odom_connection_position_ = robot_pos_;
@@ -888,7 +986,17 @@ void FARMaster::Loop() {
         graph_manager_.GetDynamicLocalNodes(),
         graph_manager_.GetEligibleSearchGraph(), nav_graph_);
     PublishSeconds(main_loop_time_pub_, ros::WallTime::now() - loop_start);
-    loop_rate.sleep();
+    // This is the transaction barrier for stepped bag replay. Publish it only
+    // after graph commit, optional planning, standard RViz topics and debug
+    // topics all correspond to this local-voxel acquisition stamp.
+    if (debug_params_.enabled || debug_params_.deterministic_step_mode) {
+      std_msgs::Header done = latest_debug_source_header_;
+      done.seq = static_cast<std::uint32_t>(debug_frame_sequence_);
+      done.frame_id = master_params_.world_frame;
+      done.stamp = last_local_voxel_stamp_;
+      debug_frame_done_pub_.publish(done);
+    }
+    sleep_loop();
   }
 }
 
@@ -911,7 +1019,7 @@ void FARMaster::ExecutePlanningCycle() {
     if (!FARUtil::IsDebug) printf("\033[2K");
     std::cout<<"    "<<"Path Search "<<"Time: "<<0.f<<"ms"<<std::endl;
   } else { 
-    // 会先在目标附近拿障碍/自由点云，更新目标附近可通行信息，再重新评估 goal 位置是否合理。
+    // 从当前地图快照取得目标附近障碍/地形支撑点，再重新评估 goal。
     // Update goal postion with nearby terrain cloud
     const Point3D ori_p = graph_planner_.GetOriginNodePos(true);
     PointCloudPtr goal_obs(new pcl::PointCloud<PCLPoint>());
@@ -1062,10 +1170,14 @@ void FARMaster::LocalBoundaryHandler(const std::vector<PointPair>& local_boundar
 // 避免方向反跳（接近反向时重投影）
 // 保证最小前视距离，输出最终 waypoint 给底层控制跟踪
 Point3D FARMaster::ProjectNavWaypoint(const NavNodePtr& nav_node_ptr, const NavNodePtr& last_point_ptr) {
+  if (!nav_node_ptr) return robot_pos_;
   bool is_momentum = false;
   // 判断是否要保留运动惯性
   // 如果上一次跟踪的点和这次节点很接近，或者就是同一个点，就认为可以保留一部分上一时刻的 heading，避免 waypoint 方向突变。
-  if (last_point_ptr == nav_node_ptr || (last_point_ptr != NULL && (last_point_ptr->position - nav_node_ptr_->position).norm() < FARUtil::kNearDist)) {
+  if (last_point_ptr == nav_node_ptr ||
+      (last_point_ptr != NULL &&
+       (last_point_ptr->position - nav_node_ptr->position).norm() <
+           FARUtil::kNearDist)) {
     is_momentum = true;
   }
   // 计算候选 waypoint
@@ -1074,7 +1186,8 @@ Point3D FARMaster::ProjectNavWaypoint(const NavNodePtr& nav_node_ptr, const NavN
   Point3D waypoint = nav_node_ptr->position;
   // 默认参数输入值5m
   float free_dist = master_params_.local_planner_range;
-  const Point3D extend_p = this->ExtendViewpointOnObsCloud(nav_node_ptr_, FARUtil::surround_obs_cloud_, free_dist);
+  const Point3D extend_p = this->ExtendViewpointOnObsCloud(
+      nav_node_ptr, FARUtil::surround_obs_cloud_, free_dist);
   free_dist = std::max(free_dist, master_params_.robot_dim * 2.5f);
   if (master_params_.is_viewpoint_extend) {
     waypoint = extend_p;
@@ -1108,6 +1221,14 @@ Point3D FARMaster::ProjectNavWaypoint(const NavNodePtr& nav_node_ptr, const NavN
   if (diff_p.norm() < free_dist) {
     waypoint = waypoint + nav_heading_ * (free_dist - diff_p.norm());
   }
+  // An unprojected topology relation is useful to search, but its endpoint
+  // chord is not execution clearance.  Never publish a momentum/extension
+  // result that leaves the current observation or fails the latest local
+  // static, dynamic and terrain checks.
+  if (this->ValidateProjectedWaypoint(waypoint) != EdgeRejectReason::NONE) {
+    nav_heading_ = Point3D(0.0f, 0.0f, 0.0f);
+    return robot_pos_;
+  }
   return waypoint;
 }
 
@@ -1116,6 +1237,11 @@ EdgeRejectReason FARMaster::ValidateProjectedWaypoint(
   // The waypoint is an execution-time shortcut rather than persistent Graph
   // topology.  Check the exact robot-centre segment against only the latest
   // already-cropped semantic layers; this never queries the complete OctoMap.
+  if (!IsExecutionWaypointObservationConfirmed(
+          ContourGraph::UsesLocalObservationWindow(),
+          ContourGraph::IsPointInsideCurrentObservationWindow(candidate))) {
+    return EdgeRejectReason::CLIPPED_CONTOUR;
+  }
   if (!ContourGraph::IsRouteConnectFreeStaticLayer(robot_pos_, candidate)) {
     return EdgeRejectReason::STATIC_CLOUD_BLOCKED;
   }
@@ -1136,10 +1262,14 @@ Point3D FARMaster::ProjectContourWaypointProgressively(
   }
 
   bool is_wall = false;
-  // Preserve the original FAR convention: surf_dirs point into the obstacle,
-  // so their negative topological sum points toward free space.
+  // Prefer the signed direction verified against the current
+  // configuration-space grid.  This is essential for CLIP: its artificial
+  // cap must not participate in a geometric angle bisector.
   const Point3D free_direction =
-      -FARUtil::SurfTopoDirect(nav_node_ptr->surf_dirs, is_wall);
+      nav_node_ptr->is_free_space_dir_reliable &&
+              nav_node_ptr->free_space_dir.norm_flat() > FARUtil::kEpsilon
+          ? nav_node_ptr->free_space_dir.normalize_flat()
+          : -FARUtil::SurfTopoDirect(nav_node_ptr->surf_dirs, is_wall);
   if (is_wall || free_direction.norm_flat() <= FARUtil::kEpsilon) {
     return safe_fallback;
   }
@@ -1199,21 +1329,29 @@ Point3D FARMaster::ProjectContourWaypointProgressively(
 Point3D FARMaster::ExtendViewpointOnObsCloud(const NavNodePtr& nav_node_ptr, const PointCloudPtr& obsCloudIn, float& free_dist) {
   // 如果这个导航节点不是凸自由方向，或者周围没有障碍点云，就直接返回原节点位置。
   // 也就是说，不是所有节点都会被延伸。
-  if (nav_node_ptr_->free_direct != NodeFreeDirect::CONVEX || obsCloudIn->empty())        
-    return nav_node_ptr_->position;
+  if (!nav_node_ptr || nav_node_ptr->free_direct != NodeFreeDirect::CONVEX ||
+      obsCloudIn->empty())
+    return nav_node_ptr ? nav_node_ptr->position : robot_pos_;
   // 从障碍云里裁一小块“节点周围的局部障碍”
   // 它会把 nav node 周围一定范围内的障碍点取出来，后面只在这小片局部障碍里判断。
   // 所以这是一个局部几何修正，不是全局搜索。
-  FARUtil::CropPCLCloud(obsCloudIn, viewpoint_around_ptr_, nav_node_ptr_->position, free_dist + FARUtil::kNearDist);
-  float maxR = std::min((nav_node_ptr_->position - robot_pos_).norm(), free_dist) - FARUtil::kNearDist;
+  FARUtil::CropPCLCloud(obsCloudIn, viewpoint_around_ptr_,
+                        nav_node_ptr->position,
+                        free_dist + FARUtil::kNearDist);
+  float maxR = std::min((nav_node_ptr->position - robot_pos_).norm(),
+                        free_dist) - FARUtil::kNearDist;
   maxR = std::max(maxR, 0.0f);
   bool is_wall = false;
   // 确定要往哪个方向推
   // 从节点附近障碍/表面拓扑里估一个方向
   // 再取反，得到“朝开放空间/前方”去的方向
-  const Point3D direct = -FARUtil::SurfTopoDirect(nav_node_ptr_->surf_dirs, is_wall);
+  const Point3D direct =
+      nav_node_ptr->is_free_space_dir_reliable &&
+              nav_node_ptr->free_space_dir.norm_flat() > FARUtil::kEpsilon
+          ? nav_node_ptr->free_space_dir.normalize_flat()
+          : -FARUtil::SurfTopoDirect(nav_node_ptr->surf_dirs, is_wall);
   if (!is_wall) {
-    Point3D waypoint = nav_node_ptr_->position;
+    Point3D waypoint = nav_node_ptr->position;
     // 如果周围根本没有障碍点
     // 那就简单很多：直接沿 direct 推到 maxR 那么远
     if (viewpoint_around_ptr_->empty()) {
@@ -1243,14 +1381,15 @@ Point3D FARMaster::ExtendViewpointOnObsCloud(const NavNodePtr& nav_node_ptr, con
       }
       // 碰到障碍后，不是停在碰撞点，而是回收一点
       if (is_occupied) {
-        waypoint = (nav_node_ptr_->position + waypoint - direct * FARUtil::kNearDist) / 2.0f;
-        waypoint.z = nav_node_ptr_->position.z;
+        waypoint = (nav_node_ptr->position + waypoint -
+                    direct * FARUtil::kNearDist) / 2.0f;
+        waypoint.z = nav_node_ptr->position.z;
         free_dist = ray_dist - FARUtil::kNearDist;
       }
       return waypoint;
     }
   }
-  return nav_node_ptr_->position;
+  return nav_node_ptr->position;
 }
 
 
@@ -1267,6 +1406,7 @@ void FARMaster::LoadROSParams() {
   const std::string planner_prefix  = master_prefix + "GPlanner/";
   const std::string contour_prefix  = master_prefix + "ContourGraph/";
   const std::string msger_prefix    = master_prefix + "GraphMsger/";
+  const std::string debug_prefix    = master_prefix + "Debug/";
 
   // master params
   private_nh_.param<float>(master_prefix + "main_run_freq",         master_params_.main_run_freq, 5.0);
@@ -1311,6 +1451,58 @@ void FARMaster::LoadROSParams() {
   private_nh_.param<std::string>(master_prefix + "local_voxel_topic",
                                  master_params_.local_voxel_topic,
                                  "/local_3d_semantic_voxel_map/voxel_cloud");
+  private_nh_.param<std::string>(
+      master_prefix + "local_voxel_observation_frame",
+      master_params_.local_voxel_observation_frame, std::string());
+  private_nh_.param<bool>(
+      master_prefix + "local_voxel_morphology_enabled",
+      master_params_.local_voxel_morphology_enabled, true);
+  private_nh_.param<float>(
+      master_prefix + "local_voxel_morphology_raster_resolution",
+      master_params_.local_voxel_morphology_raster_resolution, 0.01f);
+  private_nh_.param<float>(
+      master_prefix + "local_voxel_morphology_radius",
+      master_params_.local_voxel_morphology_radius, 0.01f);
+  master_params_.local_voxel_morphology_radius = std::max(
+      0.0f, master_params_.local_voxel_morphology_radius);
+  private_nh_.param<bool>(debug_prefix + "enabled",
+                          debug_params_.enabled, false);
+  private_nh_.param<bool>(debug_prefix + "deterministic_step_mode",
+                          debug_params_.deterministic_step_mode, false);
+  private_nh_.param<bool>(debug_prefix + "show_text",
+                          debug_params_.show_text, true);
+  private_nh_.param<bool>(debug_prefix + "publish_images",
+                          debug_params_.publish_images, true);
+  private_nh_.param<bool>(debug_prefix + "show_opencv_window",
+                          debug_params_.show_opencv_window, false);
+  private_nh_.param<bool>(debug_prefix + "save_frames",
+                          debug_params_.save_frames, false);
+  private_nh_.param<std::string>(debug_prefix + "save_directory",
+                                 debug_params_.save_directory,
+                                 std::string());
+  private_nh_.param<int>(debug_prefix + "opencv_window_width",
+                         debug_params_.opencv_window_width, 1200);
+  private_nh_.param<int>(debug_prefix + "opencv_window_height",
+                         debug_params_.opencv_window_height, 1000);
+  private_nh_.param<int>(debug_prefix + "max_match_candidates_per_corner",
+                         debug_params_.max_match_candidates_per_corner, 3);
+  private_nh_.param<float>(debug_prefix + "event_marker_lifetime",
+                           debug_params_.event_marker_lifetime, 2.0f);
+  debug_params_.max_match_candidates_per_corner = std::max(
+      0, debug_params_.max_match_candidates_per_corner);
+  debug_params_.event_marker_lifetime = std::max(
+      0.0f, debug_params_.event_marker_lifetime);
+  debug_params_.opencv_window_width = std::max(
+      320, debug_params_.opencv_window_width);
+  debug_params_.opencv_window_height = std::max(
+      240, debug_params_.opencv_window_height);
+  debug_params_.sensor_range = master_params_.sensor_range;
+  if (debug_params_.deterministic_step_mode) {
+    master_params_.odom_timeout = 0.0f;
+    master_params_.local_voxel_timeout = 0.0f;
+    ROS_INFO("FAR deterministic bag-step mode uses WallRate and disables "
+             "wall-time odometry/local-voxel expiry.");
+  }
   master_params_.terrain_range = std::min(master_params_.terrain_range, master_params_.sensor_range);
 
   // map handler params
@@ -1484,6 +1676,68 @@ void FARMaster::LoadROSParams() {
   private_nh_.param<float>(contour_prefix + "boundary_guard",
                            cg_params_.contour_boundary_guard,
                            master_params_.contour_grid_resolution * 2.0f);
+  private_nh_.param<float>(contour_prefix + "static_match_tight_radius",
+                           cg_params_.static_match_tight_radius, 0.40f);
+  private_nh_.param<float>(contour_prefix + "static_match_max_radius",
+                           cg_params_.static_match_max_radius, 0.60f);
+  private_nh_.param<float>(contour_prefix + "dynamic_match_max_radius",
+                           cg_params_.dynamic_match_max_radius, 1.40f);
+  constexpr float kStaticIdentityHardCap = 0.60f;
+  cg_params_.static_match_tight_radius = std::min(
+      kStaticIdentityHardCap,
+      std::max(master_params_.contour_grid_resolution * 2.0f,
+               cg_params_.static_match_tight_radius));
+  cg_params_.static_match_max_radius = std::min(
+      kStaticIdentityHardCap,
+      std::max(cg_params_.static_match_tight_radius,
+               cg_params_.static_match_max_radius));
+  cg_params_.dynamic_match_max_radius = std::max(
+      master_params_.contour_grid_resolution,
+      cg_params_.dynamic_match_max_radius);
+  cg_params_.use_local_observation_window =
+      master_params_.use_local_voxel_map;
+  private_nh_.param<float>(contour_prefix + "local_window_min_x",
+                           cg_params_.local_window_min_x,
+                           -master_params_.sensor_range);
+  private_nh_.param<float>(contour_prefix + "local_window_max_x",
+                           cg_params_.local_window_max_x,
+                           master_params_.sensor_range);
+  private_nh_.param<float>(contour_prefix + "local_window_min_y",
+                           cg_params_.local_window_min_y,
+                           -master_params_.sensor_range);
+  private_nh_.param<float>(contour_prefix + "local_window_max_y",
+                           cg_params_.local_window_max_y,
+                           master_params_.sensor_range);
+  if (cg_params_.use_local_observation_window &&
+      (cg_params_.local_window_min_x + cg_params_.contour_boundary_guard >=
+           cg_params_.local_window_max_x -
+               cg_params_.contour_boundary_guard ||
+       cg_params_.local_window_min_y + cg_params_.contour_boundary_guard >=
+           cg_params_.local_window_max_y -
+               cg_params_.contour_boundary_guard)) {
+    ROS_FATAL("FARMaster: configured local voxel observation window is "
+              "empty after applying ContourGraph/boundary_guard.");
+    ros::shutdown();
+    return;
+  }
+  if (cg_params_.use_local_observation_window) {
+    const float local_abs_x = std::max(
+        std::abs(cg_params_.local_window_min_x),
+        std::abs(cg_params_.local_window_max_x));
+    const float local_abs_y = std::max(
+        std::abs(cg_params_.local_window_min_y),
+        std::abs(cg_params_.local_window_max_y));
+    // ContourDetector still rasterizes onto a world-aligned square. Its
+    // half-extent must circumscribe the rotating asymmetric local box, or the
+    // front/side corners of a valid snapshot would be silently discarded.
+    const float local_circumscribed_radius =
+        std::hypot(local_abs_x, local_abs_y) +
+        master_params_.contour_grid_resolution * 2.0f;
+    FARUtil::kSensorRange = std::max(
+        FARUtil::kSensorRange, local_circumscribed_radius);
+    FARUtil::kMarginDist = std::max(
+        0.0f, FARUtil::kSensorRange - FARUtil::kMatchDist);
+  }
 
   // dynamic graph params
   private_nh_.param<int>(graph_prefix    + "connect_votes_size",        graph_params_.votes_size, 10);
@@ -1500,12 +1754,18 @@ void FARMaster::LoadROSParams() {
                            graph_params_.dynamic_position_alpha, 0.65f);
   private_nh_.param<float>(graph_prefix  + "diagnostic_near_pair_radius",
                            graph_params_.diagnostic_near_pair_radius, 0.0f);
+  private_nh_.param<bool>(graph_prefix   + "flat_triangle_pruning_enabled",
+                          graph_params_.flat_triangle_pruning_enabled, false);
+  private_nh_.param<float>(graph_prefix  + "flat_triangle_max_detour_ratio",
+                           graph_params_.flat_triangle_max_detour_ratio, 1.05f);
+  private_nh_.param<float>(graph_prefix  + "flat_triangle_max_altitude_ratio",
+                           graph_params_.flat_triangle_max_altitude_ratio, 0.20f);
   private_nh_.param<int>(graph_prefix    + "static_confirm_frames",
                          graph_params_.static_confirm_frames, 3);
   private_nh_.param<int>(graph_prefix    + "static_remove_frames",
                          graph_params_.static_remove_frames, 3);
   private_nh_.param<int>(graph_prefix    + "static_topology_remove_frames",
-                         graph_params_.static_topology_remove_frames, 5);
+                         graph_params_.static_topology_remove_frames, 3);
   private_nh_.param<int>(graph_prefix    + "static_visibility_remove_frames",
                          graph_params_.static_visibility_remove_frames, 3);
   private_nh_.param<float>(graph_prefix  + "static_duplicate_radius",
@@ -1519,7 +1779,13 @@ void FARMaster::LoadROSParams() {
                           true);
   private_nh_.param<bool>(graph_prefix   + "static_promotion_requires_global_evidence",
                           graph_params_.static_promotion_requires_global_evidence,
-                          master_params_.use_local_voxel_map);
+                          false);
+  if (master_params_.use_local_voxel_map &&
+      graph_params_.static_promotion_requires_global_evidence) {
+    ROS_WARN("FARMaster: ignoring Graph/static_promotion_requires_global_evidence=true "
+             "because local voxel mode has no external global-map dependency.");
+    graph_params_.static_promotion_requires_global_evidence = false;
+  }
   private_nh_.param<float>(graph_prefix  + "connect_angle_thred",       graph_params_.kConnectAngleThred, 10.0);
   private_nh_.param<float>(graph_prefix  + "dirs_filter_margin",        graph_params_.filter_dirs_margin, 10.0);
   graph_params_.filter_pos_margin        = FARUtil::kNavClearDist;
@@ -1533,6 +1799,10 @@ void FARMaster::LoadROSParams() {
       0.0f, std::min(1.0f, graph_params_.dynamic_position_alpha));
   graph_params_.diagnostic_near_pair_radius = std::max(
       0.0f, graph_params_.diagnostic_near_pair_radius);
+  graph_params_.flat_triangle_max_detour_ratio = std::max(
+      1.0f, graph_params_.flat_triangle_max_detour_ratio);
+  graph_params_.flat_triangle_max_altitude_ratio = std::max(
+      0.0f, graph_params_.flat_triangle_max_altitude_ratio);
   graph_params_.static_confirm_frames = std::max(1, graph_params_.static_confirm_frames);
   graph_params_.static_remove_frames = std::max(1, graph_params_.static_remove_frames);
   graph_params_.static_topology_remove_frames = std::max(
@@ -1573,20 +1843,24 @@ void FARMaster::LoadROSParams() {
   // contour detector params
   private_nh_.param<float>(cdetect_prefix       + "resize_ratio",       cdetect_params_.kRatio, 5.0);
   private_nh_.param<int>(cdetect_prefix         + "filter_count_value", cdetect_params_.kThredValue, 5);
+  private_nh_.param<int>(cdetect_prefix + "topology_blur_size",
+                         cdetect_params_.topology_blur_size,
+                         2);
   private_nh_.param<float>(cdetect_prefix       + "dynamic_simplify_ratio", cdetect_params_.dynamic_simplify_ratio, 2.0f);
   private_nh_.param<float>(cdetect_prefix       + "collinear_tolerance", cdetect_params_.collinear_tolerance, 0.20f);
   private_nh_.param<float>(cdetect_prefix       + "collinear_angle_deg", cdetect_params_.collinear_angle_deg, 8.0f);
   private_nh_.param<bool>(cdetect_prefix        + "is_save_img",        cdetect_params_.is_save_img, false);
   private_nh_.param<std::string>(cdetect_prefix + "img_folder_path",    cdetect_params_.img_path, "");
-  cdetect_params_.kBlurSize    = (int)std::round(
-      FARUtil::kNavClearDist / master_params_.contour_grid_resolution);
+  cdetect_params_.configuration_space_clearance = FARUtil::kNavClearDist;
+  cdetect_params_.topology_blur_size =
+      std::max(1, cdetect_params_.topology_blur_size);
   cdetect_params_.dynamic_simplify_ratio =
       std::max(1.0f, cdetect_params_.dynamic_simplify_ratio);
   cdetect_params_.collinear_tolerance =
       std::max(0.0f, cdetect_params_.collinear_tolerance);
   cdetect_params_.collinear_angle_deg = std::max(
       0.0f, std::min(30.0f, cdetect_params_.collinear_angle_deg));
-  cdetect_params_.sensor_range = master_params_.sensor_range;
+  cdetect_params_.sensor_range = FARUtil::kSensorRange;
   cdetect_params_.contour_grid_resolution =
       master_params_.contour_grid_resolution;
 }
@@ -1645,23 +1919,9 @@ void FARMaster::OdomCallBack(const nav_msgs::OdometryConstPtr& msg) {
 void FARMaster::SemanticMapCallBack(const octomap_msgs::OctomapConstPtr& msg) {
   if (!msg) return;
   if (master_params_.use_local_voxel_map) {
-    if (msg->header.stamp.isZero()) {
-      ROS_ERROR_THROTTLE(
-          2.0, "FARMaster: confirmed-global octomap has a zero stamp.");
-      return;
-    }
-    if (!last_semantic_map_stamp_.isZero() &&
-        msg->header.stamp <= last_semantic_map_stamp_) {
-      if (msg->header.stamp < last_semantic_map_stamp_) {
-        ROS_WARN_THROTTLE(
-            2.0, "FARMaster: dropping out-of-order confirmed-global octomap "
-                 "(%.6f < %.6f).",
-            msg->header.stamp.toSec(), last_semantic_map_stamp_.toSec());
-      }
-      // Repetition of a latched global tree is not a new confirmation event
-      // and must not keep the promotion-evidence watchdog alive.
-      return;
-    }
+    ROS_WARN_THROTTLE(
+        5.0, "FARMaster: ignoring SemanticOctree in local-only voxel mode.");
+    return;
   }
 
   const ros::WallTime callback_start = ros::WallTime::now();
@@ -1676,16 +1936,6 @@ void FARMaster::SemanticMapCallBack(const octomap_msgs::OctomapConstPtr& msg) {
   last_semantic_map_receipt_ = ros::WallTime::now();
   last_semantic_map_stamp_ = msg->header.stamp;
   if (!is_odom_init_) {
-    PublishSeconds(semantic_callback_time_pub_,
-                   ros::WallTime::now() - callback_start);
-    return;
-  }
-
-  if (master_params_.use_local_voxel_map) {
-    // The global tree may refresh static evidence and persistent collision
-    // memory, but it never owns current contours. The next fresh local voxel
-    // snapshot atomically rebuilds the graph against both layers.
-    planning_requested_ = true;
     PublishSeconds(semantic_callback_time_pub_,
                    ros::WallTime::now() - callback_start);
     return;
@@ -1764,14 +2014,61 @@ void FARMaster::LocalVoxelMapCallBack(
     }
   }
 
+  Point3D observation_origin = robot_pos_;
+  Point3D observation_forward = robot_heading_;
+  if (!master_params_.local_voxel_observation_frame.empty()) {
+    tf::StampedTransform observation_to_world;
+    try {
+      tf_listener_->waitForTransform(
+          master_params_.world_frame,
+          master_params_.local_voxel_observation_frame,
+          msg->header.stamp, ros::Duration(0.2));
+      tf_listener_->lookupTransform(
+          master_params_.world_frame,
+          master_params_.local_voxel_observation_frame,
+          msg->header.stamp, observation_to_world);
+      observation_origin = Point3D(
+          observation_to_world.getOrigin().x(),
+          observation_to_world.getOrigin().y(),
+          observation_to_world.getOrigin().z());
+      double observation_roll = 0.0;
+      double observation_pitch = 0.0;
+      double observation_yaw = 0.0;
+      observation_to_world.getBasis().getRPY(
+          observation_roll, observation_pitch, observation_yaw);
+      observation_forward = Point3D(
+          std::cos(observation_yaw), std::sin(observation_yaw), 0.0f);
+    } catch (const tf::TransformException& ex) {
+      ROS_WARN_THROTTLE(
+          2.0, "FARMaster: local observation-window TF lookup failed: %s",
+          ex.what());
+      return;
+    }
+  }
   PointCloudPtr static_obstacles(new PointCloud());
   PointCloudPtr transient_obstacles(new PointCloud());
   PointCloudPtr terrain_support(new PointCloud());
+  std::vector<cv::Point2f> static_source_xy;
+  std::vector<cv::Point2f> transient_source_xy;
+  std::vector<cv::Point2f> terrain_source_xy;
+  std::vector<std::size_t> static_debug_indices;
+  std::vector<std::size_t> transient_debug_indices;
+  std::vector<std::size_t> terrain_debug_indices;
   const size_t point_count =
       static_cast<size_t>(msg->width) * static_cast<size_t>(msg->height);
+  std::vector<DebugVoxelPoint> debug_voxels;
+  if (debug_params_.enabled) debug_voxels.reserve(point_count);
   static_obstacles->reserve(point_count / 3 + 1);
   transient_obstacles->reserve(point_count / 6 + 1);
   terrain_support->reserve(point_count / 2 + 1);
+  static_source_xy.reserve(point_count / 3 + 1);
+  transient_source_xy.reserve(point_count / 6 + 1);
+  terrain_source_xy.reserve(point_count / 2 + 1);
+  if (debug_params_.enabled) {
+    static_debug_indices.reserve(point_count / 3 + 1);
+    transient_debug_indices.reserve(point_count / 6 + 1);
+    terrain_debug_indices.reserve(point_count / 2 + 1);
+  }
   size_t invalid_points = 0;
 
   for (uint32_t row = 0; row < msg->height; ++row) {
@@ -1812,10 +2109,31 @@ void FARMaster::LocalVoxelMapCallBack(
       const LocalVoxelLayer layer = ClassifyLocalVoxel(
           label, has_label, static_cast<float>(confidence_value), has_cost,
           static_cast<float>(cost_value), local_voxel_policy_params_);
-      if (layer == LocalVoxelLayer::IGNORE) continue;
-
       tf::Vector3 position(x, y, z);
       if (transform_required) position = cloud_to_world * position;
+      std::size_t debug_index = std::numeric_limits<std::size_t>::max();
+      if (debug_params_.enabled) {
+        DebugVoxelPoint debug_point;
+        debug_point.position = Point3D(
+            position.x(), position.y(), position.z());
+        debug_point.label = label;
+        debug_point.semantic_confidence =
+            static_cast<float>(confidence_value);
+        debug_point.cost = has_cost ? static_cast<float>(cost_value) : 0.0f;
+        if (layer == LocalVoxelLayer::STATIC_OBSTACLE) {
+          debug_point.classification = DebugVoxelClass::STATIC_OBSTACLE;
+        } else if (layer == LocalVoxelLayer::TRANSIENT_OBSTACLE) {
+          debug_point.classification = DebugVoxelClass::TRANSIENT_OBSTACLE;
+        } else if (layer == LocalVoxelLayer::TERRAIN_SUPPORT) {
+          debug_point.classification = DebugVoxelClass::TERRAIN_SUPPORT;
+        } else {
+          debug_point.classification = DebugVoxelClass::IGNORE;
+        }
+        debug_index = debug_voxels.size();
+        debug_voxels.push_back(debug_point);
+      }
+      if (layer == LocalVoxelLayer::IGNORE) continue;
+
       PCLPoint point;
       point.x = position.x();
       point.y = position.y();
@@ -1823,28 +2141,91 @@ void FARMaster::LocalVoxelMapCallBack(
       point.intensity = has_cost ? static_cast<float>(cost_value) : 0.0f;
       if (layer == LocalVoxelLayer::STATIC_OBSTACLE) {
         static_obstacles->push_back(point);
+        static_source_xy.emplace_back(static_cast<float>(x),
+                                      static_cast<float>(y));
+        if (debug_params_.enabled) static_debug_indices.push_back(debug_index);
       } else if (layer == LocalVoxelLayer::TRANSIENT_OBSTACLE) {
         transient_obstacles->push_back(point);
+        transient_source_xy.emplace_back(static_cast<float>(x),
+                                         static_cast<float>(y));
+        if (debug_params_.enabled) {
+          transient_debug_indices.push_back(debug_index);
+        }
       } else if (layer == LocalVoxelLayer::TERRAIN_SUPPORT) {
         terrain_support->push_back(point);
+        terrain_source_xy.emplace_back(static_cast<float>(x),
+                                       static_cast<float>(y));
+        if (debug_params_.enabled) terrain_debug_indices.push_back(debug_index);
       }
     }
   }
+
+  // Apply the requested metric XY opening before committing the atomic local
+  // snapshot. The source-frame voxel lattice is used so robot yaw does not
+  // introduce world-grid aliasing. Each semantic layer is independent: dense
+  // ground cannot preserve an isolated obstacle pixel, and dilation never
+  // synthesizes a 3D point that was absent from the input cloud.
+  const auto filter_layer = [this, &debug_voxels](
+      const PointCloudPtr& cloud, const std::vector<cv::Point2f>& source_xy,
+      const std::vector<std::size_t>& debug_indices) {
+    const LocalVoxelMorphologyResult morphology =
+        ComputeLocalVoxelMorphologyOpening(
+            source_xy,
+            map_params_.semantic_params.local_voxel_resolution,
+            master_params_.local_voxel_morphology_raster_resolution,
+            master_params_.local_voxel_morphology_radius,
+            master_params_.local_voxel_morphology_enabled);
+    if (!morphology.applied || !cloud ||
+        morphology.keep.size() != cloud->size()) {
+      return morphology;
+    }
+    PointCloud filtered;
+    filtered.reserve(cloud->size() - morphology.removed_points);
+    for (std::size_t index = 0; index < cloud->size(); ++index) {
+      if (morphology.keep[index]) {
+        filtered.push_back((*cloud)[index]);
+      } else if (debug_params_.enabled &&
+                 index < debug_indices.size() &&
+                 debug_indices[index] < debug_voxels.size()) {
+        debug_voxels[debug_indices[index]].classification =
+            DebugVoxelClass::MORPHOLOGY_REMOVED;
+      }
+    }
+    cloud->swap(filtered);
+    return morphology;
+  };
+  const LocalVoxelMorphologyResult static_morphology = filter_layer(
+      static_obstacles, static_source_xy, static_debug_indices);
+  const LocalVoxelMorphologyResult transient_morphology = filter_layer(
+      transient_obstacles, transient_source_xy, transient_debug_indices);
+  const LocalVoxelMorphologyResult terrain_morphology = filter_layer(
+      terrain_support, terrain_source_xy, terrain_debug_indices);
   FinalizePointCloud(static_obstacles);
   FinalizePointCloud(transient_obstacles);
   FinalizePointCloud(terrain_support);
 
+  // Commit the footprint and its classified clouds together. Odom may
+  // advance before the next cloud; moving the footprint independently would
+  // turn unobserved space into apparent current evidence. Likewise, a
+  // malformed/rejected cloud above must not move the previous footprint.
+  ContourGraph::SetLocalObservationPose(
+      observation_origin, observation_forward);
   map_handler_.SetLocalVoxelSnapshot(
       static_obstacles, transient_obstacles, terrain_support);
   last_local_voxel_stamp_ = msg->header.stamp;
+  latest_debug_source_header_ = msg->header;
+  latest_debug_source_header_.frame_id = master_params_.world_frame;
+  if (debug_params_.enabled) latest_debug_voxels_ = std::move(debug_voxels);
   last_local_voxel_receipt_ = ros::WallTime::now();
   has_local_voxel_snapshot_ = true;
   if (is_odom_init_) this->UpdatePlannerCloudsFromLocalVoxelMap();
   ROS_INFO_THROTTLE(
-      2.0, "FAR local voxel snapshot: static=%zu transient=%zu terrain=%zu "
-           "invalid=%zu stamp=%.6f",
-      static_obstacles->size(), transient_obstacles->size(),
-      terrain_support->size(), invalid_points, msg->header.stamp.toSec());
+      2.0, "FAR local voxel snapshot after XY opening: static=%zu(-%zu) "
+           "transient=%zu(-%zu) terrain=%zu(-%zu) invalid=%zu stamp=%.6f",
+      static_obstacles->size(), static_morphology.removed_points,
+      transient_obstacles->size(), transient_morphology.removed_points,
+      terrain_support->size(), terrain_morphology.removed_points,
+      invalid_points, msg->header.stamp.toSec());
 }
 
 void FARMaster::UpdatePlannerCloudsFromSemanticMap() {
@@ -1862,12 +2243,20 @@ void FARMaster::UpdatePlannerCloudsFromLocalVoxelMap() {
 void FARMaster::UpdatePlannerCloudsFromCurrentLayers() {
   map_handler_.GetSurroundObsCloud(FARUtil::surround_obs_cloud_);
   map_handler_.GetCurrentStaticObsCloud(current_static_obs_ptr_);
-  map_handler_.GetPersistentStaticObsCloud(persistent_static_obs_ptr_);
+  if (master_params_.use_local_voxel_map) {
+    persistent_static_obs_ptr_->clear();
+  } else {
+    map_handler_.GetPersistentStaticObsCloud(persistent_static_obs_ptr_);
+  }
   map_handler_.GetCollisionObsCloud(collision_obs_ptr_);
   map_handler_.GetEffectiveDynamicObsCloud(effective_dynamic_obs_ptr_);
-  *graph_static_collision_obs_ptr_ = *persistent_static_obs_ptr_;
-  if (master_params_.use_local_voxel_map && current_static_obs_ptr_) {
-    *graph_static_collision_obs_ptr_ += *current_static_obs_ptr_;
+  if (master_params_.use_local_voxel_map) {
+    // The local snapshot is the complete current geometry authority. The
+    // historical navigation Graph is revalidated inside the observed window
+    // and frozen outside it; never merge a coarse global occupancy cloud here.
+    *graph_static_collision_obs_ptr_ = *current_static_obs_ptr_;
+  } else {
+    *graph_static_collision_obs_ptr_ = *persistent_static_obs_ptr_;
   }
   FinalizePointCloud(graph_static_collision_obs_ptr_);
   ContourGraph::SetLocalCollisionCloud(graph_static_collision_obs_ptr_,

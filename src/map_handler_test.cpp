@@ -275,7 +275,160 @@ private:
 
         RunPillarConnectivityTests();
         RunVerifiedSemanticContourTests();
+        RunConfigurationSpaceGridTests();
         RunContourFollowEdgeTests();
+    }
+
+    void RunConfigurationSpaceGridTests() {
+        const bool original_static_env = FARUtil::IsStaticEnv;
+        const float original_leaf = FARUtil::kLeafSize;
+        const float original_clearance = FARUtil::kNavClearDist;
+        const float original_sensor_range = FARUtil::kSensorRange;
+        const Point3D original_odom = FARUtil::odom_pos;
+        const Point3D original_free_odom = FARUtil::free_odom_p;
+        FARUtil::IsStaticEnv = false;
+        FARUtil::kLeafSize = 0.2f;
+        FARUtil::kNavClearDist = 0.45f;
+        FARUtil::kSensorRange = 5.0f;
+        FARUtil::odom_pos = Point3D(0.0f, 0.0f, 0.5f);
+        FARUtil::free_odom_p = FARUtil::odom_pos;
+
+        ContourDetectParams detector_params;
+        detector_params.sensor_range = 5.0f;
+        detector_params.contour_grid_resolution = 0.2f;
+        detector_params.configuration_space_clearance = 0.45f;
+        detector_params.kRatio = 3.0f;
+        detector_params.kThredValue = 3;
+        detector_params.topology_blur_size = 2;
+        detector_params.is_save_img = false;
+        ContourDetector detector;
+        detector.Init(detector_params);
+
+        NavNodePtr odom(new NavNode());
+        odom->position = FARUtil::odom_pos;
+        odom->is_odom = true;
+        PointCloudPtr obstacle(new PointCloud());
+        PCLPoint point;
+        point.x = 1.0f;
+        point.y = 0.0f;
+        point.z = 0.5f;
+        point.intensity = 1.0f;
+        obstacle->push_back(point);
+        std::vector<PointStack> contours;
+        detector.BuildTerrainImgAndExtractContour(
+            odom, obstacle, contours, true);
+        const cv::Mat configuration =
+            detector.GetConfigurationSpaceImage().clone();
+        const cv::Mat topology = detector.GetTopologyImage().clone();
+        const float refined_resolution =
+            detector.GetConfigurationSpaceResolution();
+        const Point3D raster_center = detector.GetRasterCenter();
+        const auto is_occupied = [&](const float x, const float y) {
+            const int row = configuration.rows / 2 +
+                static_cast<int>(std::round(
+                    (x - raster_center.x) / refined_resolution));
+            const int col = configuration.cols / 2 +
+                static_cast<int>(std::round(
+                    (y - raster_center.y) / refined_resolution));
+            return row >= 0 && row < configuration.rows && col >= 0 &&
+                col < configuration.cols &&
+                configuration.at<std::uint8_t>(row, col) != 0;
+        };
+        reporter_.Check(
+            is_occupied(1.0f, 0.0f) &&
+                is_occupied(1.4f, 0.0f) &&
+                !is_occupied(1.6f, 0.0f),
+            "Euclidean configuration space inflates one verified voxel by 0.45 m exactly once");
+        reporter_.Check(
+            configuration.type() == CV_8UC1 && topology.type() == CV_8UC1 &&
+                configuration.size() == topology.size() &&
+                cv::countNonZero(configuration) > 0 &&
+                cv::countNonZero(topology) > 0 && !contours.empty(),
+            "FAR topology and robot-centre collision rasters are both available");
+        cv::Mat raster_difference;
+        cv::compare(configuration, topology, raster_difference, cv::CMP_NE);
+        reporter_.Check(
+            cv::countNonZero(raster_difference) > 0,
+            "FAR topology extraction no longer consumes the configuration-space raster");
+        const auto& dense_contours = detector.GetDenseWorldContours();
+        const auto& dense_indices =
+            detector.GetSimplifiedDenseIndices();
+        bool dense_mapping_valid =
+            dense_contours.size() == contours.size() &&
+            dense_indices.size() == contours.size();
+        for (std::size_t contour_index = 0;
+             dense_mapping_valid && contour_index < contours.size();
+             ++contour_index) {
+            dense_mapping_valid =
+                dense_contours[contour_index].size() >=
+                    contours[contour_index].size() &&
+                dense_indices[contour_index].size() ==
+                    contours[contour_index].size();
+            for (const std::size_t dense_index :
+                 dense_indices[contour_index]) {
+                dense_mapping_valid = dense_mapping_valid &&
+                    dense_index < dense_contours[contour_index].size();
+            }
+        }
+        reporter_.Check(
+            dense_mapping_valid,
+            "RDP graph vertices retain an ordered mapping to FAR's TC89 source chain");
+
+        ContourGraph graph;
+        ContourGraphParams graph_params;
+        graph_params.kPillarPerimeter = 0.4f;
+        graph.Init(graph_params);
+        ContourGraph::SetLocalCollisionCloud(
+            PointCloudPtr(new PointCloud()), PointCloudPtr(new PointCloud()));
+        ContourGraph::SetLocalCollisionGrids(
+            configuration, cv::Mat(), raster_center, refined_resolution);
+        reporter_.Check(
+            !ContourGraph::IsPointCollisionFreeStaticLayer(
+                Point3D(1.4f, 0.0f, 0.5f)) &&
+                ContourGraph::IsPointCollisionFreeStaticLayer(
+                    Point3D(1.6f, 0.0f, 0.5f)),
+            "Point collision queries use configuration-space occupancy instead of a second 0.456 m KD radius");
+
+        // Two occupied orthogonal neighbours touch only at the diagonal
+        // route's cell corner.  A centre-sample test can miss this, whereas
+        // supercover traversal must reject the corner cut.
+        cv::Mat corner_grid = cv::Mat::zeros(21, 21, CV_8UC1);
+        corner_grid.at<std::uint8_t>(10, 11) = 255;
+        corner_grid.at<std::uint8_t>(11, 10) = 255;
+        ContourGraph::SetLocalCollisionGrids(
+            corner_grid, cv::Mat(), Point3D(0.0f, 0.0f, 0.5f), 0.1f);
+        NavNodePtr diagonal_start(new NavNode());
+        diagonal_start->position = Point3D(-0.05f, -0.05f, 0.5f);
+        diagonal_start->is_odom = true;
+        NavNodePtr diagonal_goal(new NavNode());
+        diagonal_goal->position = Point3D(0.15f, 0.15f, 0.5f);
+        diagonal_goal->is_goal = true;
+        const EdgeValidationResult diagonal =
+            ContourGraph::ValidateDirectOdomGoalEdgeWithRoute(
+                diagonal_start, diagonal_goal, false);
+        reporter_.Check(
+            !diagonal.valid &&
+                diagonal.reason == EdgeRejectReason::STATIC_CLOUD_BLOCKED,
+            "Configuration-space supercover rejects diagonal corner cutting");
+
+        diagonal_start->position = Point3D(-0.15f, -0.05f, 0.5f);
+        diagonal_goal->position = Point3D(-0.15f, 0.35f, 0.5f);
+        const EdgeValidationResult parallel =
+            ContourGraph::ValidateDirectOdomGoalEdgeWithRoute(
+                diagonal_start, diagonal_goal, false);
+        reporter_.Check(
+            parallel.valid,
+            "Configuration-space supercover accepts a line through only free cells");
+
+        ContourGraph::SetLocalCollisionCloud(
+            PointCloudPtr(new PointCloud()), PointCloudPtr(new PointCloud()));
+        graph.ResetCurrentContour();
+        FARUtil::IsStaticEnv = original_static_env;
+        FARUtil::kLeafSize = original_leaf;
+        FARUtil::kNavClearDist = original_clearance;
+        FARUtil::kSensorRange = original_sensor_range;
+        FARUtil::odom_pos = original_odom;
+        FARUtil::free_odom_p = original_free_odom;
     }
 
     void RunContourFollowEdgeTests() {
@@ -461,19 +614,89 @@ private:
         const EdgeValidationResult clear =
             ContourGraph::ValidateContourFollowEdge(first, second);
         reporter_.Check(
-            clear.valid &&
-                (clear.route_end - clear.route_start).norm_flat() > 1.9f,
-            "Adaptive contour validation accepts a free-side wall route");
-        reporter_.Check(
-            clear.valid && clear.projection_distance > 0.15f &&
-                clear.projection_distance <= 0.60f + 1e-4f &&
-                clear.route_start.y > first->position.y,
-            "A fixed 0.15 m offset grows until the 0.45 m corridor is clear");
+            clear.valid && clear.route_points.size() == 2 &&
+                SameFloat(clear.projection_distance, 0.0f) &&
+                (clear.route_start - first->position).norm_flat() < 1e-5f &&
+                (clear.route_end - second->position).norm_flat() < 1e-5f,
+            "A FAR contour edge records topology endpoints without synthesizing a clearance route");
         reporter_.Check(
             !ContourGraph::IsPoint3DConnectFreePolygon(
                 Point3D(1.0f, 1.0f, 0.5f),
                 Point3D(1.0f, -1.0f, 0.5f)),
             "A strict ordinary visibility segment through the wall is rejected");
+
+        // A same-current-contour relation is topology, so neither stale
+        // unmatched collision history nor the configuration-space chord is
+        // allowed to reinterpret it as a robot-centre trajectory.
+        cv::Mat current_wall_grid = cv::Mat::zeros(121, 121, CV_8UC1);
+        for (int row = 40; row <= 80; ++row) {
+            for (int col = 51; col <= 69; ++col) {
+                current_wall_grid.at<std::uint8_t>(row, col) = 255;
+            }
+        }
+        ContourGraph::SetLocalCollisionGrids(
+            current_wall_grid, cv::Mat(), Point3D(1.0f, 0.0f, 0.5f),
+            0.05f);
+        ContourGraph::unmatched_contour_.push_back(PointPair(
+            Point3D(1.0f, 0.45f, 0.5f),
+            Point3D(1.0f, 0.70f, 0.5f)));
+        const EdgeValidationResult current_authoritative =
+            ContourGraph::ValidateContourFollowEdge(first, second);
+        reporter_.Check(
+            current_authoritative.valid,
+            "A current same-contour topology edge is independent of stale unmatched collision history");
+        ContourGraph::unmatched_contour_.clear();
+
+        // Ordinary visibility edges also store projected robot-centre
+        // endpoints. A stale corner can move far enough into the next local
+        // configuration-space obstacle that the fixed projection remains
+        // occupied. The projected endpoint must not be hidden by the legacy
+        // obstacle-anchor exclusion.
+        cv::Mat projected_endpoint_grid =
+            cv::Mat::zeros(121, 121, CV_8UC1);
+        ContourGraph::SetLocalCollisionGrids(
+            projected_endpoint_grid, cv::Mat(),
+            Point3D(1.0f, 0.0f, 0.5f), 0.05f);
+        const EdgeValidationResult free_visibility_endpoint =
+            ContourGraph::ValidateVisibilityEdgeWithRoute(
+                first, second, false);
+        const int projected_row = static_cast<int>(std::floor(
+            60.0f + (free_visibility_endpoint.route_start.x - 1.0f) /
+                        0.05f + 0.5f));
+        const int projected_col = static_cast<int>(std::floor(
+            60.0f + free_visibility_endpoint.route_start.y / 0.05f +
+                        0.5f));
+        reporter_.Check(
+            free_visibility_endpoint.valid && projected_row >= 0 &&
+                projected_row < projected_endpoint_grid.rows &&
+                projected_col >= 0 &&
+                projected_col < projected_endpoint_grid.cols,
+            "The ordinary visibility regression reconstructs its projected endpoint cell");
+        projected_endpoint_grid.at<std::uint8_t>(projected_row,
+                                                 projected_col) = 255;
+        ContourGraph::SetLocalCollisionGrids(
+            projected_endpoint_grid, cv::Mat(),
+            Point3D(1.0f, 0.0f, 0.5f), 0.05f);
+        const EdgeValidationResult occupied_visibility_endpoint =
+            ContourGraph::ValidateVisibilityEdgeWithRoute(
+                first, second, false);
+        reporter_.Check(
+            !occupied_visibility_endpoint.valid &&
+                occupied_visibility_endpoint.reason ==
+                    EdgeRejectReason::STATIC_CLOUD_BLOCKED,
+            "An occupied projected endpoint immediately blocks an ordinary visibility edge");
+
+        projected_endpoint_grid.setTo(cv::Scalar(0));
+        ContourGraph::SetLocalCollisionGrids(
+            projected_endpoint_grid, cv::Mat(),
+            Point3D(1.0f, 0.0f, 0.5f), 0.05f);
+        reporter_.Check(
+            ContourGraph::ValidateVisibilityEdgeWithRoute(
+                first, second, false).valid,
+            "A fully free projected ordinary visibility route remains valid");
+        ContourGraph::SetLocalCollisionGrids(
+            cv::Mat(), cv::Mat(), Point3D(), 0.0f);
+        ContourGraph::SetLocalCollisionCloud(static_wall, empty_dynamic);
 
         PointCloudPtr dynamic_block(new PointCloud());
         PCLPoint blocker;
@@ -493,18 +716,17 @@ private:
         const EdgeValidationResult blocked =
             ContourGraph::ValidateContourFollowEdge(first, second);
         reporter_.Check(
-            blocked.valid && blocked.dynamic_blocked &&
-                blocked.reason == EdgeRejectReason::DYNAMIC_CLOUD_BLOCKED,
-            "A current dynamic point immediately masks but does not erase the static contour route");
+            blocked.valid && !blocked.dynamic_blocked &&
+                blocked.reason == EdgeRejectReason::NONE,
+            "A dynamic point cannot mask a same-contour topology relation by intersecting its display chord");
 
         ContourGraph::SetLocalCollisionCloud(static_wall, empty_dynamic);
         const EdgeValidationResult restored =
             ContourGraph::ValidateContourFollowEdge(first, second);
         reporter_.Check(
             restored.valid && !restored.dynamic_blocked &&
-                SameFloat(restored.projection_distance,
-                          clear.projection_distance),
-            "Removing the dynamic point restores the same static route geometry");
+                SameFloat(restored.projection_distance, 0.0f),
+            "Removing a dynamic point leaves the same FAR topology relation unchanged");
 
         PointCloudPtr extended_static_wall(new PointCloud(*static_wall));
         PCLPoint newly_observed_wall = blocker;
@@ -514,8 +736,9 @@ private:
                                              empty_dynamic);
         reporter_.Check(
             !ContourGraph::IsRouteConnectFreeStaticLayer(
-                clear.route_start, clear.route_end),
-            "A newly observed static wall immediately blocks stored contour-route geometry");
+                clear.route_start, clear.route_end) &&
+                ContourGraph::ValidateContourFollowEdge(first, second).valid,
+            "Static occupancy may intersect a displayed contour chord without deleting its FAR topology relation");
 
         first_ct->is_boundary_clipped = true;
         wall->is_boundary_clipped = true;
@@ -524,9 +747,231 @@ private:
             ContourGraph::ValidateContourFollowEdge(first, second);
         reporter_.Check(
             clipped.valid && !clipped.dynamic_blocked,
-            "An actually clipped polygon may provide a temporary FAR-style wall-end route when the persistent static corridor is free");
+            "An in-window clipped polygon may provide a temporary FAR-style wall-end topology relation");
         first_ct->is_boundary_clipped = false;
         wall->is_boundary_clipped = false;
+
+        // Upstream FAR does not encode a deep bend as a hidden polyline.  An
+        // unmatched intermediate CT vertex farther than kNearDist from the
+        // endpoint chord blocks the direct relation; EnclosePolygonsCheck()
+        // then promotes that blocking vertex to a necessary graph node.
+        PolygonPtr concave_wall(new Polygon(*wall));
+        concave_wall->is_boundary_clipped = true;
+        const auto make_support = [&concave_wall](
+            const Point3D& position, const NodeFreeDirect free_direction,
+            const PointPair& directions) {
+            CTNodePtr ct(new CTNode());
+            ct->position = position;
+            ct->poly_ptr = concave_wall;
+            ct->source = GraphNodeSource::STATIC_CANDIDATE;
+            ct->free_direct = free_direction;
+            ct->surf_dirs = directions;
+            ct->is_global_match = false;
+            ct->is_boundary_clipped = false;
+            return ct;
+        };
+        const PointPair convex_dirs(Point3D(1.0f, -1.0f, 0.0f),
+                                    Point3D(-1.0f, -1.0f, 0.0f));
+        const PointPair concave_dirs(Point3D(1.0f, 1.0f, 0.0f),
+                                     Point3D(-1.0f, 1.0f, 0.0f));
+        CTNodePtr deep_first = make_support(
+            Point3D(0.0f, 0.25f, 0.5f), NodeFreeDirect::CONVEX,
+            convex_dirs);
+        CTNodePtr deep_middle = make_support(
+            Point3D(1.0f, -1.25f, 0.5f), NodeFreeDirect::CONCAVE,
+            concave_dirs);
+        CTNodePtr deep_second = make_support(
+            Point3D(2.0f, 0.25f, 0.5f), NodeFreeDirect::CONVEX,
+            convex_dirs);
+        CTNodePtr other_matched = make_support(
+            Point3D(1.0f, 1.5f, 0.5f), NodeFreeDirect::CONVEX,
+            convex_dirs);
+        deep_first->front = deep_middle;
+        deep_middle->front = deep_second;
+        deep_second->front = other_matched;
+        other_matched->front = deep_first;
+        deep_first->back = other_matched;
+        other_matched->back = deep_second;
+        deep_second->back = deep_middle;
+        deep_middle->back = deep_first;
+        NavNodePtr deep_first_nav = make_nav(1011, deep_first);
+        NavNodePtr deep_second_nav = make_nav(1012, deep_second);
+        other_matched->is_global_match = true;
+        ContourGraph::SetLocalCollisionCloud(
+            PointCloudPtr(new PointCloud()), empty_dynamic);
+        CTNodeStack deep_chain;
+        const bool has_deep_chain = ContourGraph::GetContourChain(
+            deep_first, deep_second, deep_chain);
+        const EdgeValidationResult deep_route =
+            ContourGraph::ValidateContourFollowEdge(deep_first_nav,
+                                                    deep_second_nav);
+        reporter_.Check(
+            !has_deep_chain && deep_chain.empty() && !deep_route.valid &&
+                deep_route.reason == EdgeRejectReason::NOT_CURRENT_ADJACENT,
+            "A deep CT5-CT6-CT7 bend rejects the longest edge so the middle necessary CT node must carry topology");
+
+        // Exercise the complete matching/reduction path as well.  The two
+        // retained convex anchors are current routing vertices, even when one
+        // is a newly observed CLIP rather than an old global match.  Missing
+        // terrain support on the deep concave point is UNKNOWN and must not
+        // erase the only contour-topology bridge.
+        const Point3D reduction_first(2.2f, -5.1333337f, 0.5f);
+        const Point3D reduction_middle(2.4666667f, -3.5333335f, 0.5f);
+        const Point3D reduction_second(5.8f, -3.7333333f, 0.5f);
+        const Point3D reduction_closure(5.9f, -5.1f, 0.5f);
+        NavNodePtr reduction_odom(new NavNode());
+        reduction_odom->id = 1015;
+        reduction_odom->position = FARUtil::odom_pos;
+        reduction_odom->is_odom = true;
+        reduction_odom->source = GraphNodeSource::ODOM;
+        graph.UpdateContourGraph(
+            reduction_odom,
+            {{reduction_first, reduction_middle, reduction_second,
+              reduction_closure}}, {});
+        const auto find_reduction_ct = [](const Point3D& position) {
+            for (const auto& candidate : ContourGraph::contour_graph_) {
+                if (candidate &&
+                    (candidate->position - position).norm_flat() < 0.01f) {
+                    return candidate;
+                }
+            }
+            return CTNodePtr();
+        };
+        const CTNodePtr reduction_ct_first =
+            find_reduction_ct(reduction_first);
+        const CTNodePtr reduction_ct_middle =
+            find_reduction_ct(reduction_middle);
+        const CTNodePtr reduction_ct_second =
+            find_reduction_ct(reduction_second);
+        const CTNodePtr reduction_ct_closure =
+            find_reduction_ct(reduction_closure);
+        bool retained_unknown_terrain_concave = false;
+        if (reduction_ct_first && reduction_ct_middle &&
+            reduction_ct_second && reduction_ct_closure) {
+            reduction_ct_first->free_direct = NodeFreeDirect::CONVEX;
+            reduction_ct_middle->free_direct = NodeFreeDirect::CONCAVE;
+            reduction_ct_second->free_direct = NodeFreeDirect::CONVEX;
+            reduction_ct_closure->free_direct = NodeFreeDirect::UNKNOW;
+            reduction_ct_middle->is_ground_associate = false;
+            reduction_ct_first->surf_dirs = convex_dirs;
+            reduction_ct_middle->surf_dirs = concave_dirs;
+            reduction_ct_second->surf_dirs = convex_dirs;
+            const NavNodePtr reduction_nav_first =
+                make_nav(1013, reduction_ct_first);
+            const NavNodePtr reduction_nav_second =
+                make_nav(1014, reduction_ct_second);
+            CTNodeStack reduced_new_vertices;
+            graph.MatchContourWithNavGraph(
+                {reduction_nav_first, reduction_nav_second},
+                {reduction_nav_first, reduction_nav_second},
+                reduced_new_vertices, 0.4f);
+            retained_unknown_terrain_concave =
+                reduction_ct_middle->is_contour_necessary &&
+                std::find(reduced_new_vertices.begin(),
+                          reduced_new_vertices.end(),
+                          reduction_ct_middle) != reduced_new_vertices.end();
+        }
+        reporter_.Check(
+            retained_unknown_terrain_concave,
+            "A deep unmatched CONCAVE vertex with UNKNOWN terrain is retained between current contour anchors");
+
+        // A small unmatched contour fluctuation inside kNearDist may be
+        // skipped in FAR's reduced topology.  It is not converted into a
+        // convex-hull execution route: the local waypoint projection/rebound
+        // stage supplies the actual free-space motion target later.
+        PolygonPtr hull_wall(new Polygon());
+        hull_wall->vertices = {
+            Point3D(0.0f, 0.0f, 0.5f),
+            Point3D(1.0f, 0.5f, 0.5f),
+            Point3D(2.0f, 0.0f, 0.5f),
+            Point3D(2.0f, 2.0f, 0.5f),
+            Point3D(0.0f, 2.0f, 0.5f)};
+        hull_wall->dense_vertices = hull_wall->vertices;
+        hull_wall->simplified_dense_indices = {0, 1, 2, 3, 4};
+        hull_wall->N = hull_wall->vertices.size();
+        hull_wall->is_robot_inside = false;
+        hull_wall->is_pillar = false;
+        hull_wall->is_boundary_clipped = false;
+        hull_wall->source = GraphNodeSource::STATIC_CANDIDATE;
+        const auto make_hull_ct = [&hull_wall](
+            const Point3D& position, const NodeFreeDirect type,
+            const PointPair& directions, const std::size_t index) {
+            CTNodePtr ct(new CTNode());
+            ct->position = position;
+            ct->poly_ptr = hull_wall;
+            ct->source = GraphNodeSource::STATIC_CANDIDATE;
+            ct->free_direct = type;
+            ct->surf_dirs = directions;
+            ct->contour_index = index;
+            return ct;
+        };
+        const PointPair hull_convex_dirs(
+            Point3D(1.0f, 1.0f, 0.0f),
+            Point3D(-1.0f, 1.0f, 0.0f));
+        const PointPair hull_concave_dirs(
+            Point3D(1.0f, -1.0f, 0.0f),
+            Point3D(-1.0f, -1.0f, 0.0f));
+        CTNodePtr hull_first = make_hull_ct(
+            hull_wall->vertices[0], NodeFreeDirect::CONVEX,
+            hull_convex_dirs, 0);
+        CTNodePtr hull_middle = make_hull_ct(
+            hull_wall->vertices[1], NodeFreeDirect::CONCAVE,
+            hull_concave_dirs, 1);
+        CTNodePtr hull_second = make_hull_ct(
+            hull_wall->vertices[2], NodeFreeDirect::CONVEX,
+            hull_convex_dirs, 2);
+        CTNodePtr hull_other = make_hull_ct(
+            hull_wall->vertices[3], NodeFreeDirect::CONVEX,
+            hull_convex_dirs, 3);
+        // Dense indices increase in the CT back direction, matching the
+        // production contour orientation convention.
+        hull_first->back = hull_middle;
+        hull_middle->back = hull_second;
+        hull_second->back = hull_other;
+        hull_other->back = hull_first;
+        hull_first->front = hull_other;
+        hull_other->front = hull_second;
+        hull_second->front = hull_middle;
+        hull_middle->front = hull_first;
+        hull_other->is_global_match = true;
+        NavNodePtr hull_first_nav = make_nav(1021, hull_first);
+        NavNodePtr hull_second_nav = make_nav(1022, hull_second);
+        PointCloudPtr indentation_block(new PointCloud());
+        PCLPoint indentation_point;
+        indentation_point.x = 1.0f;
+        indentation_point.y = 0.10f;
+        indentation_point.z = 0.5f;
+        indentation_point.intensity = 1.0f;
+        indentation_block->push_back(indentation_point);
+        indentation_block->width = 1;
+        indentation_block->height = 1;
+        indentation_block->is_dense = true;
+        ContourGraph::SetLocalCollisionCloud(
+            indentation_block, empty_dynamic);
+        const EdgeValidationResult hull_fallback =
+            ContourGraph::ValidateContourFollowEdge(
+                hull_first_nav, hull_second_nav);
+        reporter_.Check(
+            hull_fallback.valid && hull_fallback.route_points.size() == 2 &&
+                SameFloat(hull_fallback.projection_distance, 0.0f),
+            "A shallow FAR contour reduction records only endpoint topology and no convex-hull execution route");
+
+        NavNodePtr quadrant_corner(new NavNode());
+        quadrant_corner->free_direct = NodeFreeDirect::CONVEX;
+        quadrant_corner->surf_dirs = PointPair(
+            Point3D(1.0f, 0.0f, 0.0f),
+            Point3D(0.0f, 1.0f, 0.0f));
+        const auto convex_direction_allowed = [&quadrant_corner](
+            const Point3D& direction) {
+            return FARUtil::IsOutReducedDirs(
+                       direction, quadrant_corner->surf_dirs) ||
+                   FARUtil::IsInCoverageDirPairs(direction,
+                                                 quadrant_corner);
+        };
+        reporter_.Check(
+            !convex_direction_allowed(Point3D(3.0f, 3.0f, 0.0f)) &&
+                convex_direction_allowed(Point3D(-3.0f, -3.0f, 0.0f)),
+            "A Q1 obstacle wedge rejects Q1 but permits the opposite Q3 free-space direction");
 
         reporter_.Check(
             ContourGraph::IsPointInsideReliableContourWindow(
@@ -545,9 +990,9 @@ private:
         const EdgeValidationResult narrow =
             ContourGraph::ValidateContourFollowEdge(first, second);
         reporter_.Check(
-            !narrow.valid &&
-                narrow.reason == EdgeRejectReason::STATIC_CLOUD_BLOCKED,
-            "A narrow channel with no 0.45 m-clear offset is rejected");
+            narrow.valid && narrow.route_points.size() == 2 &&
+                SameFloat(narrow.projection_distance, 0.0f),
+            "Configuration-space corridor width does not erase a same-contour FAR topology relation");
 
         PolygonPtr other_wall(new Polygon(*wall));
         second_ct->poly_ptr = other_wall;
@@ -559,6 +1004,238 @@ private:
                     EdgeRejectReason::NOT_CURRENT_ADJACENT,
             "Nearby vertices from different obstacles cannot become a contour-follow edge");
         second_ct->poly_ptr = wall;
+
+        // Captured first-frame regression from the five-class stepped bag:
+        // CT2 -> CT14 crossed the observed CT3 -> CT0 side of a contour, but
+        // the complete polygon was skipped because CT2/CT3 touched the local
+        // window clipping cap.
+        ContourGraphParams clipped_params = params;
+        clipped_params.use_local_observation_window = true;
+        clipped_params.local_window_min_x = -4.0f;
+        clipped_params.local_window_max_x = 8.0f;
+        clipped_params.local_window_min_y = -5.0f;
+        clipped_params.local_window_max_y = 5.0f;
+        clipped_params.contour_boundary_guard = 0.20f;
+        graph.Init(clipped_params);
+        FARUtil::odom_pos = Point3D(0.0f, 0.0f, 0.5f);
+        FARUtil::free_odom_p = FARUtil::odom_pos;
+        ContourGraph::SetLocalObservationPose(
+            FARUtil::odom_pos, Point3D(1.0f, 0.0f, 0.0f));
+        reporter_.Check(
+            !ContourGraph::IsPointInsideReliableContourWindow(
+                Point3D(3.0f, 5.3999f, 0.5f)) &&
+                ContourGraph::IsPointInsideCurrentObservationWindow(
+                    Point3D(3.0f, 5.3999f, 0.5f)) &&
+                !ContourGraph::IsPointInsideCurrentObservationWindow(
+                    Point3D(3.0f, 5.41f, 0.5f)),
+            "A current CLIP endpoint gets one contour cell of pose/quantization tolerance without becoming reliable persistent evidence");
+
+        NavNodePtr clipped_odom(new NavNode());
+        clipped_odom->id = 1100;
+        clipped_odom->position = FARUtil::odom_pos;
+        clipped_odom->is_odom = true;
+        clipped_odom->is_goal = false;
+        clipped_odom->source = GraphNodeSource::ODOM;
+        const std::vector<Point3D> captured_ct0_ct3 = {
+            Point3D(4.4666667f, 4.2666669f, 0.5f),
+            Point3D(6.4000001f, 4.0666666f, 0.5f),
+            Point3D(6.2000003f, 5.4000001f, 0.5f),
+            Point3D(4.8666668f, 5.4000001f, 0.5f)};
+        const std::vector<Point3D> captured_ct12_ct16 = {
+            Point3D(-0.7333333f, 4.6666665f, 0.5f),
+            Point3D(2.2000000f, 4.4666667f, 0.5f),
+            Point3D(3.0000000f, 4.6666665f, 0.5f),
+            Point3D(3.0000000f, 5.4000001f, 0.5f),
+            Point3D(-0.7333333f, 5.4000001f, 0.5f)};
+        graph.UpdateContourGraph(
+            clipped_odom, {captured_ct0_ct3, captured_ct12_ct16});
+        ContourGraph::SetLocalCollisionCloud(
+            PointCloudPtr(new PointCloud()), PointCloudPtr(new PointCloud()));
+
+        const auto find_captured_ct = [](const Point3D& position) {
+            CTNodePtr best;
+            float distance = FARUtil::kINF;
+            for (const auto& candidate : ContourGraph::contour_graph_) {
+                const float candidate_distance =
+                    (candidate->position - position).norm_flat();
+                if (candidate_distance < distance) {
+                    best = candidate;
+                    distance = candidate_distance;
+                }
+            }
+            return distance < 0.01f ? best : CTNodePtr();
+        };
+        const CTNodePtr captured_ct2 = find_captured_ct(
+            captured_ct0_ct3[2]);
+        const CTNodePtr captured_ct14 = find_captured_ct(
+            captured_ct12_ct16[2]);
+        const CTNodePtr captured_ct15 = find_captured_ct(
+            captured_ct12_ct16[3]);
+        const CTNodePtr captured_ct3 = find_captured_ct(
+            captured_ct0_ct3[3]);
+        const CTNodePtr captured_ct0 = find_captured_ct(
+            captured_ct0_ct3[0]);
+        reporter_.Check(captured_ct2 && captured_ct14 && captured_ct15 &&
+                            captured_ct3 && captured_ct0,
+                        "Captured CT0, CT2, CT3, CT14 and CT15 contour vertices are reconstructed");
+        if (captured_ct2 && captured_ct14 && captured_ct15 && captured_ct3 &&
+            captured_ct0) {
+            const NavNodePtr captured_n4 = make_nav(1104, captured_ct2);
+            const NavNodePtr captured_n14 = make_nav(1114, captured_ct14);
+            const NavNodePtr captured_n15 = make_nav(1115, captured_ct15);
+            const NavNodePtr captured_n3 = make_nav(1103, captured_ct3);
+            const NavNodePtr captured_n0 = make_nav(1101, captured_ct0);
+            captured_n4->is_transient_contour_endpoint = true;
+            captured_n3->is_transient_contour_endpoint = true;
+            captured_n15->is_transient_contour_endpoint = true;
+
+            // Frame 2 of the stepped five-class bag moves the observation
+            // origin by only a few millimetres.  The rasterized top CLIPs
+            // stay at world y=5.4 m, which puts them just beyond the numeric
+            // local-window halo even though they were generated by this
+            // very snapshot.  Current contour topology must not disappear
+            // because of that second, pose-sensitive boundary test.
+            ContourGraph::SetLocalObservationPose(
+                Point3D(0.0f, -0.006f, 0.5f),
+                Point3D(1.0f, 0.0f, 0.0f));
+            reporter_.Check(
+                !ContourGraph::IsPointInsideCurrentObservationWindow(
+                    captured_ct2->position) &&
+                    !ContourGraph::IsPointInsideCurrentObservationWindow(
+                        captured_ct3->position),
+                "Captured frame-2 top CLIPs reproduce the millimetre pose-skew window rejection");
+            const EdgeValidationResult artificial_cap =
+                ContourGraph::ValidateContourFollowEdge(
+                    captured_n4, captured_n3);
+            reporter_.Check(
+                artificial_cap.valid &&
+                    artificial_cap.mode ==
+                        EdgeValidationMode::CLIP_ATTEMPT &&
+                    artificial_cap.route_points.size() == 2,
+                "A CLIP-CLIP artificial window cap is explicit snapshot-local attempt topology");
+            const EdgeValidationResult physical_side =
+                ContourGraph::ValidateContourFollowEdge(
+                    captured_n3, captured_n0);
+            reporter_.Check(
+                physical_side.valid &&
+                    physical_side.mode ==
+                        EdgeValidationMode::CONTOUR_FOLLOW,
+                "A physical current contour side from an interior corner to CLIP survives pose-skew at the window halo");
+            ContourGraph::SetLocalObservationPose(
+                FARUtil::odom_pos, Point3D(1.0f, 0.0f, 0.0f));
+            reporter_.Check(
+                ContourGraph::ValidateVisibilityEdgeGeometry(
+                    captured_n4, captured_n14, false) ==
+                    EdgeRejectReason::POLYGON_BLOCKED,
+                "A CLIP visibility chord crossing the observed CT3-CT0 side is rejected");
+            reporter_.Check(
+                ContourGraph::ValidateVisibilityEdgeWithRoute(
+                    captured_n3, captured_n15, false).valid,
+                "Captured first-frame N5-N15 CLIP pair remains an ordinary current-snapshot visibility edge");
+
+            NavNodePtr free_side_node(new NavNode());
+            free_side_node->id = 1199;
+            free_side_node->position = Point3D(7.2f, 6.2f, 0.5f);
+            free_side_node->free_direct = NodeFreeDirect::PILLAR;
+            free_side_node->source = GraphNodeSource::STATIC_CANDIDATE;
+            free_side_node->is_odom = false;
+            free_side_node->is_goal = false;
+            free_side_node->is_boundary = false;
+            free_side_node->is_contour_match = false;
+            reporter_.Check(
+                ContourGraph::ValidateVisibilityEdgeGeometry(
+                    captured_n4, free_side_node, false) ==
+                    EdgeRejectReason::NONE,
+                "A current CLIP edge leaving through the free side remains available");
+        }
+
+        // A CLIP direction must ignore the synthetic boundary cap.  The
+        // observed wall approaches the +x window edge; its free side is -y.
+        // The configuration grid occupies the opposite +y side and provides
+        // the authority for choosing the signed normal.
+        ContourGraphParams clip_direction_params = clipped_params;
+        clip_direction_params.local_window_min_x = -2.0f;
+        clip_direction_params.local_window_max_x = 2.0f;
+        clip_direction_params.local_window_min_y = -2.0f;
+        clip_direction_params.local_window_max_y = 2.0f;
+        graph.Init(clip_direction_params);
+        ContourGraph::SetLocalObservationPose(
+            Point3D(0.0f, 0.0f, 0.5f), Point3D(1.0f, 0.0f, 0.0f));
+        constexpr float clip_grid_resolution = 0.10f;
+        cv::Mat clip_configuration =
+            cv::Mat::zeros(121, 121, CV_8UC1);
+        const auto mark_clip_occupied = [&clip_configuration](
+            const float x, const float y) {
+            const int row = static_cast<int>(std::floor(
+                60.0f + x / clip_grid_resolution + 0.5f));
+            const int col = static_cast<int>(std::floor(
+                60.0f + y / clip_grid_resolution + 0.5f));
+            if (row >= 0 && row < clip_configuration.rows && col >= 0 &&
+                col < clip_configuration.cols) {
+                clip_configuration.at<std::uint8_t>(row, col) = 255;
+            }
+        };
+        for (float x = -0.5f; x <= 2.9f; x += clip_grid_resolution) {
+            for (float y = -0.45f; y <= 1.45f;
+                 y += clip_grid_resolution) {
+                mark_clip_occupied(x, y);
+            }
+        }
+        ContourGraph::SetLocalCollisionGrids(
+            clip_configuration, cv::Mat(),
+            Point3D(0.0f, 0.0f, 0.5f), clip_grid_resolution);
+        const std::vector<Point3D> clipped_wall = {
+            Point3D(0.0f, 0.0f, 0.5f),
+            Point3D(2.4f, 0.0f, 0.5f),
+            Point3D(2.4f, 1.0f, 0.5f),
+            Point3D(0.0f, 1.0f, 0.5f)};
+        graph.UpdateContourGraph(clipped_odom, {clipped_wall});
+        CTNodePtr lower_clip;
+        for (const auto& candidate : ContourGraph::contour_graph_) {
+            if (candidate &&
+                (candidate->position - clipped_wall[1]).norm_flat() <
+                    0.01f) {
+                lower_clip = candidate;
+                break;
+            }
+        }
+        reporter_.Check(
+            lower_clip && lower_clip->is_boundary_clipped &&
+                lower_clip->is_free_space_dir_reliable &&
+                lower_clip->free_space_dir.y < -0.9f &&
+                std::abs(lower_clip->free_space_dir.x) < 0.1f,
+            "CLIP free direction uses the physical wall tangent and configuration-space free side, not the artificial cap bisector");
+
+        graph.Init(clipped_params);
+        ContourGraph::SetLocalObservationPose(
+            FARUtil::odom_pos, Point3D(1.0f, 0.0f, 0.0f));
+
+        // Frame-12 regression around historical N11=(0.867,-4.0).  The
+        // physical CT10->CT4 side ends at the cropped lower boundary, but the
+        // section around N11 is still fully observed in W_inner.  Only the
+        // portion close to the CLIP endpoint must remain unknown.
+        const std::vector<Point3D> captured_n11_polygon = {
+            Point3D(0.8666667f, -5.3333335f, 0.5f),
+            Point3D(2.2000000f, -5.1333337f, 0.5f),
+            Point3D(2.6666667f, -3.5333333f, 0.5f),
+            Point3D(5.7999997f, -3.9333334f, 0.5f),
+            Point3D(6.4000001f, -3.5333333f, 0.5f),
+            Point3D(6.4000001f, -2.6000001f, 0.5f),
+            Point3D(1.6666666f, -2.4000001f, 0.5f)};
+        graph.UpdateContourGraph(clipped_odom, {captured_n11_polygon});
+        PolygonPtr replacement_polygon;
+        reporter_.Check(
+            ContourGraph::IsPointConfirmedOnCurrentStaticSegmentInterior(
+                Point3D(0.8666667f, -4.0f, 0.5f), 0.45f, 0.675f,
+                &replacement_polygon) &&
+                replacement_polygon &&
+                replacement_polygon->is_boundary_clipped,
+            "A historical N11 well inside a physical contour-to-CLIP side receives segment-interior replacement evidence");
+        reporter_.Check(
+            !ContourGraph::IsPointConfirmedOnCurrentStaticSegmentInterior(
+                Point3D(1.108f, -4.45f, 0.5f), 0.45f, 0.675f,
+                nullptr),
+            "A historical point whose local segment neighbourhood reaches W_guard receives no replacement evidence");
 
         ContourGraph::SetLocalCollisionCloud(PointCloudPtr(new PointCloud()),
                                              PointCloudPtr(new PointCloud()));
@@ -580,7 +1257,6 @@ private:
         params.contour_grid_resolution = 0.2f;
         params.kRatio = 3.0f;
         params.kThredValue = 3;
-        params.kBlurSize = 3;
         params.is_save_img = false;
         params.img_path.clear();
         ContourDetector detector;

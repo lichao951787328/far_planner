@@ -32,6 +32,9 @@ enum class GraphNodeSource {
     ODOM,
     GOAL,
     STATIC_CANDIDATE,
+    // A temporally confirmed historical Graph vertex. "GLOBAL" describes
+    // Graph lifetime/scope; it does not imply support from a global occupancy
+    // map in local-only voxel mode.
     STATIC_GLOBAL,
     DYNAMIC_LOCAL,
     PATH_HISTORY
@@ -55,8 +58,18 @@ enum class GraphEdgeSource {
 
 enum class EdgeValidationMode {
     VISIBILITY = 0,
-    CONTOUR_FOLLOW
+    CONTOUR_FOLLOW,
+    // A current-snapshot-only relation along the artificial cap OpenCV uses
+    // to close a contour cropped by the local observation window.  It may
+    // support exploration search, but never claims observed obstacle
+    // topology or robot-centre clearance and cannot survive its CLIP nodes.
+    CLIP_ATTEMPT
 };
+
+inline bool IsContourTopologyMode(const EdgeValidationMode mode) {
+    return mode == EdgeValidationMode::CONTOUR_FOLLOW ||
+           mode == EdgeValidationMode::CLIP_ATTEMPT;
+}
 
 // A persistent obstacle and the navigation topology inferred from its contour
 // have different lifetimes.  In particular, an old wall voxel can remain
@@ -73,6 +86,7 @@ enum class EdgeRejectReason {
     UNREACHABLE,
     DIRECTION_REJECTED,
     DIRECTION_SPARSIFIED,
+    TRIANGLE_SPARSIFIED,
     STATIC_CLOUD_BLOCKED,
     DYNAMIC_CLOUD_BLOCKED,
     POLYGON_BLOCKED,
@@ -97,6 +111,11 @@ struct GraphEdgeState {
     bool has_clearance_geometry = false;
     Point3D route_start;
     Point3D route_end;
+    // Ordered robot-centre polyline from this edge's owner to its neighbor.
+    // Only executable visibility/query edges set has_clearance_geometry.
+    // FAR contour relations intentionally leave this empty because they are
+    // topology; runtime waypoint projection creates the motion target.
+    std::vector<Point3D> route_points;
     float route_cost = 0.0f;
     int current_contour_misses = 0;
     // Consecutive physical failures of an ordinary static visibility edge.
@@ -138,9 +157,20 @@ inline bool ApplyContourTopologyObservation(
  * Failed geometry is blocked immediately for safety, but the accumulated
  * contour relation is retained so one noisy snapshot cannot erase topology. */
 inline void ApplyContourStaticValidationObservation(
-    GraphEdgeState& state, const bool route_is_statically_valid) {
+    GraphEdgeState& state, const bool route_is_statically_valid,
+    const int remove_after_misses = 0) {
     state.static_valid = route_is_statically_valid;
     state.active = true;
+    if (route_is_statically_valid) {
+        state.static_visibility_misses = 0;
+    } else if (remove_after_misses > 0) {
+        // Physical blocking has the same safety lifetime for contour and
+        // ordinary visibility edges: mask on the first observation, erase
+        // identity only after repeated accepted snapshots.
+        state.static_visibility_misses = std::min(
+            std::max(1, remove_after_misses),
+            state.static_visibility_misses + 1);
+    }
 }
 
 /** Ordinary visibility edges use a two-stage failure policy: one bad static
@@ -184,8 +214,10 @@ struct EdgeValidationResult {
     bool valid = false;
     bool dynamic_blocked = false;
     EdgeRejectReason reason = EdgeRejectReason::NONE;
+    EdgeValidationMode mode = EdgeValidationMode::VISIBILITY;
     Point3D route_start;
     Point3D route_end;
+    std::vector<Point3D> route_points;
     float route_cost = 0.0f;
     float projection_distance = 0.0f;
 };
@@ -216,6 +248,7 @@ struct EdgeRejectionStats {
                 break;
             case EdgeRejectReason::DIRECTION_REJECTED:
             case EdgeRejectReason::DIRECTION_SPARSIFIED:
+            case EdgeRejectReason::TRIANGLE_SPARSIFIED:
                 ++direction_rejected;
                 break;
             case EdgeRejectReason::STATIC_CLOUD_BLOCKED:
@@ -261,6 +294,13 @@ struct Polygon
   Polygon() = default;
   std::size_t N;
   std::vector<Point3D> vertices;
+  // Ordered TC89 source chain before RDP simplification. The sparse vertices
+  // above remain the graph identity/topology layer. This correspondence is
+  // retained for diagnostics; FAR contour edges do not treat it as a stored
+  // robot-centre execution polyline.
+  std::vector<Point3D> dense_vertices;
+  // TC89 source-chain index corresponding to each entry in vertices.
+  std::vector<std::size_t> simplified_dense_indices;
   bool is_robot_inside;
   bool is_pillar;
   bool is_boundary_clipped = false;
@@ -286,8 +326,18 @@ struct CTNode
     NodeFreeDirect free_direct;
     GraphNodeSource source = GraphNodeSource::UNKNOWN;
 
+    // Signed direction from the contour corner into currently observed free
+    // robot-centre space.  Unlike SurfTopoDirect(), this has an explicit
+    // occupied/free-side meaning and is trusted for identity matching only
+    // after both sides of the current configuration-space boundary agree.
+    Point3D free_space_dir = Point3D(0.0f, 0.0f, 0.0f);
+    bool is_free_space_dir_reliable = false;
+
     PointPair surf_dirs;
     PolygonPtr poly_ptr;
+    // Index of this node in poly_ptr->vertices.  Pillar nodes have no
+    // one-to-one simplified vertex and leave this at zero.
+    std::size_t contour_index = 0;
     std::shared_ptr<CTNode> front;
     std::shared_ptr<CTNode> back;
 
@@ -336,6 +386,11 @@ struct NavNode
     NodeType node_type; 
     NodeFreeDirect free_direct;
     GraphNodeSource source = GraphNodeSource::UNKNOWN;
+    // Last accepted, explicitly oriented free-space direction.  Keeping this
+    // separate from surf_dirs prevents an unoriented contour bisector from
+    // enlarging the cross-frame identity-association radius.
+    Point3D free_space_dir = Point3D(0.0f, 0.0f, 0.0f);
+    bool is_free_space_dir_reliable = false;
     // Updated exactly once per accepted semantic-map snapshot.  Candidates
     // become persistent after three positive observations; confirmed static
     // nodes are deleted only after three misses while inside the update zone.
@@ -363,6 +418,41 @@ struct NavNode
     std::shared_ptr<NavNode> free_parent;
     
 };
+
+/** A CLIP may participate in the current graph exactly like another contour
+ * vertex, but only while it is attached to the semantic snapshot that
+ * created it. Its quantized world coordinate is deliberately not checked:
+ * millimetre-scale rolling-window motion can put a raster vertex just beyond
+ * the numerical halo without making the vertex stale. */
+inline bool IsCurrentSnapshotContourEndpoint(const NavNode& node) {
+    return node.is_transient_contour_endpoint &&
+           node.observed_in_semantic_snapshot &&
+           node.is_contour_match &&
+           static_cast<bool>(node.ctnode);
+}
+
+/** Static-corner identity association is a map-resolution tolerance, not a
+ * robot-footprint clearance.  Direction agreement may interpolate between
+ * the tight and maximum radii but can never exceed the configured hard cap. */
+inline float StaticCornerMatchRadius(
+    const float tight_radius, const float maximum_radius,
+    const bool directions_reliable, const float free_direction_cosine) {
+    const float tight = std::max(0.0f, tight_radius);
+    const float maximum = std::max(tight, maximum_radius);
+    if (!directions_reliable) return tight;
+    const float agreement = std::max(
+        0.0f, std::min(1.0f, free_direction_cosine));
+    return tight + (maximum - tight) * agreement;
+}
+
+inline bool AreStaticCornerFreeDirectionsCompatible(
+    const bool directions_reliable, const float free_direction_cosine) {
+    // An unverified direction cannot reject a close positional fallback.  If
+    // both directions are verified, however, opposite free sides describe
+    // different physical corner identities even when their contour axes are
+    // parallel.
+    return !directions_reliable || free_direction_cosine >= 0.0f;
+}
 
 /** Navigation-corner lifetime is independent of physical occupancy. A
  * current straight wall may contradict an old wall-end node while the wall
@@ -451,15 +541,15 @@ inline bool IsGraphNodeSearchEligible(const NavNode& node) {
            node.source == GraphNodeSource::DYNAMIC_LOCAL;
 }
 
-/** A crop-generated static contour endpoint may reuse only its own transient
- * identity. It must never overwrite a confirmed physical corner merely
- * because both happen to be close to the current raster boundary. */
+/** A crop-generated static contour endpoint is snapshot-local. It never
+ * borrows any previous identity, including another CLIP identity. A later
+ * non-clipped physical corner may still match the transient candidate and
+ * begin ordinary static confirmation. */
 inline bool IsContourEndpointLifetimeMatchCompatible(
     const bool contour_is_static, const bool contour_is_boundary_clipped,
-    const NavNode& node) {
+    const NavNode&) {
     if (!contour_is_static || !contour_is_boundary_clipped) return true;
-    return node.source == GraphNodeSource::STATIC_CANDIDATE &&
-           node.is_transient_contour_endpoint;
+    return false;
 }
 
 // A goal may connect only to obstacle-contour vertices that belong to the
@@ -484,14 +574,10 @@ inline bool IsGoalConnectionCandidate(const NavNode& node) {
            node.free_direct == NodeFreeDirect::PILLAR;
 }
 
-/** Candidate policy for the transient robot-start query layer.
- *
- * A confirmed static corner is global knowledge and remains a valid start
- * connection target after it leaves the moving semantic window.  In
- * contrast, unconfirmed static and dynamic vertices describe only the latest
- * local overlay and therefore require a current contour observation.  This
- * keeps the start query global without accidentally retaining stale dynamic
- * or crop-generated vertices. */
+/** Source/lifecycle candidate policy for the transient robot-start layer.
+ * The caller applies the active observation-window gate separately. Confirmed
+ * static history does not require a current contour match; unconfirmed static
+ * and dynamic vertices do. */
 inline bool IsStartConnectionCandidate(const NavNode& node) {
     if (!IsGoalConnectionCandidate(node)) return false;
     if (node.source == GraphNodeSource::STATIC_GLOBAL) return true;
@@ -499,10 +585,9 @@ inline bool IsStartConnectionCandidate(const NavNode& node) {
            static_cast<bool>(node.ctnode);
 }
 
-/** Every start edge obeys the optional universal limit. Local overlay
- * vertices additionally remain meaningful only inside their observation or
- * stitch window; confirmed static vertices are exempt only from these moving
- * local-window limits. */
+/** Every start edge obeys the optional universal radial limit. The exact
+ * local-window gate, when enabled, is applied by UpdateOdomConnections before
+ * this compatibility policy. */
 inline bool ShouldPruneStartConnectionForRange(
     const NavNode& node, const float distance,
     const float dynamic_range, const float static_stitch_range,
@@ -539,6 +624,50 @@ inline bool HasActiveSearchEligibleIncidentEdge(const NavNode& node) {
         }
     }
     return false;
+}
+
+/** A confirmed historical corner may temporarily leave the reusable static
+ * main component when its old edges are blocked, while simultaneously being
+ * matched to a valid corner in the current local contour.  In that case the
+ * current, collision-validated contour edges are sufficient evidence to use
+ * it as a snapshot-local bridge.  Requiring both endpoints to be observed,
+ * matched to the same current polygon and connected by an active contour
+ * route prevents stale detached history from re-entering search. */
+inline bool HasCurrentValidatedContourIncidentEdge(const NavNode& node) {
+    if (node.source != GraphNodeSource::STATIC_GLOBAL ||
+        !node.observed_in_semantic_snapshot || !node.is_contour_match ||
+        !node.ctnode || !node.ctnode->poly_ptr) {
+        return false;
+    }
+    for (const auto& neighbor : node.connect_nodes) {
+        if (!neighbor || !neighbor->observed_in_semantic_snapshot ||
+            !neighbor->is_contour_match || !neighbor->ctnode ||
+            neighbor->ctnode->poly_ptr != node.ctnode->poly_ptr) {
+            continue;
+        }
+        const auto forward = node.edge_states.find(neighbor->id);
+        const auto reverse = neighbor->edge_states.find(node.id);
+        if (forward != node.edge_states.end() &&
+            reverse != neighbor->edge_states.end() &&
+            forward->second.validation_mode ==
+                EdgeValidationMode::CONTOUR_FOLLOW &&
+            reverse->second.validation_mode ==
+                EdgeValidationMode::CONTOUR_FOLLOW &&
+            forward->second.IsActive() && reverse->second.IsActive()) {
+            return true;
+        }
+    }
+    return false;
+}
+
+inline bool IsStaticGlobalEligibleForCurrentSearch(
+    const NavNode& node, const bool belongs_to_static_main) {
+    if (node.source != GraphNodeSource::STATIC_GLOBAL ||
+        !HasActiveSearchEligibleIncidentEdge(node)) {
+        return false;
+    }
+    return belongs_to_static_main ||
+           HasCurrentValidatedContourIncidentEdge(node);
 }
 
 /** Pure lifecycle policy shared by production code and regression tests. */
@@ -587,6 +716,47 @@ inline GraphLifecycleAction AdvanceStaticNodeLifecycle(
         return GraphLifecycleAction::REMOVE;
     }
     return GraphLifecycleAction::KEEP;
+}
+
+inline bool IsStaticHistoryMergeEvidence(
+    const StaticNodeEvidence evidence) {
+    return evidence == StaticNodeEvidence::UNKNOWN ||
+           evidence == StaticNodeEvidence::EXPLICIT_FREE;
+}
+
+/** Pure admission policy for consolidating a one-to-one match loser into the
+ * currently observed identity. UNKNOWN may admit identity consolidation but
+ * remains insufficient evidence for disappearance/deletion. */
+inline bool AreStaticHistoryNodesMergeCompatible(
+    const NavNode& keeper, const NavNode& obsolete,
+    const StaticNodeEvidence obsolete_evidence,
+    const float radius, const float height_tolerance,
+    const float direction_cosine) {
+    const auto is_static = [](const GraphNodeSource source) {
+        return source == GraphNodeSource::STATIC_CANDIDATE ||
+               source == GraphNodeSource::STATIC_GLOBAL;
+    };
+    if (!is_static(keeper.source) || !is_static(obsolete.source) ||
+        !keeper.observed_in_semantic_snapshot ||
+        !keeper.is_contour_match || !keeper.ctnode ||
+        obsolete.observed_in_semantic_snapshot ||
+        obsolete.is_contour_match ||
+        keeper.is_transient_contour_endpoint ||
+        obsolete.is_transient_contour_endpoint ||
+        !IsStaticHistoryMergeEvidence(obsolete_evidence) ||
+        keeper.free_direct != obsolete.free_direct || radius <= 0.0f ||
+        std::fabs(keeper.position.z - obsolete.position.z) >
+            height_tolerance ||
+        (keeper.position - obsolete.position).norm_flat() > radius) {
+        return false;
+    }
+    if (keeper.free_direct == NodeFreeDirect::PILLAR) return true;
+    if (!keeper.is_free_space_dir_reliable ||
+        !obsolete.is_free_space_dir_reliable) {
+        return false;
+    }
+    return keeper.free_space_dir.norm_flat_dot(
+               obsolete.free_space_dir) >= direction_cosine;
 }
 
 typedef std::shared_ptr<NavNode> NavNodePtr;
@@ -772,9 +942,13 @@ inline bool ShouldCommitStaticCornerReplacement(
            removal_preserves_connectivity;
 }
 
-/** A replacement contour relation is usable only when both current static
- * endpoints have passed FAR's position/direction stabilization and the edge
- * stores the exact collision-validated geometry used by search/waypoint. */
+/** A replacement contour relation is usable when its persistent endpoints
+ * are confirmed, matched in the current snapshot and the edge stores the
+ * exact geometry used by search/waypoint. Position/direction finalization is
+ * deliberately not required: nearby new voxels reset FAR's filters, while
+ * the caller already requires several consecutive segment observations.
+ * One endpoint may be the current snapshot's transient CLIP; a CLIP-CLIP cap
+ * or an ordinary unconfirmed candidate is not a persistent replacement. */
 inline bool IsStableValidatedContourReplacement(
     const NavNodePtr& first, const NavNodePtr& second,
     const NavNodePtr& obsolete, const PolygonPtr& current_polygon) {
@@ -784,13 +958,25 @@ inline bool IsStableValidatedContourReplacement(
     }
     const auto is_stable_current_static = [&current_polygon](
         const NavNodePtr& node) {
-        return node && node->source == GraphNodeSource::STATIC_GLOBAL &&
-               node->observed_in_semantic_snapshot && node->is_contour_match &&
-               node->ctnode && node->ctnode->poly_ptr == current_polygon &&
-               node->is_finalized && IsGraphNodeSearchEligible(*node);
+        if (!node || !node->observed_in_semantic_snapshot ||
+            !node->is_contour_match || !node->ctnode ||
+            node->ctnode->poly_ptr != current_polygon ||
+            !IsGraphNodeSearchEligible(*node)) {
+            return false;
+        }
+        if (node->source == GraphNodeSource::STATIC_GLOBAL) {
+            return true;
+        }
+        return node->source == GraphNodeSource::STATIC_CANDIDATE &&
+               node->is_transient_contour_endpoint &&
+               node->ctnode->is_boundary_clipped;
     };
     if (!is_stable_current_static(first) ||
         !is_stable_current_static(second)) {
+        return false;
+    }
+    if (first->source != GraphNodeSource::STATIC_GLOBAL &&
+        second->source != GraphNodeSource::STATIC_GLOBAL) {
         return false;
     }
     if (std::find(first->contour_connects.begin(),
@@ -806,8 +992,6 @@ inline bool IsStableValidatedContourReplacement(
                EdgeValidationMode::CONTOUR_FOLLOW &&
            reverse->second.validation_mode ==
                EdgeValidationMode::CONTOUR_FOLLOW &&
-           forward->second.has_clearance_geometry &&
-           reverse->second.has_clearance_geometry &&
            forward->second.IsActive() && reverse->second.IsActive();
 }
 
@@ -975,7 +1159,6 @@ inline bool HasActiveStaticAlternatePathWithoutEdge(
                 edge_it != current->edge_states.end() &&
                 edge_it->second.validation_mode ==
                     EdgeValidationMode::CONTOUR_FOLLOW &&
-                edge_it->second.has_clearance_geometry &&
                 current->observed_in_semantic_snapshot &&
                 neighbor->observed_in_semantic_snapshot &&
                 current->is_contour_match && neighbor->is_contour_match &&
@@ -1011,6 +1194,40 @@ inline bool IsCloserVisibilityCandidateInDirection(
     return alternative_dist < target_dist - epsilon ||
            (std::fabs(alternative_dist - target_dist) <= epsilon &&
             alternative.id < target.id);
+}
+
+/**
+ * A direct visibility edge is redundant when a third vertex lies close to
+ * that edge and the two already-valid sides form an almost equally short
+ * route.  Both tests are dimensionless so the same policy applies to small
+ * contour triangles and long odom visibility triangles.
+ *
+ * This primitive evaluates first--second as the proposed removable edge.  It
+ * deliberately requires that edge to be strictly longest; callers can then
+ * remove edges greedily while the two shorter sides still exist, preserving
+ * graph connectivity.
+ */
+inline bool IsRedundantLongestEdgeOfFlatTriangle(
+    const Point3D& first, const Point3D& second, const Point3D& via,
+    const float maximum_detour_ratio, const float maximum_altitude_ratio,
+    const float epsilon = 1e-6f) {
+    const float direct = (second - first).norm_flat();
+    const float first_leg = (via - first).norm_flat();
+    const float second_leg = (second - via).norm_flat();
+    if (direct <= epsilon || first_leg <= epsilon || second_leg <= epsilon ||
+        maximum_detour_ratio < 1.0f || maximum_altitude_ratio < 0.0f) {
+        return false;
+    }
+    if (direct <= std::max(first_leg, second_leg) + epsilon) return false;
+
+    const float detour_ratio = (first_leg + second_leg) / direct;
+    if (detour_ratio > maximum_detour_ratio + epsilon) return false;
+
+    const Point3D edge = second - first;
+    const Point3D offset = via - first;
+    const float twice_area = std::fabs(edge.x * offset.y - edge.y * offset.x);
+    const float altitude_ratio = twice_area / (direct * direct);
+    return altitude_ratio <= maximum_altitude_ratio + epsilon;
 }
 
 struct nodeptr_equal

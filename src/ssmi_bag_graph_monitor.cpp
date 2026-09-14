@@ -1,7 +1,6 @@
 #include <geometry_msgs/PointStamped.h>
 #include <nav_msgs/Odometry.h>
 #include <nav_msgs/Path.h>
-#include <octomap_msgs/Octomap.h>
 #include <pcl/kdtree/kdtree_flann.h>
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
@@ -169,8 +168,8 @@ class SsmiBagGraphMonitor {
     if (!csv_.is_open()) {
       ROS_ERROR("SSMI monitor cannot open CSV: %s", output_csv_.c_str());
     } else {
-      csv_ << "wall_elapsed_s,ros_time,map_stamp,odom_stamp,"
-              "local_voxel_stamp,map_frame,source_odom_frame,"
+      csv_ << "wall_elapsed_s,ros_time,geometry_stamp,odom_stamp,"
+              "local_voxel_stamp,geometry_frame,source_odom_frame,"
               "local_voxel_frame,local_voxel_points,"
               "local_voxel_acquisitions,local_voxel_schema_valid,"
               "graph_frame,goal_frame,path_frame,"
@@ -185,14 +184,12 @@ class SsmiBagGraphMonitor {
               "graph_edges_checked,graph_min_clearance_m,"
               "graph_clearance_violations,robot_static_clearance_m,"
               "waypoint_path_distance_m,reached,"
-              "semantic_snapshot_s,semantic_update_s,semantic_callback_s,"
+              "snapshot_s,graph_update_s,input_callback_s,"
               "main_loop_s\n";
     }
 
     odom_sub_ = nh_.subscribe(source_odom_topic_, 20,
                               &SsmiBagGraphMonitor::OdomCallback, this);
-    map_sub_ = nh_.subscribe("/octomap_full", 1,
-                             &SsmiBagGraphMonitor::MapCallback, this);
     local_voxel_sub_ = nh_.subscribe(
         local_voxel_topic_, 2,
         &SsmiBagGraphMonitor::LocalVoxelCallback, this);
@@ -406,18 +403,12 @@ class SsmiBagGraphMonitor {
              interpolation_span);
   }
 
-  void MapCallback(const octomap_msgs::OctomapConstPtr& message) {
-    if (!message) return;
-    have_map_ = true;
-    map_frame_ = message->header.frame_id;
-    map_stamp_ = message->header.stamp;
-    map_id_ = message->id;
-  }
-
   void LocalVoxelCallback(
       const sensor_msgs::PointCloud2ConstPtr& message) {
     if (!message) return;
     local_voxel_frame_ = message->header.frame_id;
+    map_frame_ = local_voxel_frame_;
+    map_stamp_ = message->header.stamp;
     local_voxel_points_ =
         static_cast<size_t>(message->width) * message->height;
     local_voxel_schema_valid_ =
@@ -528,12 +519,20 @@ class SsmiBagGraphMonitor {
     }
     if (!node_marker || !edge_marker) return;
 
-    graph_nodes_ = node_marker->points.size();
     graph_edges_ = edge_marker->points.size() / 2;
     std::map<QuantizedPoint, size_t> point_index;
-    for (size_t index = 0; index < node_marker->points.size(); ++index) {
-      point_index.emplace(Quantize(node_marker->points[index]), index);
+    std::vector<Point> canonical_nodes;
+    canonical_nodes.reserve(node_marker->points.size());
+    for (const Point& point : node_marker->points) {
+      const auto inserted = point_index.emplace(
+          Quantize(point), canonical_nodes.size());
+      if (inserted.second) canonical_nodes.push_back(point);
     }
+    // Marker edges identify endpoints by position rather than graph-node ID.
+    // Coincident nodes are therefore indistinguishable on this transport and
+    // must be treated as one geometric vertex; otherwise the later duplicate
+    // is counted as a spurious isolated component.
+    graph_nodes_ = canonical_nodes.size();
     std::vector<std::set<size_t>> adjacency(graph_nodes_);
     for (size_t index = 0; index + 1 < edge_marker->points.size(); index += 2) {
       const auto first = point_index.find(Quantize(edge_marker->points[index]));
@@ -573,12 +572,12 @@ class SsmiBagGraphMonitor {
 
     robot_component_ = 0;
     robot_degree_ = 0;
-    if (have_aligned_odom_ && !node_marker->points.empty()) {
+    if (have_aligned_odom_ && !canonical_nodes.empty()) {
       size_t nearest = 0;
       double nearest_distance = std::numeric_limits<double>::infinity();
-      for (size_t index = 0; index < node_marker->points.size(); ++index) {
+      for (size_t index = 0; index < canonical_nodes.size(); ++index) {
         const double distance = Distance3D(
-            current_robot_, node_marker->points[index]);
+            current_robot_, canonical_nodes[index]);
         if (distance < nearest_distance) {
           nearest_distance = distance;
           nearest = index;
@@ -616,12 +615,14 @@ class SsmiBagGraphMonitor {
     }
     if (!node_marker || !edge_marker) return;
 
-    static_graph_nodes_ = node_marker->points.size();
     static_graph_edges_ = edge_marker->points.size() / 2;
     std::map<QuantizedPoint, size_t> point_index;
-    for (size_t index = 0; index < node_marker->points.size(); ++index) {
-      point_index.emplace(Quantize(node_marker->points[index]), index);
+    for (const Point& point : node_marker->points) {
+      point_index.emplace(Quantize(point), point_index.size());
     }
+    // See SearchGraphCallback: MarkerArray has no node IDs, so coincident
+    // points form one canonical geometric vertex for connectivity checks.
+    static_graph_nodes_ = point_index.size();
     std::vector<std::set<size_t>> adjacency(static_graph_nodes_);
     for (size_t index = 0; index + 1 < edge_marker->points.size();
          index += 2) {
@@ -858,7 +859,7 @@ class SsmiBagGraphMonitor {
   }
 
   void WallTimerCallback(const ros::WallTimerEvent&) {
-    if (auto_goal_ && !goal_sent_ && have_graph_ && have_map_ &&
+    if (auto_goal_ && !goal_sent_ && have_graph_ &&
         have_local_voxel_ && local_voxel_schema_valid_ &&
         have_initial_alignment_ && !first_graph_wall_.isZero() &&
         (ros::WallTime::now() - first_graph_wall_).toSec() >=
@@ -898,17 +899,17 @@ class SsmiBagGraphMonitor {
     }
     const double dx = end.x - start.x;
     const double dy = end.y - start.y;
-    // Match ContourGraph::IsEdgeCollisionFreeInCloud(): its sampling distance
-    // and endpoint exclusion are defined by planar route length.
+    // This monitor intentionally reports clearance to the raw point cloud.
+    // Production ContourGraph now traverses its already-inflated binary
+    // configuration grid, so this sampling is a metric diagnostic rather than
+    // a second implementation of planner collision acceptance.
     const double length = std::hypot(dx, dy);
     if (length <= 1e-9) return std::numeric_limits<double>::infinity();
     const double margin = std::min(
         std::max(0.0, endpoint_exclusion), length * 0.45);
     const double checked_length = std::max(0.0, length - 2.0 * margin);
-    // FAR performs the swept-body query in XY at the edge's mid-height.  Use
-    // the same vertical slice so this independent monitor reproduces the
-    // planner's 0.45 m clearance test instead of measuring a different,
-    // interpolated-height trajectory.
+    // Keep the historical mid-height slice so before/after logs remain
+    // comparable while measuring raw-cloud clearance.
     const double mid_z = (start.z + end.z) * 0.5;
     const size_t samples = std::max<size_t>(
         1, static_cast<size_t>(std::ceil(checked_length /
@@ -944,7 +945,6 @@ class SsmiBagGraphMonitor {
   }
 
   bool FramesValid() const {
-    if (!have_map_ || !SameFrame(map_frame_, expected_frame_)) return false;
     if (!have_local_voxel_ ||
         !SameFrame(local_voxel_frame_, expected_frame_)) {
       return false;
@@ -1013,13 +1013,13 @@ class SsmiBagGraphMonitor {
     const bool alignment_ok = have_initial_alignment_ &&
                               initial_position_error_ <= position_tolerance_ &&
                               initial_yaw_error_deg_ <= yaw_tolerance_deg_;
-    const bool semantic_ok = have_map_ && map_id_ == "SemanticOcTree" &&
-                             static_points_ > 0;
     const bool local_voxel_ok = have_local_voxel_ &&
                                 local_voxel_acquisitions_ > 0 &&
                                 local_voxel_schema_valid_ &&
                                 !local_voxel_zero_stamp_seen_ &&
                                 !local_voxel_out_of_order_seen_;
+    const bool local_geometry_ok = local_voxel_ok && static_points_ > 0 &&
+                                   graph_static_points_ > 0;
     const bool graph_ok = have_graph_ && !graph_connectivity_ever_failed_ &&
                           robot_component_ > 0 &&
                           robot_component_ == largest_component_ &&
@@ -1036,14 +1036,14 @@ class SsmiBagGraphMonitor {
     // for tuning robot geometry and contour projections.
     const bool clearance_ok = maximum_graph_edges_checked_ > 0 &&
                               maximum_graph_clearance_violations_ == 0;
-    final_pass_ = alignment_ok && FramesValid() && semantic_ok &&
+    final_pass_ = alignment_ok && FramesValid() && local_geometry_ok &&
                   local_voxel_ok && graph_ok && goal_ok && clearance_ok;
 
     ROS_INFO("SSMI monitor finalizing: %s", reason.c_str());
-    ROS_INFO("SSMI_MONITOR_RESULT %s alignment=%s frames=%s semantic=%s local_voxel=%s graph=%s goal=%s clearance=%s",
+    ROS_INFO("SSMI_MONITOR_RESULT %s alignment=%s frames=%s local_geometry=%s local_voxel=%s graph=%s goal=%s clearance=%s",
              final_pass_ ? "PASS" : "FAIL", alignment_ok ? "PASS" : "FAIL",
              FramesValid() ? "PASS" : "FAIL",
-             semantic_ok ? "PASS" : "FAIL",
+             local_geometry_ok ? "PASS" : "FAIL",
              local_voxel_ok ? "PASS" : "FAIL",
              graph_ok ? "PASS" : "FAIL",
              goal_ok ? "PASS" : "FAIL", clearance_ok ? "PASS" : "FAIL");
@@ -1072,7 +1072,7 @@ class SsmiBagGraphMonitor {
   ros::NodeHandle nh_;
   ros::NodeHandle private_nh_;
   tf::TransformListener tf_listener_;
-  ros::Subscriber odom_sub_, map_sub_, local_voxel_sub_, static_cloud_sub_;
+  ros::Subscriber odom_sub_, local_voxel_sub_, static_cloud_sub_;
   ros::Subscriber dynamic_cloud_sub_;
   ros::Subscriber graph_static_cloud_sub_;
   ros::Subscriber search_graph_sub_, static_graph_sub_, full_graph_sub_;
@@ -1089,7 +1089,6 @@ class SsmiBagGraphMonitor {
   std::string path_frame_, waypoint_frame_, static_frame_, dynamic_frame_;
   std::string graph_static_frame_, static_graph_frame_;
   std::string local_voxel_frame_;
-  std::string map_id_;
   std::ofstream csv_;
   ros::WallTime start_wall_, first_graph_wall_, last_clock_wall_;
   ros::Time last_clock_, map_stamp_, odom_stamp_, local_voxel_stamp_;
@@ -1099,7 +1098,6 @@ class SsmiBagGraphMonitor {
   bool auto_goal_ = false;
   bool finish_on_bag_idle_ = true;
   bool have_clock_ = false;
-  bool have_map_ = false;
   bool have_local_voxel_ = false;
   bool local_voxel_schema_valid_ = false;
   bool local_voxel_zero_stamp_seen_ = false;

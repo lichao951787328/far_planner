@@ -61,6 +61,12 @@ TEST(WaypointProjectionPolicy, EvaluatesMaximumDistanceExactly) {
     EXPECT_EQ(4u, result.evaluated_candidates);
 }
 
+TEST(WaypointProjectionPolicy, UnknownOutsideWindowIsNotConfirmedExecution) {
+    EXPECT_TRUE(IsExecutionWaypointObservationConfirmed(false, false));
+    EXPECT_TRUE(IsExecutionWaypointObservationConfirmed(true, true));
+    EXPECT_FALSE(IsExecutionWaypointObservationConfirmed(true, false));
+}
+
 int main(int argc, char** argv) {
     testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();
