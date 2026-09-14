@@ -1,0 +1,9 @@
+input_topic: /local_3d_semantic_voxel_map/voxel_cloud
+output_topic: /far_binary/terrain_map
+world_frame: map
+cost_field: traversability
+obstacle_threshold: 0.75
+minimum_observations: 1
+missing_cost_is_obstacle: true
+publish_debug_clouds: true
+tf_timeout: 0.2

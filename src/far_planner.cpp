@@ -64,14 +64,13 @@ void FARMaster::Init() {
   is_graph_init_      = false;
   is_reset_env_       = false;
   is_stop_update_     = false;
+  this->ResetInputStamps();
 
   // allocate memory to pointers
   new_vertices_ptr_     = PointCloudPtr(new pcl::PointCloud<PCLPoint>());
   temp_obs_ptr_         = PointCloudPtr(new pcl::PointCloud<PCLPoint>());
   temp_free_ptr_        = PointCloudPtr(new pcl::PointCloud<PCLPoint>());
-  temp_cloud_ptr_       = PointCloudPtr(new pcl::PointCloud<PCLPoint>());
   scan_grid_ptr_        = PointCloudPtr(new pcl::PointCloud<PCLPoint>());
-  local_terrain_ptr_    = PointCloudPtr(new pcl::PointCloud<PCLPoint>());
   terrain_height_ptr_   = PointCloudPtr(new pcl::PointCloud<PCLPoint>());
   viewpoint_around_ptr_ = PointCloudPtr(new pcl::PointCloud<PCLPoint>());
   kdtree_viewpoint_obs_cloud_ = PointKdTreePtr(new pcl::KdTreeFLANN<PCLPoint>());
@@ -108,6 +107,7 @@ void FARMaster::Init() {
 
 void FARMaster::ResetEnvironmentAndGraph() {
   this->ResetInternalValues();
+  this->ResetInputStamps();
   if (!FARUtil::IsDebug) { // Terminal Output
     printf("\033[A"), printf("\033[A"), printf("\033[2K");
     std::cout<< "\033[1;31m V-Graph Resetting...\033[0m\n" << std::endl;
@@ -572,14 +572,14 @@ void FARMaster::OdomCallBack(const nav_msgs::OdometryConstPtr& msg) {
   is_odom_init_ = true;
 }
 
-void FARMaster::PrcocessCloud(const sensor_msgs::PointCloud2ConstPtr& pc,
-                             const PointCloudPtr& cloudOut) 
+bool FARMaster::PrcocessCloud(const sensor_msgs::PointCloud2ConstPtr& pc,
+                             const PointCloudPtr& cloudOut)
 {
 
   pcl::PointCloud<PCLPoint> temp_cloud;
   pcl::fromROSMsg(*pc, temp_cloud);
   cloudOut->clear(), *cloudOut = temp_cloud;
-  if (cloudOut->empty()) return;
+  if (cloudOut->empty()) return true;
   FARUtil::FilterCloud(cloudOut, master_params_.voxel_dim);
   // transform cloud frame
   std::string cloud_frame = pc->header.frame_id;
@@ -596,33 +596,113 @@ void FARMaster::PrcocessCloud(const sensor_msgs::PointCloud2ConstPtr& pc,
     catch(tf::TransformException ex)
     {
       ROS_ERROR("Tracking cloud TF lookup: %s",ex.what());
-      return;
+      cloudOut->clear();
+      return false;
     }
   }
+  return true;
+}
+
+bool FARMaster::ProcessTerrainCloud(const sensor_msgs::PointCloud2ConstPtr& pc,
+                                    const PointCloudPtr& freeCloudOut,
+                                    const PointCloudPtr& obsCloudOut) {
+  PointCloudPtr unfiltered_cloud(new PointCloud());
+  pcl::fromROSMsg(*pc, *unfiltered_cloud);
+  FARUtil::RemoveNanInfPoints(unfiltered_cloud);
+
+  // Classification deliberately happens before PCL VoxelGrid.  Averaging
+  // PointXYZI first can turn one obstacle plus several free samples into a
+  // false free centroid.
+  FARUtil::ExtractFreeAndObsCloud(unfiltered_cloud, freeCloudOut, obsCloudOut);
+  for (auto& point : freeCloudOut->points) point.intensity = 0.0f;
+  for (auto& point : obsCloudOut->points) point.intensity = 1.0f;
+
+  const std::string cloud_frame = pc->header.frame_id;
+  if (!FARUtil::IsSameFrameID(cloud_frame, master_params_.world_frame)) {
+    if (FARUtil::IsDebug) {
+      ROS_WARN_ONCE("FARMaster: terrain cloud frame does NOT match world frame!");
+    }
+    try {
+      FARUtil::TransformPCLFrame(cloud_frame, master_params_.world_frame,
+                                 tf_listener_, freeCloudOut);
+      FARUtil::TransformPCLFrame(cloud_frame, master_params_.world_frame,
+                                 tf_listener_, obsCloudOut);
+    } catch (tf::TransformException& ex) {
+      ROS_ERROR("Tracking terrain cloud TF lookup: %s", ex.what());
+      freeCloudOut->clear();
+      obsCloudOut->clear();
+      return false;
+    }
+  }
+
+  if (!freeCloudOut->empty()) {
+    FARUtil::FilterCloud(freeCloudOut, master_params_.voxel_dim);
+  }
+  if (!obsCloudOut->empty()) {
+    FARUtil::FilterCloud(obsCloudOut, master_params_.voxel_dim);
+  }
+  FARUtil::RemoveFreeInObstacleVoxels(freeCloudOut, obsCloudOut,
+                                      master_params_.voxel_dim);
+  return true;
+}
+
+bool FARMaster::IsStrictlyNewStamp(const ros::Time& stamp,
+                                   const ros::Time& last_stamp,
+                                   const char* input_name) const {
+  if (stamp.isZero()) {
+    ROS_WARN_THROTTLE(1.0, "FARMaster: drop %s cloud with zero stamp", input_name);
+    return false;
+  }
+  if (!last_stamp.isZero() && stamp <= last_stamp) {
+    if (FARUtil::IsDebug) {
+      ROS_INFO_THROTTLE(1.0,
+                        "FARMaster: drop already used %s cloud stamp %.9f (last %.9f)",
+                        input_name, stamp.toSec(), last_stamp.toSec());
+    }
+    return false;
+  }
+  return true;
+}
+
+void FARMaster::ResetInputStamps() {
+  last_terrain_stamp_ = ros::Time(0);
+  last_terrain_local_stamp_ = ros::Time(0);
+  last_scan_stamp_ = ros::Time(0);
 }
 
 void FARMaster::ScanCallBack(const sensor_msgs::PointCloud2ConstPtr& scan_pc) {
   if (master_params_.is_static_env || !is_odom_init_) return;
-  this->PrcocessCloud(scan_pc, FARUtil::cur_scan_cloud_);
+  if (!this->IsStrictlyNewStamp(scan_pc->header.stamp, last_scan_stamp_, "scan")) return;
+  if (!this->PrcocessCloud(scan_pc, FARUtil::cur_scan_cloud_)) return;
+  last_scan_stamp_ = scan_pc->header.stamp;
   scan_handler_.UpdateRobotPosition(robot_pos_);
 }
 
 void FARMaster::TerrainLocalCallBack(const sensor_msgs::PointCloud2ConstPtr& pc) {
-  if (master_params_.is_static_env) return;
-  this->PrcocessCloud(pc, local_terrain_ptr_);
-  FARUtil::ExtractFreeAndObsCloud(local_terrain_ptr_, FARUtil::local_terrain_free_, FARUtil::local_terrain_obs_);
+  if (master_params_.is_static_env || !is_odom_init_) return;
+  if (!this->IsStrictlyNewStamp(pc->header.stamp, last_terrain_local_stamp_,
+                                "terrain_local")) return;
+  if (!this->ProcessTerrainCloud(pc, FARUtil::local_terrain_free_,
+                                 FARUtil::local_terrain_obs_)) return;
+  last_terrain_local_stamp_ = pc->header.stamp;
 }
 
 void FARMaster::TerrainCallBack(const sensor_msgs::PointCloud2ConstPtr& pc) {
   if (!is_odom_init_) return;
+  if (!this->IsStrictlyNewStamp(pc->header.stamp, last_terrain_stamp_, "terrain")) return;
+  // Do not mark a frame as consumed while graph/map updates are paused.  A
+  // local-map transport retry with the same acquisition stamp may then be
+  // accepted after updates resume.
+  if (is_stop_update_) return;
   // update map grid robot center
   map_handler_.UpdateRobotPosition(FARUtil::robot_pos);
-  if (!is_stop_update_) {
-    this->PrcocessCloud(pc, temp_cloud_ptr_);
-    FARUtil::CropBoxCloud(temp_cloud_ptr_, robot_pos_, Point3D(master_params_.terrain_range,
-                                                               master_params_.terrain_range,
-                                                               FARUtil::kTolerZ));
-    FARUtil::ExtractFreeAndObsCloud(temp_cloud_ptr_, temp_free_ptr_, temp_obs_ptr_);
+  if (this->ProcessTerrainCloud(pc, temp_free_ptr_, temp_obs_ptr_)) {
+    FARUtil::CropBoxCloud(temp_free_ptr_, robot_pos_, Point3D(master_params_.terrain_range,
+                                                              master_params_.terrain_range,
+                                                              FARUtil::kTolerZ));
+    FARUtil::CropBoxCloud(temp_obs_ptr_, robot_pos_, Point3D(master_params_.terrain_range,
+                                                             master_params_.terrain_range,
+                                                             FARUtil::kTolerZ));
     if (!master_params_.is_static_env) {
       FARUtil::RemoveOverlapCloud(temp_obs_ptr_, FARUtil::stack_dyobs_cloud_, true);
     }
@@ -632,9 +712,9 @@ void FARMaster::TerrainCallBack(const sensor_msgs::PointCloud2ConstPtr& pc) {
     FARUtil::ExtractNewObsPointCloud(temp_obs_ptr_,
                                      FARUtil::surround_obs_cloud_,
                                      FARUtil::cur_new_cloud_);
-  } else { // stop env update
-    temp_cloud_ptr_->clear();
-    FARUtil::cur_new_cloud_->clear();
+    last_terrain_stamp_ = pc->header.stamp;
+  } else {
+    return;
   }
   // extract surround free cloud & update terrain height
   map_handler_.GetSurroundFreeCloud(FARUtil::surround_free_cloud_);

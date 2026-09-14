@@ -65,9 +65,7 @@ private:
     PointCloudPtr new_vertices_ptr_;
     PointCloudPtr temp_obs_ptr_;
     PointCloudPtr temp_free_ptr_;
-    PointCloudPtr temp_cloud_ptr_;
     PointCloudPtr scan_grid_ptr_;
-    PointCloudPtr local_terrain_ptr_;
     PointCloudPtr terrain_height_ptr_;
 
     /* veiwpoint extension clouds */
@@ -114,8 +112,18 @@ private:
 
     void PlanningCallBack(const ros::TimerEvent& event);
     
-    void PrcocessCloud(const sensor_msgs::PointCloud2ConstPtr& pc,
+    bool PrcocessCloud(const sensor_msgs::PointCloud2ConstPtr& pc,
                        const PointCloudPtr& cloudOut);
+
+    bool ProcessTerrainCloud(const sensor_msgs::PointCloud2ConstPtr& pc,
+                             const PointCloudPtr& freeCloudOut,
+                             const PointCloudPtr& obsCloudOut);
+
+    bool IsStrictlyNewStamp(const ros::Time& stamp,
+                            const ros::Time& last_stamp,
+                            const char* input_name) const;
+
+    void ResetInputStamps();
 
     Point3D ProjectNavWaypoint(const NavNodePtr& nav_node_ptr, const NavNodePtr& last_point_ptr);
 
@@ -123,6 +131,10 @@ private:
     void OdomCallBack(const nav_msgs::OdometryConstPtr& msg);
     void TerrainCallBack(const sensor_msgs::PointCloud2ConstPtr& pc);
     void TerrainLocalCallBack(const sensor_msgs::PointCloud2ConstPtr& pc);
+
+    ros::Time last_terrain_stamp_;
+    ros::Time last_terrain_local_stamp_;
+    ros::Time last_scan_stamp_;
 
     Point3D ExtendViewpointOnObsCloud(const NavNodePtr& nav_node_ptr, const PointCloudPtr& obsCloudIn, float& free_dist);
 

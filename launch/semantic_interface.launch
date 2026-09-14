@@ -1,0 +1,47 @@
+<launch>
+  <arg name="voxel_cloud_topic"
+       default="/local_3d_semantic_voxel_map/voxel_cloud"/>
+  <arg name="binary_terrain_topic" default="/far_binary/terrain_map"/>
+  <arg name="odom_topic" default="/state_estimation"/>
+  <arg name="registered_scan_topic" default="/registered_scan"/>
+  <arg name="world_frame" default="map"/>
+  <arg name="schema_file"
+       default="$(find far_planner)/config/five_class_semantic_schema.yaml"/>
+  <arg name="far_config"
+       default="$(find far_planner)/config/semantic_interface.yaml"/>
+  <arg name="bridge_config"
+       default="$(find far_planner)/config/semantic_bridge.yaml"/>
+  <arg name="rviz" default="true"/>
+  <arg name="graph_decoder" default="true"/>
+
+  <!-- Shared semantic contract.  The bridge intentionally uses role/cost,
+       not the human-readable meaning string. -->
+  <rosparam command="load" file="$(arg schema_file)"/>
+
+  <node pkg="far_planner" type="semantic_voxel_to_far_terrain"
+        name="semantic_voxel_to_far_terrain" output="screen">
+    <rosparam command="load" file="$(arg bridge_config)"/>
+    <param name="input_topic" value="$(arg voxel_cloud_topic)"/>
+    <param name="output_topic" value="$(arg binary_terrain_topic)"/>
+    <param name="world_frame" value="$(arg world_frame)"/>
+  </node>
+
+  <node pkg="far_planner" type="far_planner" name="far_planner"
+        output="screen">
+    <rosparam command="load" file="$(arg far_config)"/>
+    <param name="world_frame" value="$(arg world_frame)"/>
+    <remap from="/odom_world" to="$(arg odom_topic)"/>
+    <remap from="/terrain_cloud" to="$(arg binary_terrain_topic)"/>
+    <remap from="/terrain_local_cloud" to="$(arg binary_terrain_topic)"/>
+    <remap from="/scan_cloud" to="$(arg registered_scan_topic)"/>
+  </node>
+
+  <group if="$(arg rviz)">
+    <node type="rviz" name="far_rviz" pkg="rviz"
+          args="-d $(find far_planner)/rviz/default.rviz" respawn="true"/>
+  </group>
+
+  <group if="$(arg graph_decoder)">
+    <include file="$(find graph_decoder)/launch/decoder.launch"/>
+  </group>
+</launch>

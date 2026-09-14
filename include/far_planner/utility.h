@@ -207,6 +207,15 @@ public:
                                        const PointCloudPtr& freeCloudOut,
                                        const PointCloudPtr& obsCloudOut);
 
+    /**
+     * Remove free centroids whose quantized 3-D voxel also contains an
+     * obstacle centroid.  This is the final, conservative tie-break after
+     * free and obstacle clouds have been downsampled independently.
+     */
+    static void RemoveFreeInObstacleVoxels(const PointCloudPtr& freeCloudInOut,
+                                           const PointCloudPtr& obsCloudIn,
+                                           const float& voxel_size);
+
     static void UpdateKdTrees(const PointCloudPtr& newObsCloud);
 
     static void ClearKdTree(const PointCloudPtr& cloud_ptr,

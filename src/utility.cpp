@@ -8,6 +8,41 @@
 
 #include "far_planner/utility.h"
 
+#include <cmath>
+#include <cstdint>
+
+namespace {
+
+struct TerrainVoxelKey {
+  std::int64_t x;
+  std::int64_t y;
+  std::int64_t z;
+
+  bool operator==(const TerrainVoxelKey& other) const {
+    return x == other.x && y == other.y && z == other.z;
+  }
+};
+
+struct TerrainVoxelKeyHash {
+  std::size_t operator()(const TerrainVoxelKey& key) const {
+    std::size_t seed = 0;
+    boost::hash_combine(seed, key.x);
+    boost::hash_combine(seed, key.y);
+    boost::hash_combine(seed, key.z);
+    return seed;
+  }
+};
+
+TerrainVoxelKey MakeTerrainVoxelKey(const PCLPoint& point,
+                                    const double inverse_voxel_size) {
+  return TerrainVoxelKey{
+      static_cast<std::int64_t>(std::floor(point.x * inverse_voxel_size)),
+      static_cast<std::int64_t>(std::floor(point.y * inverse_voxel_size)),
+      static_cast<std::int64_t>(std::floor(point.z * inverse_voxel_size))};
+}
+
+}  // namespace
+
 /***************************************************************************************/
 
 void FARUtil::FilterCloud(const PointCloudPtr& point_cloud, const Eigen::Vector3d& leaf_size) {
@@ -219,6 +254,39 @@ void FARUtil::ExtractFreeAndObsCloud(const PointCloudPtr& newCloudIn,
     }
   } 
   freeCloudOut->resize(free_idx), obsCloudOut->resize(obs_idx);
+}
+
+void FARUtil::RemoveFreeInObstacleVoxels(const PointCloudPtr& freeCloudInOut,
+                                         const PointCloudPtr& obsCloudIn,
+                                         const float& voxel_size) {
+  if (!freeCloudInOut || !obsCloudIn || freeCloudInOut->empty() ||
+      obsCloudIn->empty()) {
+    return;
+  }
+  if (!std::isfinite(voxel_size) || voxel_size <= FARUtil::kEpsilon) {
+    ROS_ERROR_THROTTLE(1.0, "FARUtil: invalid terrain voxel size %.6f", voxel_size);
+    return;
+  }
+
+  const double inverse_voxel_size = 1.0 / static_cast<double>(voxel_size);
+  std::unordered_set<TerrainVoxelKey, TerrainVoxelKeyHash> obstacle_voxels;
+  obstacle_voxels.reserve(obsCloudIn->size());
+  for (const auto& point : obsCloudIn->points) {
+    obstacle_voxels.insert(MakeTerrainVoxelKey(point, inverse_voxel_size));
+  }
+
+  PointCloud filtered;
+  filtered.header = freeCloudInOut->header;
+  filtered.reserve(freeCloudInOut->size());
+  for (const auto& point : freeCloudInOut->points) {
+    if (obstacle_voxels.count(MakeTerrainVoxelKey(point, inverse_voxel_size)) == 0u) {
+      filtered.push_back(point);
+    }
+  }
+  filtered.width = static_cast<std::uint32_t>(filtered.size());
+  filtered.height = 1u;
+  filtered.is_dense = freeCloudInOut->is_dense;
+  *freeCloudInOut = filtered;
 }
 
 void FARUtil::UpdateKdTrees(const PointCloudPtr& newObsCloudIn) 
