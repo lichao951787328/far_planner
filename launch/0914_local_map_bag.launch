@@ -1,0 +1,60 @@
+<launch>
+  <!--
+    Offline local-map replay for the 2026-09-14 dataset.
+
+    Recorded topics used by this launch:
+      /grids_points         sensor_msgs/PointCloud2
+      /livox/lidar          livox_ros_driver2/CustomMsg
+      /fusion_localization  nav_msgs/Odometry
+      /tf                   tf2_msgs/TFMessage
+
+    /livox/lidar is deliberately left in its recorded CustomMsg format. It
+    must be converted to sensor_msgs/PointCloud2 and registered in the FAR
+    world frame before it can be connected to FAR's /scan_cloud input.
+  -->
+  <arg name="bag"
+       default="$(env HOME)/social_nav/src/mapless_navigation_old/src/dateset/0914/2026-09-14-13-47-53.bag"/>
+  <arg name="play_bag" default="true"/>
+  <arg name="start_paused" default="false"/>
+  <arg name="rate" default="1.0"/>
+  <arg name="delay" default="2.0"/>
+  <arg name="rviz" default="true"/>
+
+  <arg name="grids_points_topic" default="/grids_points"/>
+  <arg name="raw_lidar_topic" default="/livox/lidar"/>
+  <arg name="global_frame" default="map"/>
+  <arg name="reference_frame" default="map_start"/>
+  <arg name="vehicle_frame" default="wuba_base"/>
+
+  <!-- All node timers and TF lookups follow the timestamps recorded in bag. -->
+  <param name="/use_sim_time" value="true"/>
+
+  <include file="$(find local3d_semantic_voxel_map)/launch/grids_points_voxel_map.launch">
+    <arg name="input_topic" value="$(arg grids_points_topic)"/>
+    <arg name="global_frame" value="$(arg global_frame)"/>
+    <arg name="use_initial_pose_reference" value="true"/>
+    <arg name="reference_frame" value="$(arg reference_frame)"/>
+    <arg name="local_cost_frame" value="$(arg vehicle_frame)"/>
+    <arg name="rviz_frame" value="$(arg reference_frame)"/>
+    <arg name="rviz" value="$(arg rviz)"/>
+  </include>
+
+  <!-- Two nodes make start_paused selectable without shell command syntax. -->
+  <group if="$(arg play_bag)">
+    <node unless="$(arg start_paused)"
+          pkg="rosbag" type="play" name="play_0914_local_map_bag"
+          args="--clock --delay=$(arg delay) --rate=$(arg rate) $(arg bag)"
+          output="screen" required="true">
+      <remap from="/grids_points" to="$(arg grids_points_topic)"/>
+      <remap from="/livox/lidar" to="$(arg raw_lidar_topic)"/>
+    </node>
+
+    <node if="$(arg start_paused)"
+          pkg="rosbag" type="play" name="play_0914_local_map_bag_paused"
+          args="--clock --pause --delay=$(arg delay) --rate=$(arg rate) $(arg bag)"
+          output="screen" required="true">
+      <remap from="/grids_points" to="$(arg grids_points_topic)"/>
+      <remap from="/livox/lidar" to="$(arg raw_lidar_topic)"/>
+    </node>
+  </group>
+</launch>

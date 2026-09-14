@@ -20,4 +20,6 @@
   <run_depend>tf</run_depend>
   <run_depend>visibility_graph_msg</run_depend>
   <run_depend>pcl_ros</run_depend>
+  <run_depend>rosbag</run_depend>
+  <run_depend>local3d_semantic_voxel_map</run_depend>
 </package>
