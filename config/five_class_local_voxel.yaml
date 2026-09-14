@@ -1,0 +1,84 @@
+# Local3D profile for the five-class semantic interface.
+#
+# Class labels, colors, roles and semantic costs deliberately do not appear in
+# this file. They are derived from /semantic_schema, loaded from
+# five_class_semantic_schema.yaml by the launch files before this node starts.
+
+input_topic: /grids_points
+global_frame: map
+use_initial_pose_reference: true
+reference_frame: map_start
+local_cost_frame: wuba_base
+publish_local_cost_cloud: true
+
+# Publish the schema-neutral grid (semantic_lable + traversability). The SSMI
+# grid adapter performs the five-class color encoding. Do not also publish the
+# built-in SSMI cloud: that encoder uses a fixed Cityscapes palette and would
+# create a second, incompatible publisher on the adapter output topic.
+global_admission_output_frame: wuba_base
+global_admission_exclude_dynamic: true
+publish_ssmi_admitted_cloud: false
+ssmi_admitted_topic: /semantic_pcl/global_admitted
+ssmi_obstacle_traversability_threshold: 0.75
+
+# Old global obstacles are revoked only after repeated, confident, low-cost
+# terrain observations. Missing grid cells and ray pass-through are not free
+# evidence.
+enable_ssmi_obstacle_revocation: true
+ssmi_revocation_voxel_size: 0.10
+ssmi_revocation_minimum_free_frames: 5
+ssmi_revocation_minimum_free_duration: 0.5
+ssmi_revocation_free_max_traversability: 0.45
+ssmi_revocation_minimum_semantic_confidence: 0.60
+ssmi_revocation_ray_evidence_enabled: false
+ssmi_revocation_ray_endpoint_margin: 0.20
+ssmi_revocation_ray_point_stride: 2
+
+terrain_boundary_filter_enabled: false
+terrain_height_cost_enabled: false
+
+input_layout: point_cloud
+point_stride: 1
+semantic_field: semantic_lable
+semantic_label_remap: []
+confidence_field: semantic_confidence
+cost_field: traversability
+default_semantic_confidence: 1.0
+transform_timeout: 0.2
+timing_report_frames: 50
+
+voxel_size_xy: 0.10
+voxel_size_z: 0.10
+decay_seconds: 0.3
+max_voxels: 300000
+max_range: -1.0
+min_z: -2.0
+max_z: 4.0
+local_radius: -1.0
+local_box_enabled: true
+local_box_min_x: -2.0
+local_box_max_x: 10.0
+local_box_min_y: -5.0
+local_box_max_y: 5.0
+local_box_min_z: -2.0
+local_box_max_z: 4.0
+robot_body_exclusion_enabled: false
+
+semantic_positive_update: 1.0
+semantic_negative_update: -0.3
+semantic_min_log_evidence: -4.59512
+semantic_max_log_evidence: 4.59512
+semantic_new_class_prior: 0.8
+
+unknown_cost: 0.50
+# This agrees with five_class_semantic_schema.yaml: hard semantic obstacles
+# remain cost 1.0 instead of being attenuated by confidence.
+traversability_fusion_method: maximum
+semantic_risk_alpha: 0.80
+semantic_cost_weight: 0.0
+cost_rise_alpha: 0.70
+cost_fall_alpha: 0.3
+
+publish_rate: 10.0
+marker_alpha: 0.85
+map_file: /tmp/five_class_local3d_semantic_voxel_map.csv

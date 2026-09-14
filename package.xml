@@ -38,6 +38,8 @@
   <run_depend>libqt5-widgets</run_depend>
   <run_depend>rosbag</run_depend>
   <run_depend>local3d_semantic_voxel_map</run_depend>
+  <run_depend>local_planner</run_depend>
+  <run_depend>semantic_octomap</run_depend>
 
   <export>
     <rviz plugin="${prefix}/far_planner_plugin_description.xml"/>

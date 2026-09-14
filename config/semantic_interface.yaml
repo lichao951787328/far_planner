@@ -1,7 +1,7 @@
 # FAR parameters for the binary local semantic voxel-map interface.
 # The graph remains binary; continuous traversability is consumed by the
 # semantic_voxel_to_far_terrain bridge before this node.
-main_run_freq                           : 8
+main_run_freq                           : 5
 voxel_dim                               : 0.10
 robot_dim                               : 0.8
 vehicle_height                          : 0.75
@@ -52,25 +52,33 @@ Util/new_intensity_thred                : 2.0
 # 名字中的 Z 不代表高度。bridge 严格输出 free=0/obstacle=1，因此 0.5 是安全分界。
 Util/terrain_free_Z                     : 0.5
 # 历史障碍落在当前 scan 可通过射线上的清除证据点数阈值。
-# 源码使用 size > threshold，因此值 4 表示至少 5 个证据点才删除旧障碍。
+# 源码使用 size > threshold，因此当前值 2 表示至少 3 个证据点才删除旧障碍。
 # 调大可减少配准误差造成的误清除，但小型动态障碍移走后清除更慢。
 Util/dyosb_update_thred                 : 2
 # 判断拓扑节点附近是否有足够“最近环境变化点”的计数阈值。
 # 搜索半径为 robot_dim*2+voxel_dim；值 5 时，创建新节点需至少
 # 4 个变化点，普通已有节点检查需至少 6 个。调大更稳定但更迟钝。
-Util/new_point_counter                  : 5
+Util/new_point_counter                  : 3
 # 已判定为“消失”的动态障碍点的抑制保留时间，单位秒。
 # 保留期内会过滤同位置 terrain 障碍，防止旧地图反复加回已移走的障碍。
 # 调大能抑制闪烁，但同一位置真实重新出现障碍时可能被更久忽略。
 Util/dynamic_obs_dacay_time             : 0.8
 # 新增障碍和已清除障碍作为“近期变化点”影响拓扑图的保留时间，单位秒。
 # 调大会让节点重检查/连接重置持续更久；调小更稳定，但可能过早丢失变化证据。
-Util/new_points_decay_time              : 0.3
+Util/new_points_decay_time              : 0.8
 
 Graph/connect_votes_size                : 3
-Graph/clear_dumper_thred                : 2
+# 轮廓节点连续多少次重评失败后才从全局 V-Graph 删除。
+# 源码条件为 clear_dumper_count > threshold，所以值 2 实际需要连续失败 3 次；
+# 在 main_run_freq=5 Hz 时仅这一阶段的理论下限约为 0.6 秒。
+Graph/clear_dumper_thred                : 1
 Graph/node_finalize_thred               : 6
 Graph/filter_pool_size                  : 12
+
+# /viz_graph_topic 中所有 LINE_LIST 的线宽倍率；节点球体大小不受影响。
+# 2.0 表示基础线宽放大 2 倍；结合当前 visualize_ratio=0.75，RViz 实际
+# scale.x 从 0.075/0.1125/0.15 m 增至 0.15/0.225/0.30 m。
+Visualization/graph_line_width_scale   : 2.0
 
 # 轮廓提取前将二值地形图放大的倍数，无单位。
 # 调大可让插值后的轮廓边界更细致，但不会增加原始点云信息，内存和计算量约按平方增长。

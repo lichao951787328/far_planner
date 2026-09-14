@@ -29,16 +29,29 @@
   <arg name="global_frame" default="map"/>
   <arg name="reference_frame" default="map_start"/>
   <arg name="vehicle_frame" default="wuba_base"/>
+  <arg name="ssmi_topic" default="/semantic_pcl/global_admitted"/>
+  <arg name="enable_two_layer_angular_clearing" default="false"/>
+  <arg name="semantic_schema"
+       default="$(find far_planner)/config/five_class_semantic_schema.yaml"/>
+  <arg name="local_voxel_config"
+       default="$(find far_planner)/config/five_class_local_voxel.yaml"/>
 
   <!-- All node timers and TF lookups follow the timestamps recorded in bag. -->
   <param name="/use_sim_time" value="true"/>
+  <!-- Local3D derives its classes and costs from the same schema as the grid
+       adapter and SemanticOctomap. Load it before any consumer starts. -->
+  <rosparam command="load" file="$(arg semantic_schema)"/>
 
   <include file="$(find local3d_semantic_voxel_map)/launch/grids_points_voxel_map.launch">
+    <arg name="config" value="$(arg local_voxel_config)"/>
     <arg name="input_topic" value="$(arg grids_points_topic)"/>
     <arg name="global_frame" value="$(arg global_frame)"/>
     <arg name="use_initial_pose_reference" value="true"/>
     <arg name="reference_frame" value="$(arg reference_frame)"/>
     <arg name="local_cost_frame" value="$(arg vehicle_frame)"/>
+    <arg name="ssmi_topic" value="$(arg ssmi_topic)"/>
+    <arg name="enable_two_layer_angular_clearing"
+         value="$(arg enable_two_layer_angular_clearing)"/>
     <arg name="rviz_frame" value="$(arg reference_frame)"/>
     <arg name="rviz" value="$(arg rviz)"/>
   </include>

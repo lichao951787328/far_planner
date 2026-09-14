@@ -3,6 +3,7 @@
        default="$(env HOME)/social_nav/src/mapless_navigation_old/src/dateset/0914/2026-09-14-13-47-53.bag"/>
   <arg name="start_paused" default="false"/>
   <arg name="rate" default="1.0"/>
+  <arg name="delay" default="2.0"/>
   <arg name="rviz" default="true"/>
   <arg name="world_frame" default="map"/>
   <arg name="vehicle_frame" default="wuba_base"/>
@@ -10,18 +11,31 @@
        default="/far_scan/registered_scan"/>
   <arg name="registered_scan_origin_topic"
        default="/far_scan/registered_scan_origin"/>
+  <arg name="global_admission_topic"
+       default="/semantic_pcl/global_admitted"/>
+  <arg name="enable_two_layer_angular_clearing" default="false"/>
+  <arg name="semantic_schema"
+       default="$(find far_planner)/config/five_class_semantic_schema.yaml"/>
+  <arg name="local_voxel_config"
+       default="$(find far_planner)/config/five_class_local_voxel.yaml"/>
 
   <!-- Bag + local semantic voxel map + dual-format raw scan adapter. -->
   <include file="$(find far_planner)/launch/0914_local_map_bag.launch">
     <arg name="bag" value="$(arg bag)"/>
     <arg name="start_paused" value="$(arg start_paused)"/>
     <arg name="rate" value="$(arg rate)"/>
+    <arg name="delay" value="$(arg delay)"/>
     <arg name="rviz" value="false"/>
     <arg name="global_frame" value="$(arg world_frame)"/>
     <arg name="vehicle_frame" value="$(arg vehicle_frame)"/>
+    <arg name="ssmi_topic" value="$(arg global_admission_topic)"/>
+    <arg name="enable_two_layer_angular_clearing"
+         value="$(arg enable_two_layer_angular_clearing)"/>
     <arg name="registered_scan_topic" value="$(arg registered_scan_topic)"/>
     <arg name="registered_scan_origin_topic"
          value="$(arg registered_scan_origin_topic)"/>
+    <arg name="semantic_schema" value="$(arg semantic_schema)"/>
+    <arg name="local_voxel_config" value="$(arg local_voxel_config)"/>
   </include>
 
   <!-- Semantic terrain bridge + FAR. -->
@@ -31,6 +45,7 @@
     <arg name="registered_scan_origin_topic"
          value="$(arg registered_scan_origin_topic)"/>
     <arg name="world_frame" value="$(arg world_frame)"/>
+    <arg name="schema_file" value="$(arg semantic_schema)"/>
     <arg name="rviz" value="$(arg rviz)"/>
     <arg name="graph_decoder" value="false"/>
   </include>

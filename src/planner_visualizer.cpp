@@ -14,6 +14,13 @@
 void DPVisualizer::Init(const ros::NodeHandle& nh) {
     nh_ = nh;
     point_cloud_ptr_ = PointCloudPtr(new pcl::PointCloud<PCLPoint>());
+    ros::NodeHandle private_nh("~");
+    private_nh.param<float>("Visualization/graph_line_width_scale",
+                            graph_line_width_scale_, 1.0f);
+    if (graph_line_width_scale_ <= 0.0f) {
+        ROS_WARN("Visualization/graph_line_width_scale must be positive; using 1.0");
+        graph_line_width_scale_ = 1.0f;
+    }
     // Rviz Publisher
     viz_node_pub_    = nh_.advertise<Marker>("/viz_node_topic", 5);
     viz_path_pub_    = nh_.advertise<Marker>("/viz_path_topic", 5);
@@ -239,17 +246,17 @@ void DPVisualizer::VizGraph(const NodePtrStack& graph) {
     this->SetMarker(VizColor::YELLOW,  "trajectory_vertex", 0.5f,  0.8f,  internav_node_marker);
     this->SetMarker(VizColor::GREEN,   "boundary_vertex",   0.5f,  0.8f,  boundary_node_marker);
     this->SetMarker(VizColor::ORANGE,  "frontier_vertex",   0.5f,  0.8f,  frontier_node_marker);
-    this->SetMarker(VizColor::WHITE,   "global_vgraph",     0.1f,  0.2f,  edge_marker);
-    this->SetMarker(VizColor::EMERALD, "freespace_vgraph",  0.1f,  0.25f, free_edge_marker);
-    this->SetMarker(VizColor::EMERALD, "visibility_edge",   0.1f,  0.25f, visual_edge_marker);
-    this->SetMarker(VizColor::RED,     "polygon_edge",      0.15f, 0.25f, contour_edge_marker);
-    this->SetMarker(VizColor::ORANGE,  "boundary_edge",     0.2f,  0.25f, boundary_edge_marker);
-    this->SetMarker(VizColor::ORANGE,  "odom_edge",         0.1f,  0.15f, odom_edge_marker);
-    this->SetMarker(VizColor::YELLOW,  "to_goal_edge",      0.1f,  0.15f, goal_edge_marker);
-    this->SetMarker(VizColor::GREEN,   "trajectory_edge",   0.1f,  0.5f,  traj_edge_marker);
-    this->SetMarker(VizColor::YELLOW,  "vertex_angle",      0.15f, 0.75f, corner_surf_marker);
+    this->SetMarker(VizColor::WHITE,   "global_vgraph",     0.2f  * graph_line_width_scale_, 0.2f,  edge_marker);
+    this->SetMarker(VizColor::EMERALD, "freespace_vgraph",  0.1f  * graph_line_width_scale_, 0.25f, free_edge_marker);
+    this->SetMarker(VizColor::EMERALD, "visibility_edge",   0.1f  * graph_line_width_scale_, 0.25f, visual_edge_marker);
+    this->SetMarker(VizColor::RED,     "polygon_edge",      0.15f * graph_line_width_scale_, 0.25f, contour_edge_marker);
+    this->SetMarker(VizColor::ORANGE,  "boundary_edge",     0.2f  * graph_line_width_scale_, 0.25f, boundary_edge_marker);
+    this->SetMarker(VizColor::ORANGE,  "odom_edge",         0.1f  * graph_line_width_scale_, 0.15f, odom_edge_marker);
+    this->SetMarker(VizColor::YELLOW,  "to_goal_edge",      0.1f  * graph_line_width_scale_, 0.15f, goal_edge_marker);
+    this->SetMarker(VizColor::GREEN,   "trajectory_edge",   0.1f  * graph_line_width_scale_, 0.5f,  traj_edge_marker);
+    this->SetMarker(VizColor::YELLOW,  "vertex_angle",      0.15f * graph_line_width_scale_, 0.75f, corner_surf_marker);
     this->SetMarker(VizColor::YELLOW,  "angle_direct",      0.25f, 0.75f, corner_helper_marker);
-    this->SetMarker(VizColor::YELLOW,  "vertices_matches",  0.1f,  0.75f, contour_align_marker);
+    this->SetMarker(VizColor::YELLOW,  "vertices_matches",  0.1f  * graph_line_width_scale_, 0.75f, contour_align_marker);
     /* Lambda Function */
     auto Draw_Contour_Align = [&](const NavNodePtr& node_ptr) {
         if (node_ptr->is_odom || !node_ptr->is_contour_match) return;
@@ -480,4 +487,3 @@ void DPVisualizer::SetColor(const VizColor& color,
     }
     scan_marker.color = c;
 }
-

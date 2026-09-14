@@ -28,6 +28,7 @@ private:
     ros::NodeHandle nh_;
     // Utility Cloud 
     PointCloudPtr point_cloud_ptr_;
+    float graph_line_width_scale_ = 1.0f;
     // rviz publisher 
     ros::Publisher viz_node_pub_, viz_path_pub_, viz_poly_pub_, viz_graph_pub_;
     ros::Publisher viz_contour_pub_, viz_map_pub_, viz_view_extend;

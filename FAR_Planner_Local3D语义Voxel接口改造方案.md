@@ -78,7 +78,65 @@ roslaunch far_planner semantic_interface.launch \
 roslaunch far_planner semantic_interface.launch graph_decoder:=false
 ```
 
-### 2.1 原始点云双格式适配
+### 2.1 完整导航入口（FAR + local_planner + SSMI 全局地图）
+
+新增两个同名的离线/实时入口：
+
+```bash
+# 0914 bag，默认播放：
+# ~/social_nav/src/mapless_navigation_old/src/dateset/0914/2026-09-14-13-47-53.bag
+roslaunch far_planner five_class_bag_navigation.launch
+
+# 实车，等待 /grids_points、/livox/lidar、/fusion_localization 和 TF
+roslaunch far_planner five_class_live_navigation.launch
+```
+
+两者共用下列连接：
+
+```text
+/grids_points -> Local3D -> /far_binary/terrain_map -> FAR -> /way_point
+                         -> traversability_cost_cloud -> localPlanner -> /path
+                         -> global_semantic_admission_grid
+                              -> grid_semantic_adapter
+                              -> /semantic_pcl/global_admitted
+                              -> SemanticOctomap -> /octomap_full
+
+/livox/lidar -> far_scan_input_adapter -> registered scan/origin -> FAR
+```
+
+`semantic_octomap` 位于独立的 `~/social_nav/src/ssmi_ws`，必须使
+`mapless_navigation_old` 以它为 underlay 构建。不要在每次运行时
+先后 source 两个彼此独立的 devel，因为后一个会覆盖前一个的
+`CMAKE_PREFIX_PATH`/`ROS_PACKAGE_PATH`。首次联编方式为：
+
+```bash
+source /opt/ros/noetic/setup.bash
+source ~/social_nav/src/ssmi_ws/devel/setup.bash
+cd ~/social_nav/src/mapless_navigation_old
+catkin_make --force-cmake -DCATKIN_WHITELIST_PACKAGES=""
+
+# 以后只需 source 最上层 overlay
+source ~/social_nav/src/mapless_navigation_old/devel/setup.bash
+```
+
+Local3D 不再直接发布 SSMI 颜色点云。五分类专用配置
+`config/five_class_local_voxel.yaml` 固定
+`publish_ssmi_admitted_cloud=false`，保留中性的
+`global_semantic_admission_grid`。全局地图启动时固定
+`use_grid_adapter=true`：适配器读取 `semantic_lable + traversability`，
+再严格按 `five_class_semantic_schema.yaml` 编码 SSMI 颜色。这是
+`/semantic_pcl/global_admitted` 的唯一发布链路，既避免重复输入，也避免
+Local3D 固定 Cityscapes 调色板与五分类 schema 颜色冲突。
+
+默认开启上游显式撤销，关闭 OctoMap 自身 raycast clearing
+和两层角度清除；后两者必须经过数据验证后再打开。
+
+bag 入口的 `localPlanner/goalTimeout=0.0`，是因为该 bag 的
+`/clock` 与点云 header 不在同一时间域；实时入口默认为 1 s。
+两个入口均默认 `start_path_follower=false`，只生成 `/path`而不发
+机器人速度命令；实车控制链确认完整后再显式开启。
+
+### 2.2 原始点云双格式适配
 
 新增 `far_scan_input_adapter`，同一个输入 topic 可接受：
 
@@ -98,7 +156,7 @@ Livox 每个点使用自己的采集时刻进行配准，并用整包中点时�
 因此按整帧 `header.stamp` 变换。两者最终都输出 `map` 坐标下的
 `PointXYZI` PointCloud2。
 
-### 2.2 TF、外参和 scan origin
+### 2.3 TF、外参和 scan origin
 
 当前数据集已确认 `wuba_base <- livox_frame` 是单位变换：
 
@@ -491,6 +549,25 @@ TF 可用。如果 PointCloud2 仍在传感器或车体坐标，其 `header.fram
 就是变换和光束原点的依据。普通 PointCloud2 当前不做逐点去畸变；
 如需要，上游必须提供可明确解释的逐点时间字段契约。
 
+### 8.14 local_planner 和全局地图联接风险
+
+- 三个消费者的语义不同：FAR 仅使用二值地形，local_planner
+  使用带连续可通行代价的局部云，SemanticOctomap 使用语义和
+  显式撤销。不应把三者重映射到同一个二值 topic。
+- 三条链路统一以 `map` 为对外 world frame；Local3D 的 `map_start`
+  只是内部初始参考帧。实时部署必须保证 `map <- wuba_base`
+  在点云采集时刻可查，否则局部地图、scan 和全局地图都会丢帧。
+- `global_admission_output_frame=wuba_base` 意味着全局地图接收的是车体坐标
+  局部更新；SemanticOctomap 必须在该消息 stamp 查到 `map <- wuba_base`。
+  不能将点云只改 `frame_id=map` 而不变换坐标。
+- `enable_global_explicit_revocation=true` 依赖 Local3D 的 revoked topic。如果将
+  Local3D 替换为只发 admitted cloud 的旧实现，全局障碍可能只增不减。
+- 全局 OctoMap 默认分辨率为 0.4 m，而 Local3D/FAR/local_planner 局部
+  voxel 为 0.1 m。全局图适合可视化和长时语义累积，不能反向替代
+  local_planner 的 0.1 m 局部碰撞输入。
+- `start_path_follower=true` 会实际发布 `geometry_msgs/Twist`；在将
+  `/far_cmd_vel` 接入底盘前，需要另行确认消息类型、坐标系、急停和速度限制。
+
 ## 9. 验证清单
 
 1. bridge 的 intensity 仍只有 0 和 1，并包含 `uint8 static_obstacle`；
@@ -518,6 +595,9 @@ TF 可用。如果 PointCloud2 仍在传感器或车体坐标，其 `header.fram
 在 ROS Noetic 容器中已完成：
 
 - `catkin_make --pkg far_planner -j2`：通过；
+- 清空 catkin 包白名单并以 `ssmi_ws` 为 underlay 后，完整联编
+  `local_planner`、`local3d_semantic_voxel_map`、`visibility_graph_msg` 和
+  `far_planner`：通过；
 - Livox 线上解码器 3 个 gtest：全部通过；
 - RViz 实例已成功加载 `rviz/GoalPointTool`；pluginlib 可发现插件，并实测
   建立 `/goal_point` 发布器、`/fusion_localization` 订阅器和 `/joy` 发布器；
@@ -529,6 +609,22 @@ TF 可用。如果 PointCloud2 仍在传感器或车体坐标，其 `header.fram
 - 0914 真实 bag 的 Livox CustomMsg：输出约 10 Hz，实测单帧约 8 万点；
 - 整链路测试：实测收到 80064 点 registered scan、7098 点二值 terrain、
   精确配对的 scan/origin 和 `/robot_vgraph`，V-Graph 持续更新。
+- 以 `ssmi_ws` 为 underlay 重新配置 `mapless_navigation_old` 后，
+  `rospack` 可在同一环境找到 `far_planner`、`local_planner` 和
+  `semantic_octomap`；离线和实时入口分别能完整展开 8 个和 7 个节点。
+- `five_class_bag_navigation.launch` 对 0914 bag 短时实跑通过：
+  `/semantic_pcl/global_admitted`、`/octomap_full`、局部可通行代价云和
+  `/far_binary/terrain_map` 均收到真实消息；FAR 持续更新 V-Graph。
+- 修正全局图语义编码链路后实测：
+  `/semantic_pcl/global_admitted` 只有 `grid_semantic_adapter` 一个发布者；
+  单帧 4578 点的颜色统计为 flat ground 4438、rough ground 29、
+  geometric obstacle 98、grass 13，全部与五分类 schema 一致；
+  `/octomap_color` 为非空 `ColorOcTree`，对应 2D 投影实测含 444 个
+  occupied cell，修正了“有 OctoMap 消息但 RViz 无 occupied voxel”问题。
+- 实测连接关系为 Local3D 发布 schema-neutral admission grid、
+  `grid_semantic_adapter` 发布全局 admitted cloud、SemanticOctomap 订阅并发布
+  `/octomap_full`/`/octomap_color`；FAR 发布 `/way_point`、localPlanner 订阅；
+  Local3D 发布 traversability cost cloud、localPlanner 订阅并发布 `/path`。
 - 修改静态保护后的 0914 bag 2 倍速完整回放：抽查到的 1768 条 bridge
   terrain 消息全部包含正确类型的 `uint8 static_obstacle` 字段；250 个 FAR
   更新中有 248 帧仍发布非空动态点，证明保护没有把动态清除整体关闭；

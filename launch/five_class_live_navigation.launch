@@ -1,0 +1,136 @@
+<?xml version="1.0"?>
+<launch>
+  <!-- Complete live navigation pipeline. External drivers/localization must
+       publish semantic grid points, raw LiDAR, odometry and acquisition-time
+       TF. far_scan_input_adapter accepts either sensor_msgs/PointCloud2 or
+       livox_ros_driver2/CustomMsg on raw_scan_topic. -->
+  <arg name="point_cloud_topic" default="/grids_points"/>
+  <arg name="raw_scan_topic" default="/livox/lidar"/>
+  <arg name="odometry_topic" default="/fusion_localization"/>
+  <arg name="world_frame" default="map"/>
+  <arg name="reference_frame" default="map_start"/>
+  <arg name="vehicle_frame" default="wuba_base"/>
+  <arg name="lidar_frame" default="livox_frame"/>
+  <arg name="use_initial_pose_reference" default="true"/>
+
+  <arg name="registered_scan_topic"
+       default="/far_scan/registered_scan"/>
+  <arg name="registered_scan_origin_topic"
+       default="/far_scan/registered_scan_origin"/>
+  <arg name="voxel_cloud_topic"
+       default="/local_3d_semantic_voxel_map/voxel_cloud"/>
+  <arg name="binary_terrain_topic" default="/far_binary/terrain_map"/>
+  <arg name="local_cost_topic"
+       default="/local_3d_semantic_voxel_map/traversability_cost_cloud"/>
+
+  <arg name="semantic_schema"
+       default="$(find far_planner)/config/five_class_semantic_schema.yaml"/>
+  <arg name="local_voxel_config"
+       default="$(find far_planner)/config/five_class_local_voxel.yaml"/>
+  <arg name="global_admission_grid_topic"
+       default="/local_3d_semantic_voxel_map/global_semantic_admission_grid"/>
+  <arg name="global_admission_topic"
+       default="/semantic_pcl/global_admitted"/>
+  <arg name="global_map_topic" default="/octomap_full"/>
+  <arg name="enable_global_explicit_revocation" default="false"/>
+  <arg name="enable_global_raycast_clearing" default="true"/>
+  <arg name="enable_two_layer_angular_clearing" default="true"/>
+
+  <arg name="start_global_map" default="true"/>
+  <arg name="start_local_planner" default="true"/>
+  <arg name="start_path_follower" default="true"/>
+  <arg name="local_path_topic" default="/path"/>
+  <arg name="cmd_vel_topic" default="/cmd_vel"/>
+  <arg name="local_goal_timeout" default="0.0"/>
+  <arg name="max_speed" default="0.3"/>
+  <arg name="autonomy_speed" default="0.3"/>
+  <arg name="rviz" default="true"/>
+
+  <param name="/use_sim_time" value="false"/>
+  <!-- Make the shared class/role/cost contract available before Local3D is
+       constructed. -->
+  <rosparam command="load" file="$(arg semantic_schema)"/>
+
+  <!-- One shared schema is loaded globally by semantic_interface.launch. -->
+  <include file="$(find local3d_semantic_voxel_map)/launch/grids_points_voxel_map.launch">
+    <arg name="config" value="$(arg local_voxel_config)"/>
+    <arg name="input_topic" value="$(arg point_cloud_topic)"/>
+    <arg name="global_frame" value="$(arg world_frame)"/>
+    <arg name="use_initial_pose_reference"
+         value="$(arg use_initial_pose_reference)"/>
+    <arg name="reference_frame" value="$(arg reference_frame)"/>
+    <arg name="local_cost_frame" value="$(arg vehicle_frame)"/>
+    <arg name="ssmi_topic" value="$(arg global_admission_topic)"/>
+    <arg name="enable_two_layer_angular_clearing"
+         value="$(arg enable_two_layer_angular_clearing)"/>
+    <arg name="rviz" value="false"/>
+  </include>
+
+  <include file="$(find far_planner)/launch/scan_input_adapter.launch">
+    <arg name="input_topic" value="$(arg raw_scan_topic)"/>
+    <arg name="output_topic" value="$(arg registered_scan_topic)"/>
+    <arg name="origin_topic" value="$(arg registered_scan_origin_topic)"/>
+    <arg name="world_frame" value="$(arg world_frame)"/>
+    <arg name="vehicle_frame" value="$(arg vehicle_frame)"/>
+    <arg name="lidar_frame" value="$(arg lidar_frame)"/>
+    <arg name="pointcloud_origin_frame" value="$(arg vehicle_frame)"/>
+  </include>
+
+  <include file="$(find far_planner)/launch/semantic_interface.launch">
+    <arg name="voxel_cloud_topic" value="$(arg voxel_cloud_topic)"/>
+    <arg name="binary_terrain_topic" value="$(arg binary_terrain_topic)"/>
+    <arg name="odom_topic" value="$(arg odometry_topic)"/>
+    <arg name="registered_scan_topic" value="$(arg registered_scan_topic)"/>
+    <arg name="registered_scan_origin_topic"
+         value="$(arg registered_scan_origin_topic)"/>
+    <arg name="world_frame" value="$(arg world_frame)"/>
+    <arg name="schema_file" value="$(arg semantic_schema)"/>
+    <arg name="rviz" value="$(arg rviz)"/>
+    <arg name="graph_decoder" value="false"/>
+  </include>
+
+  <group if="$(arg start_global_map)">
+    <remap from="/octomap_full" to="$(arg global_map_topic)"/>
+    <include file="$(find semantic_octomap)/launch/semantic_octomap_grid.launch">
+      <arg name="input_topic" value="$(arg global_admission_grid_topic)"/>
+      <arg name="output_topic" value="$(arg global_admission_topic)"/>
+      <arg name="semantic_schema" value="$(arg semantic_schema)"/>
+      <arg name="load_semantic_schema" value="false"/>
+      <!-- The Local3D direct encoder is disabled in local_voxel_config; this
+           adapter is the sole publisher of the schema-colored SSMI cloud. -->
+      <arg name="use_grid_adapter" value="true"/>
+      <arg name="world_frame_id" value="$(arg world_frame)"/>
+      <arg name="use_initial_pose_reference" value="false"/>
+      <arg name="reference_frame_id" value="$(arg reference_frame)"/>
+      <arg name="enable_explicit_revocation"
+           value="$(arg enable_global_explicit_revocation)"/>
+      <arg name="enable_raycast_clearing"
+           value="$(arg enable_global_raycast_clearing)"/>
+      <arg name="enable_two_layer_angular_clearing"
+           value="$(arg enable_two_layer_angular_clearing)"/>
+      <arg name="rviz" value="false"/>
+    </include>
+  </group>
+
+  <group if="$(arg start_local_planner)">
+    <include file="$(find local_planner)/launch/local_planner.launch">
+      <arg name="startLocalPlanner" value="true"/>
+      <arg name="startPathFollower" value="$(arg start_path_follower)"/>
+      <arg name="worldFrameId" value="$(arg world_frame)"/>
+      <arg name="odometryTopic" value="$(arg odometry_topic)"/>
+      <arg name="staticObstacleTopic" value="$(arg local_cost_topic)"/>
+      <arg name="useAddedObstacles" value="false"/>
+      <arg name="requireDynamicObstacleCloud" value="false"/>
+      <arg name="requireNonEmptyCostCloud" value="true"/>
+      <arg name="waypointTopic" value="/way_point"/>
+      <arg name="goalTimeout" value="$(arg local_goal_timeout)"/>
+      <arg name="pathTopic" value="$(arg local_path_topic)"/>
+      <arg name="cmdVelTopic" value="$(arg cmd_vel_topic)"/>
+      <arg name="sensorFrameId" value="$(arg vehicle_frame)"/>
+      <arg name="vehicleFrameId" value="$(arg vehicle_frame)"/>
+      <arg name="terrainVoxelSize" value="0.10"/>
+      <arg name="maxSpeed" value="$(arg max_speed)"/>
+      <arg name="autonomySpeed" value="$(arg autonomy_speed)"/>
+    </include>
+  </group>
+</launch>

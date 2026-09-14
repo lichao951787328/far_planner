@@ -1,0 +1,123 @@
+<?xml version="1.0"?>
+<launch>
+  <!-- Complete offline navigation pipeline for the 2026-09-14 recording:
+
+       /grids_points -> Local3D semantic voxel map
+                        |-> binary bridge -> FAR Planner -> /way_point
+                        |                         |
+                        |                         v
+                        |                  localPlanner -> /path
+                        |
+                        `-> /semantic_pcl/global_admitted
+                                   -> SemanticOctomap -> /octomap_full
+
+       /livox/lidar -> acquisition-time scan adapter -> FAR dynamic clearing
+
+       semantic_octomap lives in ~/social_nav/src/ssmi_ws. Build/source this
+       workspace as an underlay before mapless_navigation_old; see the notes
+       in FAR_Planner_Local3D语义Voxel接口改造方案.md. -->
+  <arg name="bag"
+       default="$(env HOME)/social_nav/src/mapless_navigation_old/src/dateset/0914/2026-09-14-13-52-47.bag"/>
+  <arg name="start_paused" default="false"/>
+  <arg name="rate" default="1.0"/>
+  <arg name="bag_delay" default="2.0"/>
+
+  <arg name="world_frame" default="map"/>
+  <arg name="vehicle_frame" default="wuba_base"/>
+  <arg name="registered_scan_topic"
+       default="/far_scan/registered_scan"/>
+  <arg name="registered_scan_origin_topic"
+       default="/far_scan/registered_scan_origin"/>
+
+  <arg name="semantic_schema"
+       default="$(find far_planner)/config/five_class_semantic_schema.yaml"/>
+  <arg name="local_voxel_config"
+       default="$(find far_planner)/config/five_class_local_voxel.yaml"/>
+  <arg name="global_admission_grid_topic"
+       default="/local_3d_semantic_voxel_map/global_semantic_admission_grid"/>
+  <arg name="global_admission_topic"
+       default="/semantic_pcl/global_admitted"/>
+  <arg name="global_map_topic" default="/octomap_full"/>
+  <arg name="enable_global_explicit_revocation" default="false"/>
+  <arg name="enable_global_raycast_clearing" default="true"/>
+  <arg name="enable_two_layer_angular_clearing" default="true"/>
+
+  <arg name="start_global_map" default="true"/>
+  <arg name="start_local_planner" default="true"/>
+  <arg name="start_path_follower" default="false"/>
+  <arg name="local_path_topic" default="/path"/>
+  <arg name="cmd_vel_topic" default="/cmd_vel"/>
+  <arg name="rviz" default="true"/>
+
+  <param name="/use_sim_time" value="true"/>
+
+  <!-- Reuse the tested 0914 Local3D + dual-format scan adapter + semantic FAR
+       launch. It loads semantic_schema before all consumers start. -->
+  <include file="$(find far_planner)/launch/0914_semantic_far_navigation.launch">
+    <arg name="bag" value="$(arg bag)"/>
+    <arg name="start_paused" value="$(arg start_paused)"/>
+    <arg name="rate" value="$(arg rate)"/>
+    <arg name="delay" value="$(arg bag_delay)"/>
+    <arg name="rviz" value="$(arg rviz)"/>
+    <arg name="world_frame" value="$(arg world_frame)"/>
+    <arg name="vehicle_frame" value="$(arg vehicle_frame)"/>
+    <arg name="registered_scan_topic" value="$(arg registered_scan_topic)"/>
+    <arg name="registered_scan_origin_topic"
+         value="$(arg registered_scan_origin_topic)"/>
+    <arg name="global_admission_topic" value="$(arg global_admission_topic)"/>
+    <arg name="semantic_schema" value="$(arg semantic_schema)"/>
+    <arg name="local_voxel_config" value="$(arg local_voxel_config)"/>
+    <arg name="enable_two_layer_angular_clearing"
+         value="$(arg enable_two_layer_angular_clearing)"/>
+  </include>
+
+  <!-- Local3D publishes the schema-neutral admission grid. The adapter reads
+       semantic_lable + traversability and encodes exactly the RGB values from
+       five_class_semantic_schema.yaml for SemanticOctomap. -->
+  <group if="$(arg start_global_map)">
+    <remap from="/octomap_full" to="$(arg global_map_topic)"/>
+    <include file="$(find semantic_octomap)/launch/semantic_octomap_grid.launch">
+      <arg name="input_topic" value="$(arg global_admission_grid_topic)"/>
+      <arg name="output_topic" value="$(arg global_admission_topic)"/>
+      <arg name="semantic_schema" value="$(arg semantic_schema)"/>
+      <arg name="load_semantic_schema" value="false"/>
+      <arg name="use_grid_adapter" value="true"/>
+      <arg name="world_frame_id" value="$(arg world_frame)"/>
+      <arg name="use_initial_pose_reference" value="false"/>
+      <arg name="reference_frame_id" value="map_start"/>
+      <arg name="enable_explicit_revocation"
+           value="$(arg enable_global_explicit_revocation)"/>
+      <arg name="enable_raycast_clearing"
+           value="$(arg enable_global_raycast_clearing)"/>
+      <arg name="enable_two_layer_angular_clearing"
+           value="$(arg enable_two_layer_angular_clearing)"/>
+      <arg name="rviz" value="false"/>
+    </include>
+  </group>
+
+  <!-- FAR and Local3D's traversability cloud are both exposed in map, so this
+       interface does not need the old map_start -> map waypoint adapter. -->
+  <group if="$(arg start_local_planner)">
+    <include file="$(find local_planner)/launch/local_planner.launch">
+      <arg name="startLocalPlanner" value="true"/>
+      <arg name="startPathFollower" value="$(arg start_path_follower)"/>
+      <arg name="worldFrameId" value="$(arg world_frame)"/>
+      <arg name="odometryTopic" value="/fusion_localization"/>
+      <arg name="staticObstacleTopic"
+           value="/local_3d_semantic_voxel_map/traversability_cost_cloud"/>
+      <arg name="useAddedObstacles" value="false"/>
+      <arg name="requireDynamicObstacleCloud" value="false"/>
+      <arg name="requireNonEmptyCostCloud" value="true"/>
+      <arg name="waypointTopic" value="/way_point"/>
+      <!-- This recording's /clock and sensor headers use different epochs. -->
+      <arg name="goalTimeout" value="0.0"/>
+      <arg name="pathTopic" value="$(arg local_path_topic)"/>
+      <arg name="cmdVelTopic" value="$(arg cmd_vel_topic)"/>
+      <arg name="sensorFrameId" value="$(arg vehicle_frame)"/>
+      <arg name="vehicleFrameId" value="$(arg vehicle_frame)"/>
+      <arg name="terrainVoxelSize" value="0.10"/>
+      <arg name="maxSpeed" value="0.3"/>
+      <arg name="autonomySpeed" value="0.3"/>
+    </include>
+  </group>
+</launch>
