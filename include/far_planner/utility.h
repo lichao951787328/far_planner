@@ -175,8 +175,9 @@ public:
                                   const PointCloudPtr& cloudInOut,
                                   const ros::Time& stamp = ros::Time(0));
 
-    static void TransformPoint3DFrame(const std::string& from_frame_id,
+    static bool TransformPoint3DFrame(const std::string& from_frame_id,
                                       const std::string& to_frame_id,
+                                      const ros::Time& stamp,
                                       const tf::TransformListener* tf_listener,
                                       Point3D& point);
 

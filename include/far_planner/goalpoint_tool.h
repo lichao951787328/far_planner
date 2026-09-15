@@ -5,6 +5,7 @@
 
 #include <nav_msgs/Odometry.h>
 #include <rviz/default_plugin/tools/pose_tool.h>
+#include <tf/transform_listener.h>
 
 namespace rviz {
 class BoolProperty;
@@ -36,6 +37,8 @@ class GoalPointTool : public rviz::PoseTool {
   ros::Subscriber odom_sub_;
   ros::Publisher goal_pub_;
   ros::Publisher joy_pub_;
+  tf::TransformListener tf_listener_;
+  nav_msgs::Odometry::ConstPtr latest_odom_;
 
   rviz::RosTopicProperty* goal_topic_property_;
   rviz::RosTopicProperty* odom_topic_property_;
@@ -43,7 +46,6 @@ class GoalPointTool : public rviz::PoseTool {
   rviz::StringProperty* goal_frame_property_;
   rviz::BoolProperty* publish_joy_property_;
 
-  double vehicle_z_;
 };
 
 }  // namespace far_planner

@@ -574,6 +574,41 @@ Graph/pillar_perimeter: 1.0
 PILLAR”还是“多顶点多边形”，不改变 `robot_dim` 及由它派生的机器人
 碰撞净空。
 
+### 7.6 RViz 目标点的坐标系契约
+
+RViz `PoseTool` 输出的点在当前 `Fixed Frame` 下，不是 `Goalpoint`
+工具单独设置的 `Goal Frame` 下。之前的插件只将消息标签改为
+`Goal Frame` 而没有转换坐标：部署时如将 RViz `Fixed Frame` 改为
+`map_start`，但保留 `Goal Frame=map`，`/goal_point` 会把 `map_start`
+坐标误标为 `map`；FAR 见到 `frame_id=map` 后不再做 TF，红色
+`original_goal` 因此可以严重偏离鼠标点。
+
+修正后的数据路线为：
+
+```text
+RViz Fixed Frame 下的选点
+  -> Goalpoint 以 Fixed Frame 为源；若指定 Goal Frame，在目标消息 stamp 做 TF
+  -> /goal_point 的数值与 header.frame_id 一致
+  -> FAR 检查 frame_id；若不是 world_frame，在消息 stamp 做 TF
+  -> FAR 在 map/world_frame 中规划，并以该 frame 显示 original_goal
+  -> /way_point 仍在 map；localPlanner 再换算成车体相对路径
+```
+
+`Goal Frame` 留空时，插件直接以 RViz `Fixed Frame` 发布。如指定了不同
+的目标 frame 而目标 stamp 的 TF 不可用，插件拒绝发布，不会只改
+`frame_id` 继续发送。里程计高度也会先转到 RViz Fixed Frame；如
+里程计高度 TF 暂时不可用，显式告警并使用 `z=0`，不误用其他
+frame 下的高度。FAR 接收空 `frame_id`、跨 frame 但无 stamp、或 TF
+失败的目标时直接拒绝；不再用最新 TF 或未转换坐标继续规划。
+在正常实时部署中，目标 stamp 是点击时的 ROS 时间。如果录包的
+`/clock` 与里程计/TF 消息时间相差超过 60 秒（此处 13-47-53 bag
+相差约数百万秒），Goalpoint 显式告警，并改用最近里程计消息的
+stamp 作为目标 TF 时间，避免以录包时间查询采集时间的 TF。
+
+该修正只保证坐标系契约。RViz `PoseTool` 仍把鼠标射线与
+`z=0` 平面相交，不是拾取 OctoMap/3D 点云表面；倾斜视角点击高出
+该平面的可视对象时，视觉上仍可能有鼠标投影偏差。
+
 ## 8. 已知危险点
 
 ### 8.1 去掉 terrain_map_ext 后的范围损失
@@ -763,6 +798,11 @@ TF 可用。如果 PointCloud2 仍在传感器或车体坐标，其 `header.fram
 22. 实际删除点保留历史点原始 XYZ，不使用虚拟射线采样点作为删除参考；
 23. `enable_confirmed_clear_node_removal=false` 时，确认清除只删历史障碍点，
     不触发邻近 contour node 的禁止匹配或强制删除；打开时两处行为同时启用。
+24. RViz `Fixed Frame=map_start` 而 `Goal Frame=map` 时，`/goal_point`
+    的数值必须先实际转到 `map`；TF 不可用时不能发布错标签的目标。
+25. FAR 收到 `map_start` 目标时，必须以目标消息 stamp 做
+    `map_start -> map` 转换；空 frame、无 stamp 或 TF 失败都不得修改
+    GlobalGraph 目标，红色 `original_goal` 只能显示成功转换的 map 点。
 
 ## 10. 本分支实测结果
 

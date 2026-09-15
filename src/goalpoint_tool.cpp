@@ -1,5 +1,6 @@
 #include "far_planner/goalpoint_tool.h"
 
+#include <cmath>
 #include <geometry_msgs/PointStamped.h>
 #include <pluginlib/class_list_macros.hpp>
 #include <sensor_msgs/Joy.h>
@@ -16,8 +17,7 @@ GoalPointTool::GoalPointTool()
       odom_topic_property_(nullptr),
       joy_topic_property_(nullptr),
       goal_frame_property_(nullptr),
-      publish_joy_property_(nullptr),
-      vehicle_z_(0.0) {
+      publish_joy_property_(nullptr) {
   shortcut_key_ = 'w';
 
   goal_topic_property_ = new rviz::RosTopicProperty(
@@ -26,11 +26,12 @@ GoalPointTool::GoalPointTool()
       SLOT(updateTopics()), this);
   odom_topic_property_ = new rviz::RosTopicProperty(
       "Odometry Topic", "/fusion_localization", "nav_msgs/Odometry",
-      "Odometry used only to copy the vehicle height into the selected goal.",
+      "Odometry used to set the goal height in the RViz Fixed Frame.",
       getPropertyContainer(), SLOT(updateTopics()), this);
   goal_frame_property_ = new rviz::StringProperty(
       "Goal Frame", "map",
-      "Frame placed in the PointStamped header. Leave empty to use RViz Fixed Frame.",
+      "Optional output frame. The clicked point is transformed from RViz Fixed Frame; "
+      "leave empty to publish in Fixed Frame.",
       getPropertyContainer());
   publish_joy_property_ = new rviz::BoolProperty(
       "Publish Joy Start", true,
@@ -70,7 +71,7 @@ void GoalPointTool::updateTopics() {
 }
 
 void GoalPointTool::odomHandler(const nav_msgs::Odometry::ConstPtr& odom) {
-  vehicle_z_ = odom->pose.pose.position.z;
+  latest_odom_ = odom;
 }
 
 void GoalPointTool::onPoseSet(double x, double y, double /*theta*/) {
@@ -79,17 +80,70 @@ void GoalPointTool::onPoseSet(double x, double y, double /*theta*/) {
     return;
   }
 
-  std::string goal_frame = goal_frame_property_->getStdString();
-  if (goal_frame.empty() && context_ != nullptr) {
-    goal_frame = context_->getFixedFrame().toStdString();
+  const std::string fixed_frame =
+      context_ != nullptr ? context_->getFixedFrame().toStdString() : "";
+  if (fixed_frame.empty()) {
+    ROS_ERROR_THROTTLE(1.0, "GoalPointTool: RViz Fixed Frame is empty");
+    return;
   }
+  const std::string configured_goal_frame = goal_frame_property_->getStdString();
+  const std::string goal_frame = configured_goal_frame.empty()
+                                     ? fixed_frame : configured_goal_frame;
 
   geometry_msgs::PointStamped goal;
   goal.header.stamp = ros::Time::now();
-  goal.header.frame_id = goal_frame;
+  // Some recorded bags publish /clock in the record-time epoch while odometry
+  // and TF retain their acquisition-time epoch. In that case, use the most
+  // recent odometry acquisition stamp as the TF reference rather than asking
+  // for a transform millions of seconds outside the recorded TF buffer.
+  if (latest_odom_ != nullptr && !latest_odom_->header.stamp.isZero() &&
+      !goal.header.stamp.isZero() &&
+      std::abs((goal.header.stamp - latest_odom_->header.stamp).toSec()) > 60.0) {
+    ROS_WARN_THROTTLE(
+        2.0, "GoalPointTool: /clock and odometry use different time domains; "
+             "using latest odometry stamp for goal TF");
+    goal.header.stamp = latest_odom_->header.stamp;
+  }
+  goal.header.frame_id = fixed_frame;
   goal.point.x = x;
   goal.point.y = y;
-  goal.point.z = vehicle_z_;
+  goal.point.z = 0.0;
+
+  if (latest_odom_ != nullptr && !latest_odom_->header.frame_id.empty()) {
+    geometry_msgs::PointStamped vehicle;
+    vehicle.header = latest_odom_->header;
+    vehicle.point = latest_odom_->pose.pose.position;
+    if (vehicle.header.frame_id == fixed_frame) {
+      goal.point.z = vehicle.point.z;
+    } else {
+      try {
+        geometry_msgs::PointStamped vehicle_in_fixed;
+        tf_listener_.transformPoint(fixed_frame, vehicle, vehicle_in_fixed);
+        goal.point.z = vehicle_in_fixed.point.z;
+      } catch (const tf::TransformException& ex) {
+        ROS_WARN_THROTTLE(
+            1.0, "GoalPointTool: odometry height TF unavailable; using z=0: %s",
+            ex.what());
+      }
+    }
+  }
+
+  // PoseTool's x/y are in RViz Fixed Frame. Never change only the frame label:
+  // an explicit Goal Frame requires an actual transform at the goal stamp.
+  if (goal_frame != fixed_frame) {
+    try {
+      geometry_msgs::PointStamped transformed_goal;
+      tf_listener_.waitForTransform(goal_frame, fixed_frame,
+                                    goal.header.stamp, ros::Duration(0.2));
+      tf_listener_.transformPoint(goal_frame, goal, transformed_goal);
+      goal = transformed_goal;
+    } catch (const tf::TransformException& ex) {
+      ROS_ERROR_THROTTLE(
+          1.0, "GoalPointTool: cannot transform click from '%s' to '%s': %s",
+          fixed_frame.c_str(), goal_frame.c_str(), ex.what());
+      return;
+    }
+  }
 
   // Two publications preserve the behavior of the original FAR plugin and
   // make a single click robust to a just-created subscriber connection.

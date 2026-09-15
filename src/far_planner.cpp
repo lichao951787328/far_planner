@@ -1166,14 +1166,27 @@ void FARMaster::ExtractDynamicObsFromScan(const PointCloudPtr& scanCloudIn,
 
 void FARMaster::WaypointCallBack(const geometry_msgs::PointStamped& route_goal) {
   if (!is_graph_init_) {
-    if (FARUtil::IsDebug) ROS_WARN("FARMaster: wait for v-graph to init before sending any goals");
+    ROS_WARN_THROTTLE(1.0, "FARMaster: V-Graph not initialized; rejecting goal");
+    return;
+  }
+  if (route_goal.header.frame_id.empty()) {
+    ROS_ERROR_THROTTLE(1.0, "FARMaster: goal frame_id is empty; rejecting goal");
     return;
   }
   Point3D goal_p(route_goal.point.x, route_goal.point.y, route_goal.point.z);
   const std::string goal_frame = route_goal.header.frame_id;
   if (!FARUtil::IsSameFrameID(goal_frame, master_params_.world_frame)) {
-    if (FARUtil::IsDebug) ROS_WARN_THROTTLE(1.0, "FARMaster: waypoint published is not on world frame!");
-    FARUtil::TransformPoint3DFrame(goal_frame, master_params_.world_frame, tf_listener_, goal_p); 
+    if (route_goal.header.stamp.isZero()) {
+      ROS_ERROR_THROTTLE(1.0,
+                         "FARMaster: cross-frame goal has no stamp; rejecting goal");
+      return;
+    }
+    if (!FARUtil::TransformPoint3DFrame(
+            goal_frame, master_params_.world_frame, route_goal.header.stamp,
+            tf_listener_, goal_p)) {
+      ROS_ERROR_THROTTLE(1.0, "FARMaster: goal TF unavailable; rejecting goal");
+      return;
+    }
   }
   graph_planner_.UpdateGoal(goal_p);
   FARUtil::Timer.start_time("Overall_executing", true);

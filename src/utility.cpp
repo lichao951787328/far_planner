@@ -177,24 +177,26 @@ void FARUtil::TransformPCLFrame(const std::string& from_frame_id,
   *cloudInOut = aft_tf_cloud;
 }
 
-void FARUtil::TransformPoint3DFrame(const std::string& from_frame_id,
+bool FARUtil::TransformPoint3DFrame(const std::string& from_frame_id,
                                    const std::string& to_frame_id,
+                                   const ros::Time& stamp,
                                    const tf::TransformListener* tf_listener,
                                    Point3D& point)
 {
   tf::Vector3 point_vec(point.x, point.y, point.z);
   tf::StampedTransform transform_tf_stamp;
   try {
-    tf_listener->waitForTransform(to_frame_id, from_frame_id, ros::Time(0), ros::Duration(1.0));
-    tf_listener->lookupTransform(to_frame_id, from_frame_id, ros::Time(0), transform_tf_stamp);
+    tf_listener->waitForTransform(to_frame_id, from_frame_id, stamp, ros::Duration(0.2));
+    tf_listener->lookupTransform(to_frame_id, from_frame_id, stamp, transform_tf_stamp);
     point_vec = transform_tf_stamp * point_vec;
-  } catch (tf::TransformException ex){
+  } catch (const tf::TransformException& ex){
     ROS_ERROR("Tracking Point3D TF lookup: %s",ex.what());
-    return;
+    return false;
   }
   point.x = point_vec.x();
   point.y = point_vec.y();
   point.z = point_vec.z();
+  return true;
 }
 
 bool FARUtil::IsSameFrameID(const std::string& cur_frame, const std::string& ref_frame) {
