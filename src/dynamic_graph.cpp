@@ -94,6 +94,16 @@ void DynamicGraph::UpdateNavGraph(const NodePtrStack& new_nodes,
     if (!is_freeze_vgraph) {
         for (const auto& node_ptr : extend_match_nodes_) {
             if (FARUtil::IsStaticNode(node_ptr) || node_ptr == cur_internav_ptr_) continue;
+            // Confirmed raw-scan or external angular free-space evidence owns
+            // this historical contour node. Remove it without allowing a
+            // nearby moving contour to reset the ordinary dumper vote.
+            if (dg_params_.enable_confirmed_clear_node_removal &&
+                FARUtil::IsPointNearDynamicClearing(
+                    node_ptr->position, dg_params_.dynamic_clear_dist)) {
+                node_ptr->is_merged = true;
+                clear_node.push_back(node_ptr);
+                continue;
+            }
             if (!this->ReEvaluateCorner(node_ptr)) {
                 if (this->SetNodeToClear(node_ptr)) {
                     clear_node.push_back(node_ptr);

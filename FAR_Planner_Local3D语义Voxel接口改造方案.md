@@ -47,6 +47,11 @@ MichaelFYang/far_planner: 2799b6964c141cacd1c32a14b19bc7abffbe0e52
                                                      +--> FAR /scan_cloud
                                                           当前射线和动态障碍清除
 
+/local_3d_semantic_voxel_map/two_layer_clearing_rays
+                    |
+                    +--> FAR 独立双层角向清除过滤器
+                         （只生成 free 证据，不冒充 scan 回波）
+
 /state_estimation ---------------> FAR /odom_world
 ```
 
@@ -345,6 +350,7 @@ FAR 分别保存：
 last_terrain_stamp_
 last_terrain_local_stamp_
 last_scan_stamp_
+last_angular_clearing_stamp_
 ```
 
 各回调只接受：
@@ -355,7 +361,8 @@ stamp > 对应输入最后一次成功使用的 stamp
 
 不能使用一个全局 stamp，因为同一采集时刻的二值地图需要同时被
 `terrain_cloud` 和 `terrain_local_cloud` 各消费一次，registered scan 也可能
-具有相同时间戳。
+具有相同时间戳。双层角向射线只与完全相同 stamp 的主 terrain 配对；射线先到
+时最多缓存 10 帧，terrain 先到时由射线回调补配，不能拿相邻时间帧替代。
 
 只有点云转换和处理成功后才推进 last stamp。下列情况不会消耗 stamp：
 
@@ -365,7 +372,8 @@ stamp > 对应输入最后一次成功使用的 stamp
 - FAR 主地图更新处于暂停状态；
 - 消息时间小于或等于已成功消费时间。
 
-执行 `ResetEnvironmentAndGraph()` 时会同时清空三个时间戳，允许 rosbag 从
+执行 `ResetEnvironmentAndGraph()` 时会同时清空四个时间戳、待配对射线和
+连续证据计数，允许 rosbag 从
 较早时间重新播放。
 
 ## 7. 动态障碍
@@ -406,6 +414,165 @@ FAR 会在动态清除候选的数量阈值判断之前，删除与当前
 - obstacle-wins；
 - `dynamic_obstacle` 和纯代价障碍的正常清除；
 - 上游 Local 3D map 对语义类别本身的更新或撤销。
+
+### 7.1 `world_obs_cloud_grid_` 为什么会留下历史障碍
+
+`world_obs_cloud_grid_` 不是当前帧点云的镜像，而是 FAR 的持久障碍库。每次
+`terrain_cloud` 回调只把当前 obstacle 写入对应的大网格 cell；当前消息中没有
+再次出现的旧点不会因此自动删除。历史点只有在下列路径之一成立时才移除：
+
+```text
+raw registered scan 形成 RAY_BIT
+  -> ExtractDynamicObsFromScan 找到历史 obstacle
+  -> 候选数量满足 size > dyosb_update_thred
+  -> RemoveObsCloudFromGrid
+
+或
+
+双层角向 free 证据连续确认
+  -> 取回该 XY 列中的历史 obstacle 原坐标
+  -> RemoveObsCloudFromGrid
+```
+
+因此 `/grids_points`、Local3D voxel 和当前 `temp_obs_ptr_` 已经没有车辆，只能
+说明“当前输入不再占用”；它不会自动撤销 FAR 以前写入的点。`/FAR_obs_debug`
+调用 `GetSurroundObsCloud()` 得到的正是这个持久库在机器人附近的内容，红色
+GlobalGraph 多边形则由该库生成的历史 contour/nav node 继续维持。
+
+`Util/dynamic_obs_dacay_time` 只控制“已确认清除点”在
+`stack_dyobs_cloud_` 中抑制旧 terrain 重新插入的时间，不是
+`world_obs_cloud_grid_` 的自动过期时间。
+
+### 7.2 为什么真实 scan 也可能删不干净
+
+raw scan 清除要求历史 obstacle voxel 被有效射线穿过。稀疏角分辨率、上下
+方向空洞、遮挡、量程裁剪、地面回波先被 free-overlap 过滤，以及 scan/terrain
+约 50～150 ms 的跨流差异，都可能让车辆区域只有部分 voxel 获得 `RAY_BIT`。
+`dyosb_update_thred=0` 只是把已经找到的候选从“至少 2/3 个”放宽为“至少
+1 个”，不能创造没有穿过历史 voxel 的射线。因此阈值调到 0 会改善，但不会
+消除由覆盖空洞造成的红色轮廓残片。
+
+### 7.3 独立双层角向 free 证据接口
+
+本分支让 FAR 独立订阅：
+
+```text
+/local_3d_semantic_voxel_map/two_layer_clearing_rays
+```
+
+消息中的一个点不是障碍回波，而是一条射线记录：`origin_x/y/z` 为起点，
+`x/y/z` 为终点，另带 `hit`、`layer` 和 `angle_bin`。不能把这些终点并入
+`/scan_cloud`，否则虚拟终点会被标成真实 `SCAN_BIT`，丢失双层和 hit/no-hit
+语义，还可能提前截断真实 scan 的射线。
+
+当前实现按以下顺序处理每个与主 terrain 同 stamp 的双层消息：
+
+1. 在采集时刻把 origin 和 endpoint 从消息 frame 变换到 `world_frame`；
+2. 分别把上层、下层的完整射线段栅格化到 `voxel_dim=0.10 m` 的 XY 列；
+3. 在终点前保留 `external_clear_endpoint_margin=0.20 m`，避免删除 hit 表面或
+   越过 no-hit 的局部框边界；
+4. 默认只保留上下两层都穿过的 XY 列，不把单层空洞当作整根二维障碍柱已空；
+5. 排除当前 terrain 仍占用的 XY 列以及当前帧 `static_obstacle=1` 的保护列；
+6. 从 `surround_obs_cloud_` 中查找落在 free mask 内的历史点，连续两个不同
+   采集帧都命中后才确认；中间任一帧缺证据就从 1 重新计数；
+7. 用找到的历史点原始 XYZ 调用 `RemoveObsCloudFromGrid()`，并把同一批点加入
+   已确认动态清除和近期变化链路。
+
+这里“用历史点原始坐标”很关键。FAR 的 `RemoveOverlapCloud()` 会把删除参考点
+和历史点一起放入约 `1.2 * voxel_dim`（当前约 0.12 m）的 PCL VoxelGrid，只有
+落入同一 leaf 才能删除。若直接沿等角/等距射线生成虚拟采样点，即使它们在
+几何上离历史点很近，也可能位于 leaf 边界另一侧，造成“射线看起来经过但
+删不到”。现在的虚拟射线只生成布尔 free mask，最终删除参考仍是 FAR 库中
+已经存在的精确历史点，避免了这类坐标分箱偏差。
+
+为了让上下层在最远处也足够密，当前配置为：
+
+```yaml
+two_layer_angular_resolution_deg: 0.5
+two_layer_octomap_resolution: 0.40
+```
+
+局部框最远角约为 `sqrt(10^2 + 5^2) = 11.18 m`。0.5° 时相邻射线弧长约
+`11.18 * 0.5 * pi / 180 = 0.098 m`，接近 FAR 的 0.10 m XY voxel；每层
+720 条、两层共 1440 条。原 5° 在同一距离的间距约 0.98 m，确实无法清干净
+0.10 m 历史列。这里提高的是每层水平角密度；垂直方向仍严格只有两层，FAR
+通过“两层交集”而不是伪造更多高度层来控制误清除。
+
+FAR 参数为：
+
+```yaml
+ScanHandler/enable_external_angular_clearing: true
+ScanHandler/external_angular_clearing_topic: /local_3d_semantic_voxel_map/two_layer_clearing_rays
+ScanHandler/external_clear_endpoint_margin: 0.20
+ScanHandler/external_clear_confirmations: 2
+ScanHandler/external_clear_require_both_layers: true
+```
+
+没有增加永久的 `world_protected_static_cloud_grid_`。这是有意的：墙、草地、
+井盖只在当前语义帧明确标为 `static_obstacle=1` 时保护；停着的汽车如果以后
+开走，当前 terrain 不再占用且连续收到双层 free 证据，就仍可被清除。该机制
+没有按时间自动删除历史点，只按新的可见 free 观测撤销历史占用。
+
+可在 RViz/命令行分别观察：
+
+```text
+/FAR_angular_clear_mask_debug        上下层共同覆盖的 0.10 m XY free mask
+/FAR_angular_clear_candidates_debug  本帧命中的精确历史障碍点
+/FAR_angular_clear_confirmed_debug   连续帧确认、实际送入删除链路的点
+```
+
+### 7.4 GlobalGraph 红色多边形同步清理
+
+只从 `world_obs_cloud_grid_` 删除点还不够：GlobalGraph 的 contour/nav node 是
+持久对象，附近移动后的新轮廓可能继续匹配旧节点并把普通 dumper 计数重置。
+本分支保留两层可独立控制的处理：
+
+- `Graph/contour_match_distance=0.40 m` 只限制“当前 contour 关联历史节点”的
+  水平距离，不再通过缩小 `robot_dim` 连带改变碰撞净空；
+- raw scan 或双层角向接口确认清除的点仍进入短期 KD-tree，但只有
+  `Graph/enable_confirmed_clear_node_removal=true` 时，附近历史节点才会被禁止
+  contour 重匹配并在下一次 DynamicGraph 更新中直接删除。
+
+这个 KD-tree 沿用 `Util/dynamic_obs_dacay_time` 的短期窗口；它只负责把已经由
+free 证据确认的图节点同步删除，不会自行判定某处为空。
+
+该 node 快捷删除功能现在默认关闭。原因是点级 `static_obstacle=1` 保护不能
+直接映射到轮廓节点：FAR 的 `IsStaticNode()` 只识别 odom/goal，并不表示语义
+静态障碍。轮廓节点又位于障碍外围，所以墙体附近只要存在一个已确认清除的
+动态点，0.40 m 邻域就可能覆盖墙体轮廓节点。此时静态点虽然仍留在
+`world_obs_cloud_grid_`，node 却会被提前标为 `is_merged`，表现为静态红色轮廓
+被误删。
+
+推荐配置为：
+
+```yaml
+ScanHandler/enable_external_angular_clearing: true
+Graph/enable_confirmed_clear_node_removal: false
+```
+
+即保留双层证据对历史动态障碍点的清除，但 GlobalGraph node 仍依赖当前轮廓
+匹配和 `clear_dumper_thred` 正常重评。这样可能接受少量动态轮廓尾影，但不会
+因为附近动态清除点而跨类别强制删除静态障碍轮廓。如以后确认场景中动态障碍
+与静态结构有足够间距，可临时打开该开关做 A/B 测试。
+
+### 7.5 小轮廓的 PILLAR 判定
+
+小轮廓是否压缩成一个质心 `PILLAR` 节点，现在使用独立参数：
+
+```yaml
+Graph/pillar_perimeter: 1.0
+```
+
+单位为米，不再由 `robot_dim * 4` 推导。简化后仍有至少 3 个顶点的
+轮廓会计算完整闭合周长（包含末顶点到首顶点的边）：周长小于或等于
+`1.0 m` 时在局部 ContourGraph 中压缩为一个质心节点，大于 `1.0 m`
+时保留多边形顶点。简化后少于 3 个顶点的轮廓仍在 ContourDetector
+阶段直接丢弃，不会生成 PILLAR 节点。
+
+之前的周长实现漏算了“末顶点到首顶点”的闭合边，本次已同步修正，
+因此 `1.0 m` 对应真实闭合轮廓周长。该参数只控制轮廓是“单节点
+PILLAR”还是“多顶点多边形”，不改变 `robot_dim` 及由它派生的机器人
+碰撞净空。
 
 ## 8. 已知危险点
 
@@ -467,8 +634,9 @@ FAR 对绕过适配器的非 world-frame scan/terrain 也已改为使用消息 s
   处理 terrain 时通常持有比它新约 50 ms 的 scan，少数帧约 150 ms；
 - 在井盖出现区间抽样 20 秒，11 个 terrain 更新中有 label 4 点进入
   `/FAR_dynamic_obs_debug`，合计匹配 140 个井盖点；
-- 当前 `Util/dyosb_update_thred=2`，上述帧通过了 `size > threshold`，因此确实
-  执行了删图，不只是调试显示。
+- 当时实验配置为 `Util/dyosb_update_thred=2`，上述帧通过了 `size > threshold`，
+  因此确实执行了删图，不只是调试显示；当前配置已经改成 0，用来证明剩余
+  拖尾主要不是候选数量阈值，而是射线覆盖空洞。
 
 代表帧：
 
@@ -588,7 +756,13 @@ TF 可用。如果 PointCloud2 仍在传感器或车体坐标，其 `header.fram
 15. 整链路能稳定发布 registered scan/origin，并初始化 FAR V-Graph；
 16. label 4 与动态射线相交时不会进入最终动态删除点云；
 17. 其他动态候选膨胀后也不会覆盖 `/FAR_protected_static_debug` 的 voxel；
-18. 旧 terrain 没有 `static_obstacle` 字段时仍可运行，并明确提示保护不可用。
+18. 旧 terrain 没有 `static_obstacle` 字段时仍可运行，并明确提示保护不可用；
+19. 双层话题每帧包含上下层各 720 条射线，字段和 frame/stamp 契约正确；
+20. 只有一层覆盖、终点余量内、当前 obstacle 或当前静态保护列都不能确认删除；
+21. 同一历史 XY 列必须连续两个不同采集帧命中，中间缺证据会重新计数；
+22. 实际删除点保留历史点原始 XYZ，不使用虚拟射线采样点作为删除参考；
+23. `enable_confirmed_clear_node_removal=false` 时，确认清除只删历史障碍点，
+    不触发邻近 contour node 的禁止匹配或强制删除；打开时两处行为同时启用。
 
 ## 10. 本分支实测结果
 
@@ -599,6 +773,9 @@ TF 可用。如果 PointCloud2 仍在传感器或车体坐标，其 `header.fram
   `local_planner`、`local3d_semantic_voxel_map`、`visibility_graph_msg` 和
   `far_planner`：通过；
 - Livox 线上解码器 3 个 gtest：全部通过；
+- 双层角向清除过滤器 6 个 gtest：全部通过，覆盖连续帧、双层交集、当前障碍、
+  当前语义静态保护、终点余量和历史原坐标保留；当前包测试汇总为 208 项、
+  0 error、0 failure；
 - RViz 实例已成功加载 `rviz/GoalPointTool`；pluginlib 可发现插件，并实测
   建立 `/goal_point` 发布器、`/fusion_localization` 订阅器和 `/joy` 发布器；
 - 合成 semantic terrain 接口测试：flat ground 输出 `(0,0)`，manhole_cover
@@ -632,6 +809,15 @@ TF 可用。如果 PointCloud2 仍在传感器或车体坐标，其 `header.fram
   点；按 FAR/PCL 实际 float32 的 0.12 m leaf 分箱，同 stamp 的 protected 与
   最终 dynamic 删除集合重叠为 0。监视器捕获的 3 次表面重叠均伴随
   0.38～0.40 秒 debug stamp 差，属于订阅丢帧后跨周期比较，未计入结果。
+- 启用 0.5° 双层角向接口后，对 13-47-53 bag 做 5 倍速完整回放：消息宽度
+  稳定为 1440（每层 720），FAR 为实际订阅者；Local3D 最近一个 50 帧统计中
+  双层射线生成平均/最小/最大耗时为 0.861/0.612/1.254 ms，整个回调为
+  18.40/15.10/21.71 ms；
+- 同一完整回放中，FAR 日志记录到 72 次节流后的双层确认清除事件，单次确认
+  1～数百个历史点；采集时刻 `map_start -> map` 变换失败为 0，证明同 stamp
+  terrain/射线配对、坐标变换、历史点删除链路均已实际运行。该统计验证的是
+  数据链路和清除动作；红色多边形的最终视觉拖尾长度仍应在 RViz 中与关闭
+  双层接口的同一时间段 A/B 对照确认。
 
 bag 最开头 14 帧 Livox 扫描的采集时间早于记录中第一个
 `map -> wuba_base` TF，它们无法在不外推位姿的前提下配准，因此被按设计

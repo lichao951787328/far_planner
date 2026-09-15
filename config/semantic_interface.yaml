@@ -52,9 +52,9 @@ Util/new_intensity_thred                : 2.0
 # 名字中的 Z 不代表高度。bridge 严格输出 free=0/obstacle=1，因此 0.5 是安全分界。
 Util/terrain_free_Z                     : 0.5
 # 历史障碍落在当前 scan 可通过射线上的清除证据点数阈值。
-# 源码使用 size > threshold，因此当前值 2 表示至少 3 个证据点才删除旧障碍。
+# 源码使用 size > threshold，因此当前值 0 表示至少 1 个真实 scan 证据点即删除。
 # 调大可减少配准误差造成的误清除，但小型动态障碍移走后清除更慢。
-Util/dyosb_update_thred                 : 2
+Util/dyosb_update_thred                 : 1
 # 判断拓扑节点附近是否有足够“最近环境变化点”的计数阈值。
 # 搜索半径为 robot_dim*2+voxel_dim；值 5 时，创建新节点需至少
 # 4 个变化点，普通已有节点检查需至少 6 个。调大更稳定但更迟钝。
@@ -62,16 +62,38 @@ Util/new_point_counter                  : 3
 # 已判定为“消失”的动态障碍点的抑制保留时间，单位秒。
 # 保留期内会过滤同位置 terrain 障碍，防止旧地图反复加回已移走的障碍。
 # 调大能抑制闪烁，但同一位置真实重新出现障碍时可能被更久忽略。
-Util/dynamic_obs_dacay_time             : 0.8
+Util/dynamic_obs_dacay_time             : 0.3
 # 新增障碍和已清除障碍作为“近期变化点”影响拓扑图的保留时间，单位秒。
 # 调大会让节点重检查/连接重置持续更久；调小更稳定，但可能过早丢失变化证据。
 Util/new_points_decay_time              : 0.8
 
+# 独立消费 Local3D 的双层角向射线；这些记录是带 hit/no-hit 标志的
+# origin->endpoint 线段，只把线段内部作为 free 证据，不作为真实 scan 回波。
+ScanHandler/enable_external_angular_clearing : true
+ScanHandler/external_angular_clearing_topic  : /local_3d_semantic_voxel_map/two_layer_clearing_rays
+# 射线终点前保留的安全距离，hit 端保护真实表面，no-hit 端避免越过 local box。
+ScanHandler/external_clear_endpoint_margin   : 0.20
+# 同一历史 XY voxel 必须在连续的不同采集帧中收到几次双层 free 证据。
+ScanHandler/external_clear_confirmations     : 2
+# 上、下层必须都穿过同一 XY voxel，才允许清理该二维障碍柱。
+ScanHandler/external_clear_require_both_layers: true
+
 Graph/connect_votes_size                : 3
+# 小轮廓按单个 PILLAR 节点处理的闭合周长阈值，单位米。
+# 不再由 robot_dim 推导；闭合周长 <= 1.0 m 时压缩为轮廓质心节点。
+Graph/pillar_perimeter                  : 1.8
+# 当前 contour 与历史 GlobalGraph 节点匹配时允许的最大水平距离，单位米。
+# 该值只限制轮廓关联，不再通过缩小 robot_dim 同时改变机器人碰撞净空。
+# 原算法仍会应用方向一致性约束；0.40 m 用于避免移动障碍的新轮廓持续续接旧节点。
+Graph/contour_match_distance            : 0.50
+# 是否把已确认的动态清除点扩大到 contour_match_distance，并据此禁止旧轮廓
+# 节点重匹配、直接删除 GlobalGraph node。该快捷路径无法识别语义静态轮廓，
+# 动态点靠近墙体外围时可能误删墙体节点，因此默认关闭，优先保留静态轮廓。
+Graph/enable_confirmed_clear_node_removal: false
 # 轮廓节点连续多少次重评失败后才从全局 V-Graph 删除。
-# 源码条件为 clear_dumper_count > threshold，所以值 2 实际需要连续失败 3 次；
-# 在 main_run_freq=5 Hz 时仅这一阶段的理论下限约为 0.6 秒。
-Graph/clear_dumper_thred                : 1
+# 源码条件为 clear_dumper_count > threshold，所以当前值 0 表示首次失配即删除；
+# 在 main_run_freq=5 Hz 时该阶段的理论延迟约为一个更新周期（0.2 秒）。
+Graph/clear_dumper_thred                : 0
 Graph/node_finalize_thred               : 6
 Graph/filter_pool_size                  : 12
 

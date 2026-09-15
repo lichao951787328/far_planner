@@ -64,6 +64,12 @@ local_box_min_z: -2.0
 local_box_max_z: 4.0
 robot_body_exclusion_enabled: false
 
+# FAR consumes the two-layer topic as 0.10 m XY free-space evidence.  The
+# farthest local-box corner is about 11.18 m away, where 0.5 degree rays are
+# separated by about 0.098 m; 5 degree rays would leave nearly 1 m gaps.
+two_layer_angular_resolution_deg: 0.5
+two_layer_octomap_resolution: 0.40
+
 semantic_positive_update: 1.0
 semantic_negative_update: -0.3
 semantic_min_log_evidence: -4.59512

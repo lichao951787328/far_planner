@@ -38,6 +38,8 @@ struct HeightPair
 struct ContourGraphParams {
     ContourGraphParams() = default;
     float kPillarPerimeter;
+    float kContourMatchDist;
+    bool enable_confirmed_clear_node_removal;
 };
 
 class ContourGraph {

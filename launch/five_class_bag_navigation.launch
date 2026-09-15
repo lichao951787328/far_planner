@@ -17,7 +17,7 @@
        workspace as an underlay before mapless_navigation_old; see the notes
        in FAR_Planner_Local3D语义Voxel接口改造方案.md. -->
   <arg name="bag"
-       default="$(env HOME)/social_nav/src/mapless_navigation_old/src/dateset/0914/2026-09-14-13-52-47.bag"/>
+       default="$(env HOME)/social_nav/src/mapless_navigation_old/src/dateset/0914/2026-09-14-13-47-53.bag"/>
   <arg name="start_paused" default="false"/>
   <arg name="rate" default="1.0"/>
   <arg name="bag_delay" default="2.0"/>

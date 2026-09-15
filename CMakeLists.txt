@@ -93,6 +93,7 @@ set(SOURCES ${SOURCES}
   src/scan_handler.cpp
   src/graph_msger.cpp
   src/terrain_planner.cpp
+  src/external_angular_clearing.cpp
 )
 
 ## Declare executables
@@ -135,6 +136,13 @@ if(CATKIN_ENABLE_TESTING)
   if(TARGET test_livox_custom_decoder)
     target_link_libraries(test_livox_custom_decoder
       livox_custom_decoder ${catkin_LIBRARIES})
+  endif()
+  catkin_add_gtest(test_external_angular_clearing
+    test/test_external_angular_clearing.cpp
+    src/external_angular_clearing.cpp)
+  if(TARGET test_external_angular_clearing)
+    target_link_libraries(test_external_angular_clearing
+      ${catkin_LIBRARIES} ${PCL_LIBRARIES})
   endif()
 endif()
 

@@ -38,6 +38,7 @@ Util/new_points_decay_time              : 1.0  # Unit: second
 
 # Dynamic Graph Params
 Graph/connect_votes_size                : 10
+Graph/pillar_perimeter                  : 1.0  # Unit: meter
 Graph/clear_dumper_thred                : 4
 Graph/node_finalize_thred               : 6
 Graph/filter_pool_size                  : 12

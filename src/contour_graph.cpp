@@ -400,6 +400,11 @@ NavNodePtr ContourGraph::NearestNavNodeForCTNode(const CTNodePtr& ctnode_ptr, co
     const float dir_thred = 0.5f; //cos(pi/3);
     for (const auto& node_ptr : near_nodes) {
         if (node_ptr->is_odom || node_ptr->is_navpoint || FARUtil::IsOutsideGoal(node_ptr) || !IsInMatchHeight(ctnode_ptr, node_ptr)) continue;
+        if (ctgraph_params_.enable_confirmed_clear_node_removal &&
+            FARUtil::IsPointNearDynamicClearing(
+                node_ptr->position, ctgraph_params_.kContourMatchDist)) {
+            continue;
+        }
         // no match with pillar to non-pillar local vertices
         if ((node_ptr->free_direct == NodeFreeDirect::PILLAR && ctnode_ptr->free_direct != NodeFreeDirect::PILLAR) ||
             (ctnode_ptr->free_direct == NodeFreeDirect::PILLAR && node_ptr->free_direct != NodeFreeDirect::PILLAR)) 
@@ -417,7 +422,13 @@ NavNodePtr ContourGraph::NearestNavNodeForCTNode(const CTNodePtr& ctnode_ptr, co
         } else if (node_ptr->free_direct == NodeFreeDirect::PILLAR && ctnode_ptr->free_direct == NodeFreeDirect::PILLAR) {
             dir_score = 0.5f;
         }
-        dist_thred *= dir_score;
+        // kMatchDist is also used by collision clearance, terrain association,
+        // and graph coverage.  Keep those robot-size-dependent behaviors
+        // unchanged while independently limiting only current-contour to
+        // historical-node association.  The legacy direction score remains a
+        // stricter bound when applicable (for example, 0.5 for pillars).
+        dist_thred = std::min(dist_thred * dir_score,
+                              ctgraph_params_.kContourMatchDist);
         const float edist = (node_ptr->position - ctnode_ptr->position).norm_flat();
         if (edist < dist_thred && edist < min_edist) {
             nearest_node = node_ptr;
@@ -498,6 +509,10 @@ bool ContourGraph::IsAPillarPolygon(const PointStack& vertex_points, float& peri
         perimeter += dist;
         prev_p = cur_p;
     }
+    // The contour is closed.  Include the last-to-first edge so that the
+    // configured threshold represents the actual polygon perimeter.
+    const Point3D& first_p = vertex_points.front();
+    perimeter += std::hypotf(first_p.x - prev_p.x, first_p.y - prev_p.y);
     return perimeter > ctgraph_params_.kPillarPerimeter ? false : true;
 }
 
@@ -728,5 +743,3 @@ void ContourGraph::ResetCurrentContour() {
     odom_node_ptr_ = NULL;
     is_robot_inside_poly_ = false;
 }   
-
-

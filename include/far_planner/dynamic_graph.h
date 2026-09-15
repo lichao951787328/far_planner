@@ -17,6 +17,8 @@ struct DynamicGraphParams {
     float filter_pos_margin;
     float filter_dirs_margin;
     float frontier_perimeter_thred;
+    float dynamic_clear_dist;
+    bool enable_confirmed_clear_node_removal;
 };
 
 class DynamicGraph {  

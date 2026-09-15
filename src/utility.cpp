@@ -313,6 +313,44 @@ bool FARUtil::IsPointNearNewPoints(const Point3D& p, const bool& is_creation) {
   return (near_c > counter_limit) ? true : false;
 }
 
+bool FARUtil::IsPointNearDynamicClearing(const Point3D& p,
+                                         const float& horizontal_radius) {
+  if (horizontal_radius <= 0.0f || FARUtil::stack_dyobs_cloud_->empty()) {
+    return false;
+  }
+  std::vector<int> point_indices;
+  std::vector<float> point_distances;
+  PCLPoint query;
+  query.x = p.x;
+  query.y = p.y;
+  query.z = 0.0f;
+  if (FARUtil::kdtree_dyobs_cloud_->radiusSearch(
+          query, horizontal_radius, point_indices, point_distances) <= 0) {
+    return false;
+  }
+  for (const int index : point_indices) {
+    if (index >= 0 &&
+        static_cast<std::size_t>(index) < FARUtil::stack_dyobs_cloud_->size() &&
+        std::abs(FARUtil::stack_dyobs_cloud_->points[index].z - p.z) <=
+            FARUtil::kTolerZ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+void FARUtil::UpdateDynamicObstacleKdTree() {
+  FARUtil::flat_dyobs_cloud_->clear();
+  if (FARUtil::stack_dyobs_cloud_->empty()) {
+    FARUtil::ClearKdTree(FARUtil::flat_dyobs_cloud_,
+                         FARUtil::kdtree_dyobs_cloud_);
+    return;
+  }
+  *FARUtil::flat_dyobs_cloud_ = *FARUtil::stack_dyobs_cloud_;
+  for (auto& point : FARUtil::flat_dyobs_cloud_->points) point.z = 0.0f;
+  FARUtil::kdtree_dyobs_cloud_->setInputCloud(FARUtil::flat_dyobs_cloud_);
+}
+
 std::size_t FARUtil::PointInXCounter(const Point3D& p,
                                      const float& radius,
                                      const PointKdTreePtr& KdTree) 

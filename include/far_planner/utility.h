@@ -117,9 +117,11 @@ public:
     static PointCloudPtr cur_scan_cloud_;
     static PointCloudPtr local_terrain_obs_;
     static PointCloudPtr local_terrain_free_;
+    static PointCloudPtr flat_dyobs_cloud_;
     // kdTree cloud
     static PointKdTreePtr kdtree_new_cloud_;
     static PointKdTreePtr kdtree_filter_cloud_;
+    static PointKdTreePtr kdtree_dyobs_cloud_;
 
     /*
     Input: New sensor input cloud and Cached surround cloud
@@ -184,6 +186,9 @@ public:
 
     static bool IsPointNearNewPoints(const Point3D& p, const bool& is_creation=false);
 
+    static bool IsPointNearDynamicClearing(const Point3D& p,
+                                           const float& horizontal_radius);
+
     static bool IsPointVisiableFromNode(const Point3D& p, const NavNodePtr& node_ptr);
 
     static std::size_t PointInXCounter(const Point3D& p,
@@ -218,6 +223,8 @@ public:
                                            const float& voxel_size);
 
     static void UpdateKdTrees(const PointCloudPtr& newObsCloud);
+
+    static void UpdateDynamicObstacleKdTree();
 
     static void ClearKdTree(const PointCloudPtr& cloud_ptr,
                             const PointKdTreePtr& kdTree_ptr);

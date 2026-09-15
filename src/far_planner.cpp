@@ -57,6 +57,17 @@ void FARMaster::Init() {
       nh.advertise<sensor_msgs::PointCloud2>("/FAR_protected_static_debug", 1);
 
   this->LoadROSParams();
+  if (master_params_.enable_external_angular_clearing) {
+    external_angular_clearing_sub_ = nh.subscribe(
+        master_params_.external_angular_clearing_topic, 5,
+        &FARMaster::ExternalAngularClearingCallBack, this);
+  }
+  angular_clear_mask_debug_pub_ =
+      nh.advertise<sensor_msgs::PointCloud2>("/FAR_angular_clear_mask_debug", 1);
+  angular_clear_candidates_debug_pub_ = nh.advertise<sensor_msgs::PointCloud2>(
+      "/FAR_angular_clear_candidates_debug", 1);
+  angular_clear_confirmed_debug_pub_ = nh.advertise<sensor_msgs::PointCloud2>(
+      "/FAR_angular_clear_confirmed_debug", 1);
 
   /*init path generation thred callback*/
   const float duration_time = 0.99f / master_params_.main_run_freq;
@@ -71,6 +82,7 @@ void FARMaster::Init() {
   map_handler_.Init(map_params_);
   scan_handler_.Init(scan_params_);
   graph_msger_.Init(nh, msger_parmas_);
+  external_angular_clearing_filter_.Init(external_angular_clearing_params_);
 
   /* init internal params */
   odom_node_ptr_      = NULL;
@@ -91,17 +103,22 @@ void FARMaster::Init() {
       PointCloudPtr(new pcl::PointCloud<PCLPoint>());
   scan_grid_ptr_        = PointCloudPtr(new pcl::PointCloud<PCLPoint>());
   terrain_height_ptr_   = PointCloudPtr(new pcl::PointCloud<PCLPoint>());
+  angular_clear_mask_ptr_ = PointCloudPtr(new pcl::PointCloud<PCLPoint>());
+  angular_clear_candidates_ptr_ = PointCloudPtr(new pcl::PointCloud<PCLPoint>());
+  angular_clear_confirmed_ptr_ = PointCloudPtr(new pcl::PointCloud<PCLPoint>());
   viewpoint_around_ptr_ = PointCloudPtr(new pcl::PointCloud<PCLPoint>());
   kdtree_viewpoint_obs_cloud_ = PointKdTreePtr(new pcl::KdTreeFLANN<PCLPoint>());
 
   // set kdtree sorted value
   FARUtil::kdtree_new_cloud_->setSortedResults(false);
   FARUtil::kdtree_filter_cloud_->setSortedResults(false);
+  FARUtil::kdtree_dyobs_cloud_->setSortedResults(false);
   kdtree_viewpoint_obs_cloud_->setSortedResults(false);
 
   // init global utility cloud
   FARUtil::stack_new_cloud_->clear();
   FARUtil::stack_dyobs_cloud_->clear();
+  FARUtil::UpdateDynamicObstacleKdTree();
 
   // init TF listener
   tf_listener_ = new tf::TransformListener();
@@ -140,11 +157,17 @@ void FARMaster::ResetEnvironmentAndGraph() {
   FARUtil::surround_free_cloud_->clear();
   FARUtil::stack_new_cloud_->clear();
   FARUtil::stack_dyobs_cloud_->clear();
+  FARUtil::UpdateDynamicObstacleKdTree();
   FARUtil::cur_new_cloud_->clear();
   FARUtil::cur_dyobs_cloud_->clear();
   temp_protected_static_ptr_->clear();
+  angular_clear_mask_ptr_->clear();
+  angular_clear_candidates_ptr_->clear();
+  angular_clear_confirmed_ptr_->clear();
   scan_origin_cache_.clear();
   pending_scan_clouds_.clear();
+  pending_angular_clearing_clouds_.clear();
+  external_angular_clearing_filter_.Reset();
   /* Stop the robot if it is moving */
   goal_waypoint_stamped_.header.stamp = ros::Time::now();
   goal_waypoint_stamped_.point = FARUtil::Point3DToGeoMsgPoint(robot_pos_);
@@ -466,6 +489,12 @@ void FARMaster::LoadROSParams() {
   nh.param<bool>(master_prefix  + "require_scan_origin",   master_params_.require_scan_origin, false);
   nh.param<bool>(master_prefix  + "protect_static_obstacles",
                  master_params_.protect_static_obstacles, false);
+  nh.param<bool>(scan_prefix + "enable_external_angular_clearing",
+                 master_params_.enable_external_angular_clearing, false);
+  nh.param<std::string>(
+      scan_prefix + "external_angular_clearing_topic",
+      master_params_.external_angular_clearing_topic,
+      "/local_3d_semantic_voxel_map/two_layer_clearing_rays");
   nh.param<std::string>(master_prefix + "world_frame",     master_params_.world_frame, "map");
   master_params_.terrain_range = std::min(master_params_.terrain_range, master_params_.sensor_range);
 
@@ -523,7 +552,21 @@ void FARMaster::LoadROSParams() {
   gp_params_.is_autoswitch = master_params_.is_attempt_autoswitch;
 
   // contour graph params
-  cg_params_.kPillarPerimeter = master_params_.robot_dim * 4.0f;
+  nh.param<float>(graph_prefix + "pillar_perimeter",
+                  cg_params_.kPillarPerimeter, 1.0f);
+  if (cg_params_.kPillarPerimeter <= 0.0f) {
+    ROS_WARN("Graph/pillar_perimeter must be positive; using 1.000 m");
+    cg_params_.kPillarPerimeter = 1.0f;
+  }
+  nh.param<float>(graph_prefix + "contour_match_distance",
+                  cg_params_.kContourMatchDist, FARUtil::kMatchDist);
+  if (cg_params_.kContourMatchDist <= 0.0f) {
+    ROS_WARN("Graph/contour_match_distance must be positive; using legacy "
+             "match distance %.3f m", FARUtil::kMatchDist);
+    cg_params_.kContourMatchDist = FARUtil::kMatchDist;
+  }
+  nh.param<bool>(graph_prefix + "enable_confirmed_clear_node_removal",
+                 cg_params_.enable_confirmed_clear_node_removal, false);
 
   // dynamic graph params
   nh.param<int>(graph_prefix    + "connect_votes_size",        graph_params_.votes_size, 10);
@@ -536,6 +579,9 @@ void FARMaster::LoadROSParams() {
   graph_params_.filter_dirs_margin       = FARUtil::kAngleNoise;
   graph_params_.kConnectAngleThred       = FARUtil::kAcceptAlign;
   graph_params_.frontier_perimeter_thred = FARUtil::kMatchDist * 4.0f;
+  graph_params_.dynamic_clear_dist       = cg_params_.kContourMatchDist;
+  graph_params_.enable_confirmed_clear_node_removal =
+      cg_params_.enable_confirmed_clear_node_removal;
 
   // graph messager params
   nh.param<int>(msger_prefix + "robot_id", msger_parmas_.robot_id, 0);
@@ -548,6 +594,22 @@ void FARMaster::LoadROSParams() {
   scan_params_.terrain_range = master_params_.terrain_range;
   scan_params_.voxel_size    = master_params_.voxel_dim;
   scan_params_.ceil_height   = map_params_.floor_height;
+  external_angular_clearing_params_.voxel_size = master_params_.voxel_dim;
+  nh.param<float>(scan_prefix + "external_clear_endpoint_margin",
+                  external_angular_clearing_params_.endpoint_margin, 0.2f);
+  nh.param<int>(scan_prefix + "external_clear_confirmations",
+                external_angular_clearing_params_.confirmations, 2);
+  nh.param<bool>(scan_prefix + "external_clear_require_both_layers",
+                 external_angular_clearing_params_.require_both_layers, true);
+  if (external_angular_clearing_params_.endpoint_margin < 0.0f) {
+    ROS_WARN("ScanHandler/external_clear_endpoint_margin must be non-negative; "
+             "using 0.20 m");
+    external_angular_clearing_params_.endpoint_margin = 0.2f;
+  }
+  if (external_angular_clearing_params_.confirmations <= 0) {
+    ROS_WARN("ScanHandler/external_clear_confirmations must be positive; using 2");
+    external_angular_clearing_params_.confirmations = 2;
+  }
 
   // contour detector params
   nh.param<float>(cdetect_prefix       + "resize_ratio",       cdetect_params_.kRatio, 5.0);
@@ -741,6 +803,7 @@ void FARMaster::ResetInputStamps() {
   last_terrain_stamp_ = ros::Time(0);
   last_terrain_local_stamp_ = ros::Time(0);
   last_scan_stamp_ = ros::Time(0);
+  last_angular_clearing_stamp_ = ros::Time(0);
 }
 
 void FARMaster::ScanCallBack(const sensor_msgs::PointCloud2ConstPtr& scan_pc) {
@@ -805,6 +868,161 @@ void FARMaster::ProcessPendingScans() {
       ++scan;
     }
   }
+}
+
+void FARMaster::ExternalAngularClearingCallBack(
+    const sensor_msgs::PointCloud2ConstPtr& cloud) {
+  if (!master_params_.enable_external_angular_clearing ||
+      cloud->header.stamp.isZero() ||
+      (!last_angular_clearing_stamp_.isZero() &&
+       cloud->header.stamp <= last_angular_clearing_stamp_)) {
+    return;
+  }
+  const bool duplicate = std::any_of(
+      pending_angular_clearing_clouds_.begin(),
+      pending_angular_clearing_clouds_.end(),
+      [&cloud](const sensor_msgs::PointCloud2ConstPtr& queued) {
+        return queued->header.stamp == cloud->header.stamp;
+      });
+  if (!duplicate) {
+    pending_angular_clearing_clouds_.push_back(cloud);
+    while (pending_angular_clearing_clouds_.size() > 10u) {
+      pending_angular_clearing_clouds_.pop_front();
+    }
+  }
+  this->TryApplyExternalAngularClearing();
+}
+
+bool FARMaster::DecodeExternalAngularClearingRays(
+    const sensor_msgs::PointCloud2ConstPtr& cloud,
+    std::vector<ExternalAngularClearingRay>* rays) {
+  const std::vector<std::string> required_fields = {
+      "x", "y", "z", "origin_x", "origin_y", "origin_z",
+      "hit", "layer", "angle_bin"};
+  for (const auto& field : required_fields) {
+    if (!HasPointCloudField(*cloud, field)) {
+      ROS_ERROR_THROTTLE(2.0,
+                         "FARMaster: angular clearing cloud missing field '%s'",
+                         field.c_str());
+      return false;
+    }
+  }
+
+  tf::StampedTransform cloud_to_world;
+  const bool transform_needed = !FARUtil::IsSameFrameID(
+      cloud->header.frame_id, master_params_.world_frame);
+  if (transform_needed) {
+    try {
+      tf_listener_->lookupTransform(master_params_.world_frame,
+                                    cloud->header.frame_id,
+                                    cloud->header.stamp,
+                                    cloud_to_world);
+    } catch (const tf::TransformException& ex) {
+      ROS_WARN_THROTTLE(2.0,
+                        "FARMaster: angular clearing TF unavailable: %s",
+                        ex.what());
+      return false;
+    }
+  }
+
+  rays->clear();
+  rays->reserve(static_cast<std::size_t>(cloud->width) * cloud->height);
+  try {
+    sensor_msgs::PointCloud2ConstIterator<float> x(*cloud, "x");
+    sensor_msgs::PointCloud2ConstIterator<float> y(*cloud, "y");
+    sensor_msgs::PointCloud2ConstIterator<float> z(*cloud, "z");
+    sensor_msgs::PointCloud2ConstIterator<float> origin_x(*cloud, "origin_x");
+    sensor_msgs::PointCloud2ConstIterator<float> origin_y(*cloud, "origin_y");
+    sensor_msgs::PointCloud2ConstIterator<float> origin_z(*cloud, "origin_z");
+    sensor_msgs::PointCloud2ConstIterator<std::uint8_t> hit(*cloud, "hit");
+    sensor_msgs::PointCloud2ConstIterator<std::uint8_t> layer(*cloud, "layer");
+    sensor_msgs::PointCloud2ConstIterator<std::uint16_t> angle_bin(
+        *cloud, "angle_bin");
+    for (; x != x.end(); ++x, ++y, ++z, ++origin_x, ++origin_y, ++origin_z,
+         ++hit, ++layer, ++angle_bin) {
+      if (!std::isfinite(*x) || !std::isfinite(*y) || !std::isfinite(*z) ||
+          !std::isfinite(*origin_x) || !std::isfinite(*origin_y) ||
+          !std::isfinite(*origin_z) || *layer > 1u) {
+        continue;
+      }
+      tf::Vector3 origin(*origin_x, *origin_y, *origin_z);
+      tf::Vector3 endpoint(*x, *y, *z);
+      if (transform_needed) {
+        origin = cloud_to_world * origin;
+        endpoint = cloud_to_world * endpoint;
+      }
+      ExternalAngularClearingRay ray;
+      ray.origin = Point3D(origin.x(), origin.y(), origin.z());
+      ray.endpoint = Point3D(endpoint.x(), endpoint.y(), endpoint.z());
+      ray.endpoint_is_hit = *hit != 0u;
+      ray.layer = *layer;
+      ray.angle_bin = *angle_bin;
+      rays->push_back(ray);
+    }
+  } catch (const std::runtime_error& ex) {
+    ROS_ERROR_THROTTLE(2.0,
+                       "FARMaster: invalid angular clearing cloud: %s",
+                       ex.what());
+    rays->clear();
+    return false;
+  }
+  return true;
+}
+
+bool FARMaster::TryApplyExternalAngularClearing() {
+  if (!master_params_.enable_external_angular_clearing ||
+      last_terrain_stamp_.isZero()) {
+    return false;
+  }
+  while (!pending_angular_clearing_clouds_.empty() &&
+         pending_angular_clearing_clouds_.front()->header.stamp <
+             last_terrain_stamp_) {
+    pending_angular_clearing_clouds_.pop_front();
+  }
+  auto match = std::find_if(
+      pending_angular_clearing_clouds_.begin(),
+      pending_angular_clearing_clouds_.end(),
+      [this](const sensor_msgs::PointCloud2ConstPtr& cloud) {
+        return cloud->header.stamp == last_terrain_stamp_;
+      });
+  if (match == pending_angular_clearing_clouds_.end()) return false;
+
+  std::vector<ExternalAngularClearingRay> rays;
+  if (!this->DecodeExternalAngularClearingRays(*match, &rays)) return false;
+  external_angular_clearing_filter_.Filter(
+      rays, FARUtil::surround_obs_cloud_, temp_obs_ptr_,
+      temp_protected_static_ptr_, angular_clear_candidates_ptr_,
+      angular_clear_confirmed_ptr_, angular_clear_mask_ptr_);
+
+  planner_viz_.VizPointCloud(angular_clear_mask_debug_pub_,
+                             angular_clear_mask_ptr_);
+  planner_viz_.VizPointCloud(angular_clear_candidates_debug_pub_,
+                             angular_clear_candidates_ptr_);
+  planner_viz_.VizPointCloud(angular_clear_confirmed_debug_pub_,
+                             angular_clear_confirmed_ptr_);
+
+  if (!angular_clear_confirmed_ptr_->empty()) {
+    map_handler_.RemoveObsCloudFromGrid(angular_clear_confirmed_ptr_);
+    FARUtil::RemoveOverlapCloud(FARUtil::surround_obs_cloud_,
+                                angular_clear_confirmed_ptr_, true);
+
+    PointCloudPtr confirmed_copy(new PointCloud(*angular_clear_confirmed_ptr_));
+    *FARUtil::cur_dyobs_cloud_ += *confirmed_copy;
+    FARUtil::FilterCloud(FARUtil::cur_dyobs_cloud_, master_params_.voxel_dim);
+    FARUtil::StackCloudByTime(confirmed_copy, FARUtil::stack_dyobs_cloud_,
+                              FARUtil::kObsDecayTime);
+    PointCloudPtr new_copy(new PointCloud(*angular_clear_confirmed_ptr_));
+    FARUtil::StackCloudByTime(new_copy, FARUtil::stack_new_cloud_,
+                              FARUtil::kNewDecayTime);
+    FARUtil::UpdateKdTrees(FARUtil::stack_new_cloud_);
+    ROS_INFO_THROTTLE(1.0,
+                      "FARMaster: angular clearing confirmed %zu historical points",
+                      angular_clear_confirmed_ptr_->size());
+  }
+
+  last_angular_clearing_stamp_ = (*match)->header.stamp;
+  pending_angular_clearing_clouds_.erase(match);
+  return true;
 }
 
 void FARMaster::ScanOriginCallBack(
@@ -875,6 +1093,7 @@ void FARMaster::TerrainCallBack(const sensor_msgs::PointCloud2ConstPtr& pc) {
   map_handler_.GetSurroundObsCloud(FARUtil::surround_obs_cloud_);
   // extract dynamic obstacles
   FARUtil::cur_dyobs_cloud_->clear();
+  PointCloudPtr confirmed_scan_clearing(new PointCloud());
   if (!master_params_.is_static_env && !is_stop_update_) {
     this->ExtractDynamicObsFromScan(FARUtil::cur_scan_cloud_, 
                                     FARUtil::surround_obs_cloud_, 
@@ -898,9 +1117,15 @@ void FARMaster::TerrainCallBack(const sensor_msgs::PointCloud2ConstPtr& pc) {
       // update new cloud
       *FARUtil::cur_new_cloud_ += *FARUtil::cur_dyobs_cloud_;
       FARUtil::FilterCloud(FARUtil::cur_new_cloud_, master_params_.voxel_dim);
+      *confirmed_scan_clearing = *FARUtil::cur_dyobs_cloud_;
     }
-    // update world dynamic obstacles
-    FARUtil::StackCloudByTime(FARUtil::cur_dyobs_cloud_, FARUtil::stack_dyobs_cloud_, FARUtil::kObsDecayTime);
+    // Only points which actually passed the raw-scan evidence threshold may
+    // suppress reinsertion and invalidate historical graph geometry.
+    FARUtil::StackCloudByTime(confirmed_scan_clearing,
+                              FARUtil::stack_dyobs_cloud_,
+                              FARUtil::kObsDecayTime);
+    this->TryApplyExternalAngularClearing();
+    FARUtil::UpdateDynamicObstacleKdTree();
   }
   
   // create and update kdtrees
@@ -966,8 +1191,10 @@ PointCloudPtr  FARUtil::stack_dyobs_cloud_   = PointCloudPtr(new pcl::PointCloud
 PointCloudPtr  FARUtil::cur_scan_cloud_      = PointCloudPtr(new pcl::PointCloud<PCLPoint>());
 PointCloudPtr  FARUtil::local_terrain_obs_   = PointCloudPtr(new pcl::PointCloud<PCLPoint>());
 PointCloudPtr  FARUtil::local_terrain_free_  = PointCloudPtr(new pcl::PointCloud<PCLPoint>());
+PointCloudPtr  FARUtil::flat_dyobs_cloud_    = PointCloudPtr(new pcl::PointCloud<PCLPoint>());
 PointKdTreePtr FARUtil::kdtree_new_cloud_    = PointKdTreePtr(new pcl::KdTreeFLANN<PCLPoint>());
 PointKdTreePtr FARUtil::kdtree_filter_cloud_ = PointKdTreePtr(new pcl::KdTreeFLANN<PCLPoint>());
+PointKdTreePtr FARUtil::kdtree_dyobs_cloud_  = PointKdTreePtr(new pcl::KdTreeFLANN<PCLPoint>());
 /* init static utility values */
 const float FARUtil::kEpsilon = 1e-7;
 const float FARUtil::kINF     = std::numeric_limits<float>::max();

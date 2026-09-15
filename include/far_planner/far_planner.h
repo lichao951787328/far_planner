@@ -12,6 +12,7 @@
 #include "planner_visualizer.h"
 #include "scan_handler.h"
 #include "graph_msger.h"
+#include "external_angular_clearing.h"
 
 
 struct FARMasterParams {
@@ -33,6 +34,8 @@ struct FARMasterParams {
     bool  is_attempt_autoswitch;
     bool  require_scan_origin;
     bool  protect_static_obstacles;
+    bool  enable_external_angular_clearing;
+    std::string external_angular_clearing_topic;
     std::string world_frame;
 };
 
@@ -49,11 +52,15 @@ private:
     ros::Subscriber reset_graph_sub_, joy_command_sub_, update_command_sub_;
     ros::Subscriber odom_sub_, terrain_sub_, terrain_local_sub_, scan_sub_;
     ros::Subscriber scan_origin_sub_, waypoint_sub_;
+    ros::Subscriber external_angular_clearing_sub_;
     ros::Subscriber read_command_sub_, save_command_sub_; // only use for terminal formatting
     ros::Publisher  goal_pub_, boundary_pub_;
     ros::Publisher  dynamic_obs_pub_, surround_free_debug_, surround_obs_debug_;
     ros::Publisher  scan_grid_debug_, new_PCL_pub_, terrain_height_pub_;
     ros::Publisher  protected_static_debug_pub_;
+    ros::Publisher  angular_clear_mask_debug_pub_;
+    ros::Publisher  angular_clear_candidates_debug_pub_;
+    ros::Publisher  angular_clear_confirmed_debug_pub_;
     ros::Publisher  runtime_pub_, planning_time_pub_, traverse_time_pub_, reach_goal_pub_;
 
     ros::Timer planning_event_;
@@ -74,6 +81,9 @@ private:
     PointCloudPtr temp_protected_static_ptr_;
     PointCloudPtr scan_grid_ptr_;
     PointCloudPtr terrain_height_ptr_;
+    PointCloudPtr angular_clear_mask_ptr_;
+    PointCloudPtr angular_clear_candidates_ptr_;
+    PointCloudPtr angular_clear_confirmed_ptr_;
 
     /* veiwpoint extension clouds */
     PointCloudPtr  viewpoint_around_ptr_;
@@ -100,6 +110,7 @@ private:
     MapHandler map_handler_;
     ScanHandler scan_handler_;
     GraphMsger graph_msger_;
+    ExternalAngularClearingFilter external_angular_clearing_filter_;
 
     /* ROS Params */
     FARMasterParams     master_params_;
@@ -110,6 +121,7 @@ private:
     MapHandlerParams    map_params_;
     ScanHandlerParams   scan_params_;
     GraphMsgerParams    msger_parmas_;
+    ExternalAngularClearingParams external_angular_clearing_params_;
     
     void LoadROSParams();
 
@@ -146,6 +158,8 @@ private:
     ros::Time last_scan_stamp_;
     std::deque<geometry_msgs::PointStamped> scan_origin_cache_;
     std::deque<sensor_msgs::PointCloud2ConstPtr> pending_scan_clouds_;
+    std::deque<sensor_msgs::PointCloud2ConstPtr> pending_angular_clearing_clouds_;
+    ros::Time last_angular_clearing_stamp_;
 
     Point3D ExtendViewpointOnObsCloud(const NavNodePtr& nav_node_ptr, const PointCloudPtr& obsCloudIn, float& free_dist);
 
@@ -208,6 +222,12 @@ private:
                                const Point3D& scan_origin);
     bool FindScanOrigin(const ros::Time& stamp, Point3D* scan_origin) const;
     void ProcessPendingScans();
+    void ExternalAngularClearingCallBack(
+        const sensor_msgs::PointCloud2ConstPtr& cloud);
+    bool TryApplyExternalAngularClearing();
+    bool DecodeExternalAngularClearingRays(
+        const sensor_msgs::PointCloud2ConstPtr& cloud,
+        std::vector<ExternalAngularClearingRay>* rays);
     void WaypointCallBack(const geometry_msgs::PointStamped& route_goal);
 
     void ExtractDynamicObsFromScan(const PointCloudPtr& scanCloudIn, 
